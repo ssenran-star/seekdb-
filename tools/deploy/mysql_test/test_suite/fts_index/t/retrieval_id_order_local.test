@@ -1,0 +1,57 @@
+# Binary retrieval-ID comparisons must preserve rankings, LIMIT and rescans.
+# Increasing document lengths avoid tied scores in the implicit LIMIT checks.
+--disable_query_log
+SET NAMES utf8mb4;
+SET ob_query_timeout=100000000000;
+SET ob_trx_timeout=100000000000;
+--disable_warnings
+DROP DATABASE IF EXISTS fts_id_order_local;
+--enable_warnings
+CREATE DATABASE fts_id_order_local;
+USE fts_id_order_local;
+CREATE TABLE digits(n INT PRIMARY KEY);
+INSERT INTO digits VALUES (0),(1),(2),(3),(4),(5),(6),(7),(8),(9);
+CREATE TABLE docs(id VARBINARY(8) PRIMARY KEY,k INT,body TEXT) CHARSET=utf8mb4;
+INSERT INTO docs
+SELECT CONCAT(X'00',UNHEX(LPAD(HEX(a.n+10*b.n+100*c.n),4,'0'))),
+ a.n+10*b.n+100*c.n,
+ CONCAT('alpha beta gamma ',
+ REPEAT('filler ',3*(a.n+10*b.n+100*c.n)),
+ CASE WHEN MOD(a.n+10*b.n+100*c.n,3)=1 THEN ' delta' ELSE '' END,
+ CASE WHEN MOD(a.n+10*b.n+100*c.n,5)=0 THEN ' 中文' ELSE '' END)
+FROM digits a,digits b,digits c WHERE a.n+10*b.n+100*c.n<512
+ORDER BY a.n+10*b.n+100*c.n;
+ALTER TABLE docs ADD FULLTEXT INDEX f_body(body) WITH PARSER space PARSER_PROPERTIES=(min_token_size=1);
+--echo # Empty and full matches
+SELECT COUNT(*) AS all_hits FROM docs WHERE MATCH(body) AGAINST('alpha gamma');
+SELECT COUNT(*) AS no_hits FROM docs WHERE MATCH(body) AGAINST('zzzzmissing');
+SELECT COUNT(*) AS zero_limit FROM (SELECT id FROM docs WHERE MATCH(body) AGAINST('alpha gamma') LIMIT 0) x;
+--echo # Implicit relevance order, binary keys and LIMIT boundaries
+SELECT k,HEX(id) AS binary_key FROM docs WHERE MATCH(body) AGAINST('alpha gamma') LIMIT 1;
+SELECT k,HEX(id) AS binary_key FROM docs WHERE MATCH(body) AGAINST('alpha gamma') LIMIT 5;
+SELECT k,HEX(id) AS binary_key FROM docs WHERE MATCH(body) AGAINST('alpha gamma') LIMIT 20;
+SELECT k,HEX(id) AS binary_key FROM docs WHERE MATCH(body) AGAINST('alpha gamma') LIMIT 5 OFFSET 17;
+SELECT COUNT(*) AS limited_count FROM (SELECT id FROM docs WHERE MATCH(body) AGAINST('alpha gamma') LIMIT 20) x;
+--echo # Explicit rank and secondary ordering, threshold and boolean mode
+SELECT k FROM docs WHERE MATCH(body) AGAINST('alpha gamma')
+ ORDER BY MATCH(body) AGAINST('alpha gamma') DESC,k LIMIT 12;
+SELECT COUNT(*) AS high_threshold FROM docs
+ WHERE MATCH(body) AGAINST('alpha gamma')>1000000 AND MOD(k,7)=0;
+SELECT k FROM docs WHERE MATCH(body) AGAINST('+alpha -delta' IN BOOLEAN MODE) ORDER BY k LIMIT 10;
+SELECT k FROM docs WHERE MATCH(body) AGAINST('中文 gamma') LIMIT 5;
+--echo # Prepared execution reuses a scan with different query tokens
+PREPARE ps FROM 'SELECT k FROM docs WHERE MATCH(body) AGAINST(?) LIMIT 5';
+SET @q='alpha gamma'; EXECUTE ps USING @q;
+SET @q='beta delta'; EXECUTE ps USING @q;
+SET @q='zzzzmissing'; EXECUTE ps USING @q;
+DEALLOCATE PREPARE ps;
+--echo # The same ordering after changes to postings
+UPDATE docs SET body=CONCAT('alpha gamma gamma gamma ',REPEAT('filler ',3*k)) WHERE MOD(k,97)=0;
+DELETE FROM docs WHERE k IN (1,255,511);
+INSERT INTO docs VALUES (X'0000FF00',700,'alpha gamma gamma gamma filler filler'),(X'0000FF0000',701,'beta delta');
+SELECT k,HEX(id) AS binary_key FROM docs WHERE MATCH(body) AGAINST('alpha gamma') LIMIT 12;
+SELECT k FROM docs WHERE MATCH(body) AGAINST('alpha gamma')
+ ORDER BY MATCH(body) AGAINST('alpha gamma') DESC,k LIMIT 12;
+SELECT COUNT(*) AS updated_hits FROM docs WHERE MATCH(body) AGAINST('alpha');
+DROP DATABASE fts_id_order_local;
+USE oceanbase;

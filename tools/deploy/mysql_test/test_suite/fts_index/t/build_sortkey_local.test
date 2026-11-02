@@ -1,0 +1,96 @@
+# Offline FTS build must preserve collation, document IDs and later DML.
+# Run directly with mysqltest against a local seekdb instance.
+--disable_query_log
+SET NAMES utf8mb4;
+SET ob_query_timeout = 100000000000;
+SET ob_trx_timeout = 100000000000;
+--disable_warnings
+DROP DATABASE IF EXISTS fts_build_sortkey_local;
+--enable_warnings
+CREATE DATABASE fts_build_sortkey_local;
+USE fts_build_sortkey_local;
+CREATE TABLE docs (
+  tenant_id INT NOT NULL,
+  seq VARBINARY(8) NOT NULL,
+  title VARCHAR(255),
+  body TEXT,
+  PRIMARY KEY (tenant_id, seq)
+) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+INSERT INTO docs VALUES
+ (1, X'0000', 'Alpha café', 'alpha ALPHA 中文 数据库'),
+ (1, X'0001', 'ALPHA CAFÉ', 'beta 数据库 数据库'),
+ (1, X'0020', 'beta', '中文 oceanbase'),
+ (1, X'00FF', 'trailing   ', 'alpha 中文   '),
+ (2, X'0000', 'emoji 😀', 'beta 😀 中文'),
+ (2, X'0001', '', ''),
+ (2, X'000000', NULL, NULL),
+ (2, X'2000', 'prefix', CONCAT('alpha ', REPEAT('x', 84))),
+ (3, X'FFFFFFFF', 'duplicate alpha', 'alpha alpha beta beta');
+ALTER TABLE docs ADD FULLTEXT INDEX f_all(title, body) WITH PARSER space PARSER_PROPERTIES=(min_token_size=1);
+ALTER TABLE docs ADD FULLTEXT INDEX f_body(body) WITH PARSER space PARSER_PROPERTIES=(min_token_size=1);
+--echo # Offline multi-column and single-column indexes
+SELECT tenant_id, HEX(seq) AS doc FROM docs
+ WHERE MATCH(title, body) AGAINST('alpha') ORDER BY tenant_id, seq;
+SELECT tenant_id, HEX(seq) AS doc FROM docs
+ WHERE MATCH(title, body) AGAINST('CAFÉ') ORDER BY tenant_id, seq;
+SELECT tenant_id, HEX(seq) AS doc FROM docs
+ WHERE MATCH(body) AGAINST('中文') ORDER BY tenant_id, seq;
+SELECT tenant_id, HEX(seq) AS doc FROM docs
+ WHERE MATCH(body) AGAINST('数据库') ORDER BY tenant_id, seq;
+SELECT COUNT(*) AS null_or_empty FROM docs WHERE body IS NULL OR body = '';
+--echo # DML after bulk build, including a binary primary-key change
+UPDATE docs SET body='omega 新词' WHERE tenant_id=1 AND seq=X'0000';
+UPDATE docs SET seq=X'00000001' WHERE tenant_id=1 AND seq=X'0001';
+DELETE FROM docs WHERE tenant_id=1 AND seq=X'00FF';
+INSERT INTO docs VALUES (4, X'0000', 'new alpha', 'alpha omega 中文');
+SELECT tenant_id, HEX(seq) AS doc FROM docs
+ WHERE MATCH(body) AGAINST('alpha') ORDER BY tenant_id, seq;
+SELECT tenant_id, HEX(seq) AS doc FROM docs
+ WHERE MATCH(body) AGAINST('omega') ORDER BY tenant_id, seq;
+SELECT tenant_id, HEX(seq) AS doc FROM docs
+ WHERE MATCH(body) AGAINST('数据库') ORDER BY tenant_id, seq;
+--echo # Rebuilding the second index must preserve its postings
+ALTER TABLE docs DROP INDEX f_body;
+ALTER TABLE docs ADD FULLTEXT INDEX f_body(body) WITH PARSER space PARSER_PROPERTIES=(min_token_size=1);
+SELECT tenant_id, HEX(seq) AS doc FROM docs
+ WHERE MATCH(body) AGAINST('omega 中文') ORDER BY tenant_id, seq;
+--echo # Unsupported encoder collation uses the original comparison path
+CREATE TABLE unicode_docs (id INT PRIMARY KEY, body TEXT)
+ DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+INSERT INTO unicode_docs VALUES (1, 'café 中文'), (2, 'CAFE 中文'), (3, NULL), (4, 'beta');
+ALTER TABLE unicode_docs ADD FULLTEXT INDEX f_unicode(body) WITH PARSER space PARSER_PROPERTIES=(min_token_size=1);
+SELECT id FROM unicode_docs WHERE MATCH(body) AGAINST('cafe') ORDER BY id;
+UPDATE unicode_docs SET body='omega' WHERE id=1;
+SELECT id FROM unicode_docs WHERE MATCH(body) AGAINST('中文') ORDER BY id;
+--echo # Signed primary keys retain their ordering and postings
+CREATE TABLE numeric_docs (id BIGINT PRIMARY KEY, body VARCHAR(100))
+ DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+INSERT INTO numeric_docs VALUES
+ (-9223372036854775808, 'alpha 中文'), (-1, 'beta'), (0, 'alpha'),
+ (1, 'alpha 中文'), (9223372036854775807, 'alpha');
+ALTER TABLE numeric_docs ADD FULLTEXT INDEX f_numeric(body)
+ WITH PARSER space PARSER_PROPERTIES=(min_token_size=1);
+SELECT id FROM numeric_docs WHERE MATCH(body) AGAINST('alpha') ORDER BY id;
+SELECT id FROM numeric_docs WHERE MATCH(body) AGAINST('中文') ORDER BY id;
+--echo # Heap-table numeric document IDs use the same build and DML semantics
+CREATE TABLE heap_docs (tag INT, body TEXT)
+ DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+INSERT INTO heap_docs VALUES (1, 'alpha 中文'), (2, 'beta'), (3, 'alpha'), (4, NULL);
+ALTER TABLE heap_docs ADD FULLTEXT INDEX f_heap(body)
+ WITH PARSER space PARSER_PROPERTIES=(min_token_size=1);
+# This version's MATCH resolver requires the absent doc-to-rowkey mapping for
+# heap tables. Check word statistics in both auxiliary tables; the numeric hidden
+# primary key is not exposed through SQL on the source table.
+SET OB_ENABLE_INDEX_DIRECT_SELECT = ON;
+let $heap_tid = query_get_value(SELECT table_id FROM oceanbase.__all_table WHERE table_name='heap_docs' AND database_id=(SELECT database_id FROM oceanbase.__all_database WHERE database_name='fts_build_sortkey_local'), table_id, 1);
+let $heap_inverted = query_get_value(SELECT table_name FROM oceanbase.__all_table WHERE data_table_id=$heap_tid AND index_type=13, table_name, 1);
+let $heap_doc_word = query_get_value(SELECT table_name FROM oceanbase.__all_table WHERE data_table_id=$heap_tid AND index_type=14, table_name, 1);
+let $heap_word = query_get_value(SELECT column_name FROM oceanbase.__all_column WHERE table_id=$heap_tid AND column_name LIKE '__word_segment_%', column_name, 1);
+let $heap_count = query_get_value(SELECT column_name FROM oceanbase.__all_column WHERE table_id=$heap_tid AND column_name LIKE '__word_count_%', column_name, 1);
+let $heap_length = query_get_value(SELECT column_name FROM oceanbase.__all_column WHERE table_id=$heap_tid AND column_name LIKE '__doc_length_%', column_name, 1);
+eval SELECT a.`$heap_word` AS term, COUNT(*) AS docs, SUM(a.`$heap_count`) AS frequency, SUM(a.`$heap_length`) AS doc_length FROM `$heap_inverted` a GROUP BY term ORDER BY term;
+UPDATE heap_docs SET body='omega' WHERE tag=1;
+eval SELECT a.`$heap_word` AS term, COUNT(*) AS docs, SUM(a.`$heap_count`) AS frequency, SUM(a.`$heap_length`) AS doc_length FROM `$heap_doc_word` a GROUP BY term ORDER BY term;
+SET OB_ENABLE_INDEX_DIRECT_SELECT = OFF;
+DROP DATABASE fts_build_sortkey_local;
+USE oceanbase;

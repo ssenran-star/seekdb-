@@ -30,6 +30,55 @@ ObSRMergeCmp::ObSRMergeCmp()
 {
 }
 
+// Document ids are stored with the BINARY collation (CS_TYPE_BINARY), whose
+// comparison semantics are plain byte comparison. Using the generic datum
+// comparison function for them costs a charset dispatch per comparison on the
+// hot merge path, so use a direct memcmp based comparator instead.
+static int fast_binary_datum_cmp(const ObDatum &lhs,
+                                 const ObDatum &rhs,
+                                 int &cmp_ret,
+                                 const ObDatumAccessContext *access_ctx)
+{
+  UNUSED(access_ctx);
+  if (lhs.is_null() || rhs.is_null()) {
+    cmp_ret = lhs.is_null() ? (rhs.is_null() ? 0 : -1) : 1;
+  } else {
+    const int64_t min_len = MIN(lhs.len_, rhs.len_);
+    int cmp = 0;
+    if (min_len > 0) {
+      cmp = MEMCMP(lhs.ptr_, rhs.ptr_, min_len);
+    }
+    if (cmp != 0) {
+      cmp_ret = cmp > 0 ? 1 : -1;
+    } else {
+      cmp_ret = lhs.len_ == rhs.len_ ? 0 : (lhs.len_ > rhs.len_ ? 1 : -1);
+    }
+  }
+  return OB_SUCCESS;
+}
+
+// Same ordering as fast_binary_datum_cmp, but inlined: the union fast path does
+// this comparison for every dimension of every emitted document, so a call
+// through the datum comparator pointer (plus the ObSRMergeItem indirection used
+// by the generic merge) would dominate the loop.
+static OB_INLINE int fast_binary_datum_cmp_inline(const ObDatum &lhs, const ObDatum &rhs)
+{
+  int cmp_ret = 0;
+  if (OB_UNLIKELY(lhs.is_null() || rhs.is_null())) {
+    cmp_ret = lhs.is_null() ? (rhs.is_null() ? 0 : -1) : 1;
+  } else if (OB_LIKELY(lhs.len_ == rhs.len_)) {
+    // Document ids of one tablet share the same fixed length, so the common case
+    // needs no length tie-break.
+    cmp_ret = 0 == lhs.len_ ? 0 : MEMCMP(lhs.ptr_, rhs.ptr_, lhs.len_);
+    cmp_ret = cmp_ret > 0 ? 1 : cmp_ret;
+  } else {
+    const int64_t min_len = MIN(lhs.len_, rhs.len_);
+    const int cmp = min_len > 0 ? MEMCMP(lhs.ptr_, rhs.ptr_, min_len) : 0;
+    cmp_ret = cmp != 0 ? (cmp > 0 ? 1 : -1) : (lhs.len_ > rhs.len_ ? 1 : -1);
+  }
+  return cmp_ret;
+}
+
 int ObSRMergeCmp::init(
     sql::ObDatumMeta id_meta,
     const ObFixedArray<const ObDatum *, ObIAllocator> *iter_ids)
@@ -39,8 +88,13 @@ int ObSRMergeCmp::init(
     ret = OB_ERR_UNEXPECTED;
   } else {
     iter_ids_ = iter_ids;
-    common::ObDatumBasicFuncs *basic_funcs = ObDatumFuncs::get_basic_func(id_meta.type_, id_meta.cs_type_);
-    cmp_func_ = basic_funcs->null_first_cmp_;
+    if (common::CS_TYPE_BINARY == id_meta.cs_type_
+        && ob_is_string_type(id_meta.type_)) {
+      cmp_func_ = fast_binary_datum_cmp;
+    } else {
+      common::ObDatumBasicFuncs *basic_funcs = ObDatumFuncs::get_basic_func(id_meta.type_, id_meta.cs_type_);
+      cmp_func_ = nullptr == basic_funcs ? nullptr : basic_funcs->null_first_cmp_;
+    }
     if (OB_ISNULL(cmp_func_)) {
       ret = OB_ERR_UNEXPECTED;
     } else {
@@ -82,6 +136,9 @@ ObSRDaaTIterImpl::ObSRDaaTIterImpl()
     buffered_relevances_(),
     next_round_iter_idxes_(),
     next_round_cnt_(0),
+    union_fast_inited_(false),
+    union_dim_ended_(nullptr),
+    union_dim_advance_(nullptr),
     set_datum_func_(nullptr)
 {
 }
@@ -156,6 +213,9 @@ void ObSRDaaTIterImpl::reset()
   buffered_relevances_.reset();
   next_round_iter_idxes_.reset();
   next_round_cnt_ = 0;
+  union_fast_inited_ = false;
+  union_dim_ended_ = nullptr;
+  union_dim_advance_ = nullptr;
   input_row_cnt_ = 0;
   output_row_cnt_ = 0;
   is_inited_ = false;
@@ -176,6 +236,9 @@ void ObSRDaaTIterImpl::reuse(const bool switch_tablet)
   if (OB_NOT_NULL(relevance_collector_)) {
     relevance_collector_->reuse();
   }
+  union_fast_inited_ = false;
+  union_dim_ended_ = nullptr;
+  union_dim_advance_ = nullptr;
   input_row_cnt_ = 0;
   output_row_cnt_ = 0;
 }
@@ -232,9 +295,14 @@ int ObSRDaaTIterImpl::get_next_rows(const int64_t capacity, int64_t &count)
   } else {
     count = 0;
     const int64_t real_capacity = MIN(capacity, iter_param_->max_batch_size_);
-    while (OB_SUCC(ret) && count < real_capacity) {
-      if (OB_FAIL(do_one_merge_round(count))) {
-        if (OB_UNLIKELY(OB_ITER_END != ret)) {
+    if (can_use_union_fast_path()) {
+      if (OB_FAIL(get_next_rows_of_union(real_capacity, count))) {
+      }
+    } else {
+      while (OB_SUCC(ret) && count < real_capacity) {
+        if (OB_FAIL(do_one_merge_round(count))) {
+          if (OB_UNLIKELY(OB_ITER_END != ret)) {
+          }
         }
       }
     }
@@ -251,6 +319,112 @@ int ObSRDaaTIterImpl::get_next_rows(const int64_t capacity, int64_t &count)
 int ObSRDaaTIterImpl::pre_process()
 {
   return OB_NOT_IMPLEMENT;
+}
+
+bool ObSRDaaTIterImpl::can_use_union_fast_path() const
+{
+  // Only the "pure match" mode qualifies: the scan does not need relevance,
+  // a filter, block-max pruning or a limit, so the merge can be reduced to a
+  // k-way union of the sorted doc-id streams.
+  return nullptr != iter_param_
+      && nullptr != dim_iters_
+      && dim_iters_->count() > 0
+      && nullptr == iter_param_->relevance_expr_
+      && nullptr == iter_param_->relevance_proj_expr_
+      && nullptr == iter_param_->filter_expr_
+      && !iter_param_->need_pushdown_topk()
+      && nullptr != iter_param_->id_proj_expr_
+      && nullptr != iter_param_->limit_param_
+      && !iter_param_->limit_param_->is_valid();
+}
+
+int ObSRDaaTIterImpl::advance_dim_iter(const int64_t dim_idx)
+{
+  int ret = OB_SUCCESS;
+  ObISRDaaTDimIter *dim_iter = nullptr;
+  if (OB_UNLIKELY(dim_idx < 0 || dim_idx >= dim_iters_->count())) {
+    ret = OB_INVALID_ARGUMENT;
+  } else if (OB_ISNULL(dim_iter = dim_iters_->at(dim_idx))) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_FAIL(dim_iter->get_next_row())) {
+    if (OB_ITER_END == ret) {
+      ret = OB_SUCCESS;
+      union_dim_ended_[dim_idx] = true;
+    }
+  } else if (OB_FAIL(dim_iter->get_curr_id(iter_domain_ids_[dim_idx]))) {
+  }
+  return ret;
+}
+
+int ObSRDaaTIterImpl::get_next_rows_of_union(const int64_t capacity, int64_t &count)
+{
+  int ret = OB_SUCCESS;
+  count = 0;
+  const int64_t dim_cnt = dim_iters_->count();
+  if (OB_UNLIKELY(dim_cnt <= 0) || OB_ISNULL(iter_allocator_)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (!union_fast_inited_) {
+    if (OB_ISNULL(union_dim_ended_ = static_cast<bool *>(
+                      iter_allocator_->alloc(sizeof(bool) * dim_cnt * 2)))) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else {
+      union_dim_advance_ = union_dim_ended_ + dim_cnt;
+      for (int64_t i = 0; i < dim_cnt; ++i) {
+        union_dim_ended_[i] = false;
+        union_dim_advance_[i] = false;
+      }
+      for (int64_t i = 0; OB_SUCC(ret) && i < dim_cnt; ++i) {
+        if (OB_FAIL(advance_dim_iter(i))) {
+        }
+      }
+      if (OB_SUCC(ret)) {
+        union_fast_inited_ = true;
+      }
+    }
+  }
+  while (OB_SUCC(ret) && count < capacity) {
+    // Pick the smallest current document id among the non-exhausted dimensions.
+    // The comparison is inlined and dereferences the cached per-dimension datum
+    // pointers directly: going through the generic merge item / datum comparator
+    // here would cost a call per dimension per emitted document.
+    int64_t min_idx = -1;
+    const ObDatum *min_id = nullptr;
+    for (int64_t i = 0; i < dim_cnt; ++i) {
+      if (union_dim_ended_[i]) {
+        continue;
+      }
+      const ObDatum *cur_id = iter_domain_ids_[i];
+      if (OB_ISNULL(cur_id)) {
+        ret = OB_ERR_UNEXPECTED;
+        break;
+      } else if (-1 == min_idx) {
+        min_idx = i;
+        min_id = cur_id;
+      } else if (fast_binary_datum_cmp_inline(*cur_id, *min_id) < 0) {
+        min_idx = i;
+        min_id = cur_id;
+      }
+    }
+    if (OB_FAIL(ret)) {
+    } else if (-1 == min_idx) {
+      ret = OB_ITER_END;
+    } else if (OB_FAIL(buffered_domain_ids_[count].from_datum(*min_id))) {
+    } else {
+      ++count;
+      ++output_row_cnt_;
+      // Every dimension sitting on the same document id advances together. The
+      // minimum dimension is advanced last because min_id points into its datum.
+      for (int64_t i = 0; OB_SUCC(ret) && i < dim_cnt; ++i) {
+        if (i != min_idx && !union_dim_ended_[i]
+            && 0 == fast_binary_datum_cmp_inline(*iter_domain_ids_[i], *min_id)
+            && OB_FAIL(advance_dim_iter(i))) {
+        }
+      }
+      if (OB_SUCC(ret) && OB_FAIL(advance_dim_iter(min_idx))) {
+      }
+    }
+  }
+  return ret;
 }
 
 int ObSRDaaTIterImpl::do_one_merge_round(int64_t &count)

@@ -31,6 +31,20 @@ namespace oceanbase
 {
 namespace storage
 {
+// The DAT word map is built and probed by the same process, and word equality
+// is a plain byte comparison (see ObFTSingleWord::operator==). Hash the words
+// with a cheap byte hash instead of the collation aware ObString::hash(), which
+// decodes the character again on every lookup.
+static inline uint64_t ft_word_binary_hash(const ObString &word)
+{
+  uint64_t hash = 1469598103934665603ULL; // FNV-1a 64 bit offset basis
+  const unsigned char *ptr = reinterpret_cast<const unsigned char *>(word.ptr());
+  for (int64_t i = 0; i < word.length(); ++i) {
+    hash ^= static_cast<uint64_t>(ptr[i]);
+    hash *= 1099511628211ULL; // FNV-1a 64 bit prime
+  }
+  return hash;
+}
 template <typename DATA_TYPE>
 int ObFTDATBuilder<DATA_TYPE>::init(ObFTTrie<DATA_TYPE> &trie)
 {
@@ -302,7 +316,7 @@ ObArrayHashMap *ObFTDAT::get_map() { return reinterpret_cast<ObArrayHashMap *>(b
 int ObArrayHashMap::find(const ObFTSingleWord &word, ObFTWordCode &code) const
 {
   int ret = OB_ENTRY_NOT_EXIST;
-  uint64_t hash = word.get_word().hash();
+  uint64_t hash = ft_word_binary_hash(word.get_word());
   uint64_t index = hash % header_.capacity_;
   while (header_.data[index].used) {
     if (header_.data[index].word == word) {
@@ -310,7 +324,12 @@ int ObArrayHashMap::find(const ObFTSingleWord &word, ObFTWordCode &code) const
       ret = OB_SUCCESS;
       break;
     } else {
-      index = (index + 3) % header_.capacity_;
+      // capacity_ > 3, so a single conditional subtract is equivalent to the
+      // modulo but avoids a 64-bit division on the probe path.
+      index += 3;
+      if (OB_UNLIKELY(index >= header_.capacity_)) {
+        index -= header_.capacity_;
+      }
     }
   }
   return ret;
@@ -319,10 +338,13 @@ int ObArrayHashMap::find(const ObFTSingleWord &word, ObFTWordCode &code) const
 int ObArrayHashMap::insert(const ObString &key, ObFTWordCode code)
 {
   int ret = OB_SUCCESS;
-  uint64_t hash = key.hash();
+  uint64_t hash = ft_word_binary_hash(key);
   uint64_t index = hash % header_.capacity_;
   while (header_.data[index].used) {
-    index = (index + 3) % header_.capacity_;
+    index += 3;
+    if (OB_UNLIKELY(index >= header_.capacity_)) {
+      index -= header_.capacity_;
+    }
   }
 
   header_.data[index].code = code;

@@ -25,6 +25,38 @@ namespace oceanbase
 namespace storage
 {
 
+// Retrieval IDs with the BINARY collation use byte ordering, including trailing
+// spaces and embedded zero bytes. Avoid charset dispatch for these short IDs.
+inline int compare_binary_retrieval_id(const ObDatum &lhs,
+                                      const ObDatum &rhs,
+                                      int &cmp_ret,
+                                      const ObDatumAccessContext *access_ctx)
+{
+  UNUSED(access_ctx);
+  if (OB_UNLIKELY(lhs.is_null() || rhs.is_null())) {
+    cmp_ret = lhs.is_null() ? (rhs.is_null() ? 0 : -1) : 1;
+  } else {
+    const int64_t min_len = MIN(lhs.len_, rhs.len_);
+    const int cmp = min_len > 0 ? MEMCMP(lhs.ptr_, rhs.ptr_, min_len) : 0;
+    cmp_ret = cmp != 0 ? (cmp > 0 ? 1 : -1)
+                      : (lhs.len_ == rhs.len_ ? 0 : (lhs.len_ > rhs.len_ ? 1 : -1));
+  }
+  return OB_SUCCESS;
+}
+
+inline common::ObDatumCmpFuncType get_retrieval_id_cmp_func(
+    const common::ObObjType type, const common::ObCollationType collation)
+{
+  common::ObDatumCmpFuncType cmp_func = nullptr;
+  if (common::CS_TYPE_BINARY == collation && ob_is_string_type(type)) {
+    cmp_func = compare_binary_retrieval_id;
+  } else {
+    common::ObDatumBasicFuncs *funcs = ObDatumFuncs::get_basic_func(type, collation);
+    cmp_func = nullptr == funcs ? nullptr : funcs->null_first_cmp_;
+  }
+  return cmp_func;
+}
+
 class ObDomainIdCmp
 {
 public:
@@ -45,13 +77,10 @@ int ObDomainIdCmp::init(const ObObjMeta &obj_meta)
     ret = OB_INVALID_ARGUMENT;
     STORAGE_LOG(WARN,"invalid argument", K(ret), K(obj_meta));
   } else {
-    common::ObDatumBasicFuncs *id_basic_funcs = ObDatumFuncs::get_basic_func(
-      obj_meta.get_type(), obj_meta.get_collation_type());
-    if (OB_ISNULL(id_basic_funcs)) {
+    cmp_func_ = get_retrieval_id_cmp_func(obj_meta.get_type(), obj_meta.get_collation_type());
+    if (OB_ISNULL(cmp_func_)) {
       ret = OB_ERR_UNEXPECTED;
       STORAGE_LOG(WARN,"failed to get basic functions", K(ret), K(obj_meta));
-    } else {
-      cmp_func_ = id_basic_funcs->null_first_cmp_;
     }
   }
   return ret;

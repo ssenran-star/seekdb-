@@ -145,6 +145,10 @@ public:
 private:
   int save_relevances_and_docids();
   int save_docids();
+  OB_INLINE const common::ObDatum *curr_id_datum() const
+  {
+    return &doc_id_[cur_idx_].get_datum();
+  }
   ObArenaAllocator *allocator_;
   ObTextRetrievalTokenIter *token_iter_;
   sql::ObEvalCtx *eval_ctx_;

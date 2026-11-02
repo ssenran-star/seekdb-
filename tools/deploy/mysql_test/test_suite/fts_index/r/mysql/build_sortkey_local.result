@@ -1,0 +1,60 @@
+# Offline multi-column and single-column indexes
+tenant_id	doc
+1	0000
+1	0001
+1	00FF
+2	2000
+3	FFFFFFFF
+tenant_id	doc
+1	0000
+1	0001
+tenant_id	doc
+1	0000
+1	0020
+1	00FF
+2	0000
+tenant_id	doc
+1	0000
+1	0001
+null_or_empty
+2
+# DML after bulk build, including a binary primary-key change
+tenant_id	doc
+2	2000
+3	FFFFFFFF
+4	0000
+tenant_id	doc
+1	0000
+4	0000
+tenant_id	doc
+1	00000001
+# Rebuilding the second index must preserve its postings
+tenant_id	doc
+1	0000
+1	0020
+2	0000
+4	0000
+# Unsupported encoder collation uses the original comparison path
+id
+1
+2
+id
+2
+# Signed primary keys retain their ordering and postings
+id
+-9223372036854775808
+0
+1
+9223372036854775807
+id
+-9223372036854775808
+1
+# Heap-table numeric document IDs use the same build and DML semantics
+term	docs	frequency	doc_length
+alpha	2	2	3
+beta	1	1	1
+中文	1	1	2
+term	docs	frequency	doc_length
+alpha	1	1	1
+beta	1	1	1
+omega	1	1	1

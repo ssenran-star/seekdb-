@@ -43,6 +43,24 @@ namespace oceanbase
 {
 namespace storage
 {
+namespace
+{
+// Both the range boundaries and the probe character are compared with the
+// binary collation below, whose semantics are plain byte comparison. Use a
+// direct byte compare instead of the generic charset dispatch.
+inline int ft_bin_cmp(const ObString &lhs, const ObString &rhs)
+{
+  const int64_t min_len = MIN(lhs.length(), rhs.length());
+  int cmp = 0;
+  if (min_len > 0) {
+    cmp = MEMCMP(lhs.ptr(), rhs.ptr(), min_len);
+  }
+  if (0 != cmp) {
+    return cmp;
+  }
+  return lhs.length() == rhs.length() ? 0 : (lhs.length() > rhs.length() ? 1 : -1);
+}
+} // anonymous namespace
 
 
 int ObFTRangeDict::build_cache_from_ik_dict(const ObFTDictDesc &desc, ObFTCacheRangeContainer &range_container)
@@ -382,16 +400,23 @@ int ObFTRangeDict::find_first_char_range(const ObString &single_word, ObIFTDict 
 {
   int ret = OB_SUCCESS;
   bool found = false;
-  for (int i = 0; OB_SUCC(ret) && !found && i < range_dicts_.size(); ++i) {
-    if (ObCharset::strcmp(ObCollationType::CS_TYPE_UTF8MB4_BIN,
-                          range_dicts_[i].start_.get_word(),
-                          single_word)
-            <= 0
-        && ObCharset::strcmp(ObCollationType::CS_TYPE_UTF8MB4_BIN,
-                             range_dicts_[i].end_.get_word(),
-                             single_word)
-               >= 0) {
+  const int64_t range_cnt = range_dicts_.size();
+  // Probe the range that matched the previous token first: consecutive tokens
+  // usually share the same leading character, so this hits almost always and
+  // skips the whole scan.
+  if (last_range_idx_ >= 0 && last_range_idx_ < range_cnt) {
+    const ObFTRange &range = range_dicts_[last_range_idx_];
+    if (ft_bin_cmp(range.start_.get_word(), single_word) <= 0
+        && ft_bin_cmp(range.end_.get_word(), single_word) >= 0) {
+      dict = range.dict_;
+      found = true;
+    }
+  }
+  for (int64_t i = 0; OB_SUCC(ret) && !found && i < range_cnt; ++i) {
+    if (ft_bin_cmp(range_dicts_[i].start_.get_word(), single_word) <= 0
+        && ft_bin_cmp(range_dicts_[i].end_.get_word(), single_word) >= 0) {
       dict = range_dicts_[i].dict_;
+      last_range_idx_ = i;
       found = true;
     }
   }
