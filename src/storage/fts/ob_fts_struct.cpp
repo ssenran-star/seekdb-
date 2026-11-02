@@ -43,6 +43,22 @@ bool ObFTWord::operator==(const ObFTWord &other) const
   bool is_equal = false;
   int ret = OB_SUCCESS;
   int cmp_ret = 0;
+  // Token comparison is the inner-most operation of the per-document word map
+  // and of the stop word check.  Words are compared with a binary collation
+  // here, in which case equal length words are simply byte equal, so the
+  // per-call comparator lookup (get_datum_cmp_func) can be skipped.  Different
+  // lengths still take the generic path because padding semantics are up to the
+  // collation.
+  const ObCollationType coll_type = meta_.get_collation_type();
+  if (OB_LIKELY(word_.len_ == other.word_.len_)
+      && meta_.get_type() == other.meta_.get_type()
+      && coll_type == other.meta_.get_collation_type()
+      && (CS_TYPE_UTF8MB4_BIN == coll_type || CS_TYPE_BINARY == coll_type)) {
+    is_equal = (0 == word_.len_)
+               || (nullptr != word_.ptr_ && nullptr != other.word_.ptr_
+                   && 0 == MEMCMP(word_.ptr_, other.word_.ptr_, word_.len_));
+    return is_equal;
+  }
   ObDatumCmpFuncType func = get_datum_cmp_func(meta_, other.meta_);
   if (func == nullptr) {
     ob_abort();

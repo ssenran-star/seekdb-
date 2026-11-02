@@ -93,6 +93,13 @@ protected:
   virtual int cache_result(int64_t &count, const ObDatum &id_datum, const double relevance);
   virtual int project_results(const int64_t count);
   int init_merge_heap(const int64_t count);
+  // Fast path for scans that only need the union of the dimension posting lists:
+  // no relevance score, no filter, no limit and no block-max pruning. It merges
+  // the sorted doc-id streams directly instead of driving the per-row heap /
+  // relevance collector machinery.
+  bool can_use_union_fast_path() const;
+  int get_next_rows_of_union(const int64_t capacity, int64_t &count);
+  int advance_dim_iter(const int64_t dim_idx);
 protected:
   ObIAllocator *iter_allocator_;
   ObSparseRetrievalMergeParam *iter_param_;
@@ -105,6 +112,9 @@ protected:
   ObFixedArray<double, ObIAllocator> buffered_relevances_;
   ObFixedArray<int64_t, ObIAllocator> next_round_iter_idxes_;
   int64_t next_round_cnt_;
+  bool union_fast_inited_;
+  bool *union_dim_ended_;
+  bool *union_dim_advance_;
   void (*set_datum_func_)(ObDatum &, const ObDocIdExt &);
 private:
   DISALLOW_COPY_AND_ASSIGN(ObSRDaaTIterImpl);

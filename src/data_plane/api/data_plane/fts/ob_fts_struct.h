@@ -51,7 +51,11 @@ private:
   ObObjMeta meta_;
 };
 
-typedef common::hash::ObHashMap<ObFTWord, int64_t> ObFTWordMap;
+// The word map is always a per-call / per-thread scratch structure (it is built
+// while tokenizing a single document), so the default per-bucket read/write
+// latch of ObHashMap is pure overhead on this hot path.
+typedef common::hash::ObHashMap<ObFTWord, int64_t,
+        common::hash::NoPthreadDefendMode> ObFTWordMap;
 
 class ObAddWordFlag final
 {

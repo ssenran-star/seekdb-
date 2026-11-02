@@ -27,6 +27,79 @@ namespace oceanbase
 namespace storage
 {
 
+namespace
+{
+// All built-in stop words are pure ASCII, so membership of an ASCII word can be
+// decided directly against the compile-time list without a charset conversion,
+// a temporary allocator, or the locked global hash set.
+OB_INLINE bool ascii_case_equal(const char *lhs, const char *rhs, const int64_t len)
+{
+  bool is_equal = true;
+  for (int64_t i = 0; is_equal && i < len; ++i) {
+    char l = lhs[i];
+    char r = rhs[i];
+    if (l >= 'A' && l <= 'Z') {
+      l = static_cast<char>(l - 'A' + 'a');
+    }
+    if (r >= 'A' && r <= 'Z') {
+      r = static_cast<char>(r - 'A' + 'a');
+    }
+    is_equal = (l == r);
+  }
+  return is_equal;
+}
+
+OB_INLINE bool is_ascii_word(const ObString &word)
+{
+  bool is_ascii = true;
+  for (int64_t i = 0; is_ascii && i < word.length(); ++i) {
+    is_ascii = (0 == (static_cast<unsigned char>(word.ptr()[i]) & 0x80));
+  }
+  return is_ascii;
+}
+
+OB_INLINE bool is_builtin_stop_word(const ObString &word)
+{
+  bool is_stop = false;
+  const int64_t stopword_count = sizeof(ob_stop_word_list) / sizeof(ob_stop_word_list[0]);
+  for (int64_t i = 0; !is_stop && i < stopword_count; ++i) {
+    const int64_t stopword_len = static_cast<int64_t>(strlen(ob_stop_word_list[i]));
+    is_stop = (stopword_len == word.length()
+               && ascii_case_equal(ob_stop_word_list[i], word.ptr(), stopword_len));
+  }
+  return is_stop;
+}
+
+// Decide whether casedown can change the token. CJK Unified Ideographs and
+// lowercase/non-letter ASCII characters have no case mapping, so tokens made of
+// them can skip ObCharset::tolower (which always allocates a copy of the word).
+OB_INLINE bool casedown_may_change(const ObString &word)
+{
+  bool may_change = false;
+  const uint8_t *ptr = reinterpret_cast<const uint8_t *>(word.ptr());
+  const int64_t len = word.length();
+  int64_t pos = 0;
+  while (!may_change && pos < len) {
+    const uint8_t ch = ptr[pos];
+    if (ch < 0x80) {
+      may_change = (ch >= 'A' && ch <= 'Z');
+      ++pos;
+    } else if (ch >= 0xE4 && ch <= 0xE9 && pos + 2 < len
+               && 0x80 == (ptr[pos + 1] & 0xC0) && 0x80 == (ptr[pos + 2] & 0xC0)) {
+      const uint32_t cp = (static_cast<uint32_t>(ch & 0x0F) << 12)
+                          | (static_cast<uint32_t>(ptr[pos + 1] & 0x3F) << 6)
+                          | static_cast<uint32_t>(ptr[pos + 2] & 0x3F);
+      may_change = (cp < 0x4E00 || cp > 0x9FFF);
+      pos += 3;
+    } else {
+      // Be conservative for every other script / encoding.
+      may_change = true;
+    }
+  }
+  return may_change;
+}
+} // namespace
+
 ////////////////////////////////////////////////////////////////////////////////
 // class ObStopWordChecker
 ObStopWordChecker::~ObStopWordChecker()
@@ -74,23 +147,34 @@ void ObStopWordChecker::destroy()
 int ObStopWordChecker::check_stopword(const ObFTWord &word, bool &is_stopword)
 {
   int ret = OB_SUCCESS;
-  
-  
-  common::ObArenaAllocator allocator(lib::ObMemAttr("ChkStopWord"));
+  is_stopword = false;
   if (OB_UNLIKELY(!inited_)) {
     ret = OB_NOT_INIT;
   } else if (OB_UNLIKELY(word.empty())) {
     ret = OB_INVALID_ARGUMENT;
+  } else if (is_ascii_word(word.get_word().get_string())) {
+    // ASCII fast path: general_ci comparison over ASCII is case-insensitive byte
+    // comparison and every built-in stop word is pure ASCII.
+    is_stopword = is_builtin_stop_word(word.get_word().get_string());
   } else {
     common::ObString cmp_str;
-    // do nothing set out with in if type is the same.
-    if (OB_FAIL(common::ObCharset::charset_convert(
+    // Skip the conversion copy when the charsets already match (the common case:
+    // an utf8mb4 token against the utf8mb4 stop word list).
+    const ObCharsetType word_cs = ObCharset::charset_type_by_coll(word.get_collation_type());
+    const ObCharsetType stop_cs = ObCharset::charset_type_by_coll(stopword_type_.get_collation_type());
+    if (word_cs == stop_cs && common::CHARSET_INVALID != word_cs) {
+      cmp_str = word.get_word().get_string();
+    } else {
+      common::ObArenaAllocator allocator(lib::ObMemAttr("ChkStopWord"));
+      if (OB_FAIL(common::ObCharset::charset_convert(
                                        allocator,
                                        word.get_word().get_string(),
                                        word.get_collation_type(),
                                        stopword_type_.get_collation_type(),
                                        cmp_str))) {
-    } else {
+      }
+    }
+    if (OB_SUCC(ret)) {
       ObFTWord converted(cmp_str.length(), cmp_str.ptr(), stopword_type_);
       ret = stopword_set_.exist_refactored(converted);
       if (OB_HASH_NOT_EXIST == ret) {
@@ -164,15 +248,21 @@ int ObAddWord::casedown_word(const ObFTWord &src, ObFTWord &dst)
   if (OB_UNLIKELY(src.empty())) {
     ret = OB_INVALID_ARGUMENT;
   } else if (flag_.casedown()) {
-    ObString dst_str;
-    if (OB_FAIL(ObCharset::tolower(
-                    word_meta_.get_collation_type(),
-                    src.get_word().get_string(),
-                    dst_str,
-                    allocator_))) {
+    if (!casedown_may_change(src.get_word().get_string())) {
+      // No character in the token has a case mapping, so the conversion result
+      // is identical to the input and its allocation can be skipped.
+      dst = src;
     } else {
-      ObFTWord tmp(dst_str.length(), dst_str.ptr(), word_meta_);
-      dst = tmp;
+      ObString dst_str;
+      if (OB_FAIL(ObCharset::tolower(
+                      word_meta_.get_collation_type(),
+                      src.get_word().get_string(),
+                      dst_str,
+                      allocator_))) {
+      } else {
+        ObFTWord tmp(dst_str.length(), dst_str.ptr(), word_meta_);
+        dst = tmp;
+      }
     }
   } else {
     dst = src;
@@ -204,15 +294,14 @@ int ObAddWord::groupby_word(const ObFTWord &word, const int64_t word_freq)
   } else if (!flag_.groupby_word()) {
     if (OB_FAIL(word_map_.set_refactored(word, 1/*word count*/))) {
     }
-  } else if (OB_FAIL(word_map_.get_refactored(word, word_count)) && OB_HASH_NOT_EXIST != ret) {
-  } else {
-    if (OB_HASH_NOT_EXIST == ret) {
-      word_count = 1;
-    } else {
-      word_count += word_freq;
-    }
-    if (OB_FAIL(word_map_.set_refactored(word, word_count, 1/*overwrite*/))) {
-    }
+  } else if (OB_SUCC(word_map_.set_refactored(word, 1/*first word count*/))) {
+    // The word was not in the map yet, so the single insert above is enough.
+    // Only repeated words need the extra read-modify-write round trip.
+  } else if (OB_HASH_EXIST != ret) {
+    // keep the unexpected error
+  } else if (OB_FAIL(word_map_.get_refactored(word, word_count))) {
+  } else if (FALSE_IT(word_count += word_freq)) {
+  } else if (OB_FAIL(word_map_.set_refactored(word, word_count, 1/*overwrite*/))) {
   }
   return ret;
 }

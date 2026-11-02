@@ -11987,6 +11987,72 @@ int ObLogPlan::construct_startup_filter_for_limit(ObRawExpr *limit_expr, ObLogic
   return ret;
 }
 
+// Decide whether the BM25 relevance value of a full-text MATCH predicate is
+// consumed by the statement. It is not consumed when the MATCH expression is
+// used purely as a boolean WHERE conjunct (natural language mode) and no other
+// expression in the statement evaluates its value. In that case the TEXT
+// RETRIEVAL SCAN already emits exactly the documents selected by MATCH, so the
+// pushed-down match predicate and the BM25 score would be recomputed per row
+// only to be discarded.
+static int check_match_expr_value_unused(const ObDMLStmt *stmt,
+                                         const ObRawExpr *match_pred,
+                                         const ObMatchFunRawExpr *match_against,
+                                         bool &value_unused)
+{
+  int ret = OB_SUCCESS;
+  value_unused = false;
+  if (OB_ISNULL(stmt) || OB_ISNULL(match_pred) || OB_ISNULL(match_against)) {
+    ret = OB_INVALID_ARGUMENT;
+  } else if (!((match_pred == match_against)
+               || (T_OP_BOOL == match_pred->get_expr_type()
+                   && 1 == match_pred->get_param_count()
+                   && match_pred->get_param_expr(0) == match_against))) {
+    // MATCH is nested in a bigger predicate (OR/NOT/comparison/...): keep relevance.
+  } else if (NATURAL_LANGUAGE_MODE != match_against->get_mode_flag()) {
+    // BOOLEAN / QUERY_EXPANSION modes may rely on the filter for semantics.
+  } else if (!stmt->is_select_stmt()) {
+    // Keep the optimization to plain SELECT statements.
+  } else if (nullptr != static_cast<const ObSelectStmt *>(stmt)->get_limit_expr()
+             || nullptr != static_cast<const ObSelectStmt *>(stmt)->get_offset_expr()) {
+    // LIMIT/OFFSET may depend on the relevance ordering of the scan.
+  } else if (stmt->get_match_exprs().count() != 1
+             || stmt->get_match_exprs().at(0) != match_against) {
+    // MATCH evaluated more than once: be conservative.
+  } else if (static_cast<const ObSelectStmt *>(stmt)->get_joined_tables().count() != 0) {
+    // Keep the optimization to single-table statements for now.
+  } else {
+    const ObSelectStmt *select_stmt = static_cast<const ObSelectStmt *>(stmt);
+    bool used_as_value = false;
+    for (int64_t i = 0; !used_as_value && i < select_stmt->get_select_items().count(); ++i) {
+      const ObRawExpr *expr = select_stmt->get_select_items().at(i).expr_;
+      used_as_value = (nullptr != expr && expr->has_flag(CNT_MATCH_EXPR));
+    }
+    for (int64_t i = 0; !used_as_value && i < stmt->get_order_item_size(); ++i) {
+      const ObRawExpr *expr = stmt->get_order_items().at(i).expr_;
+      used_as_value = (nullptr != expr && expr->has_flag(CNT_MATCH_EXPR));
+    }
+    for (int64_t i = 0; !used_as_value && i < select_stmt->get_group_exprs().count(); ++i) {
+      const ObRawExpr *expr = select_stmt->get_group_exprs().at(i);
+      used_as_value = (nullptr != expr && expr->has_flag(CNT_MATCH_EXPR));
+    }
+    for (int64_t i = 0; !used_as_value && i < select_stmt->get_having_exprs().count(); ++i) {
+      const ObRawExpr *expr = select_stmt->get_having_exprs().at(i);
+      used_as_value = (nullptr != expr && expr->has_flag(CNT_MATCH_EXPR));
+    }
+    for (int64_t i = 0; !used_as_value && i < select_stmt->get_window_func_exprs().count(); ++i) {
+      const ObRawExpr *expr = select_stmt->get_window_func_exprs().at(i);
+      used_as_value = (nullptr != expr && expr->has_flag(CNT_MATCH_EXPR));
+    }
+    for (int64_t i = 0; !used_as_value && i < stmt->get_condition_exprs().count(); ++i) {
+      const ObRawExpr *expr = stmt->get_condition_exprs().at(i);
+      used_as_value = (nullptr != expr && expr != match_pred
+                       && expr->has_flag(CNT_MATCH_EXPR));
+    }
+    value_unused = !used_as_value;
+  }
+  return ret;
+}
+
 int ObLogPlan::prepare_text_retrieval_scan(const ObIArray<ObRawExpr *> &scan_match_exprs,
                                            const ObIArray<ObRawExpr *> &scan_match_filters,
                                            const ObIArray<ObRawExpr *> &all_match_filters,
@@ -12037,15 +12103,34 @@ int ObLogPlan::prepare_text_retrieval_scan(const ObIArray<ObRawExpr *> &scan_mat
                                                  table_scan->get_text_retrieval_info()))) {
   } else {
     ObTextRetrievalInfo &tr_info = table_scan->get_text_retrieval_info();
-    tr_info.match_expr_ = match_against;
-    tr_info.pushdown_match_filter_ = match_pred;
-    // The mapping table is absent when the data-table rowkey is used as the document ID.
-    table_scan->set_doc_id_index_table_id(tr_info.doc_id_idx_tid_);
-    if (table_scan->is_vec_adaptive_scan() || table_scan->is_vec_idx_scan_post_filter()) {
-      table_scan->set_rowkey_doc_table_id(tr_info.rowkey_idx_tid_);
-    }
-    if (OB_FAIL(table_scan->set_is_skip_rowkey_doc(tr_info.doc_id_idx_tid_ == OB_INVALID_ID))) {
-    } else if (OB_FAIL(table_scan->set_is_skip_rowkey_doc(tr_info.rowkey_idx_tid_ == OB_INVALID_ID))) {
+    bool match_value_unused = false;
+    if (0 != scan_filters.count() || table_scan->get_index_back()) {
+      // Additional filters / index-back lookups use their own DAS operators, keep
+      // relevance for those plans.
+    } else if (OB_FAIL(check_match_expr_value_unused(get_stmt(),
+                                                     match_pred,
+                                                     match_against,
+                                                     match_value_unused))) {
+    } else {
+      tr_info.match_expr_ = match_against;
+      if (match_value_unused) {
+        // The MATCH predicate is only a boolean filter and the text retrieval
+        // scan already returns the matched documents, so the BM25 score and the
+        // per-row pushdown filter evaluation can be skipped entirely.
+        tr_info.need_calc_relevance_ = false;
+        tr_info.pushdown_match_filter_ = nullptr;
+        LOG_TRACE("skip text retrieval relevance and match filter", K(match_value_unused));
+      } else {
+        tr_info.pushdown_match_filter_ = match_pred;
+      }
+      // The mapping table is absent when the data-table rowkey is used as the document ID.
+      table_scan->set_doc_id_index_table_id(tr_info.doc_id_idx_tid_);
+      if (table_scan->is_vec_adaptive_scan() || table_scan->is_vec_idx_scan_post_filter()) {
+        table_scan->set_rowkey_doc_table_id(tr_info.rowkey_idx_tid_);
+      }
+      if (OB_FAIL(table_scan->set_is_skip_rowkey_doc(tr_info.doc_id_idx_tid_ == OB_INVALID_ID))) {
+      } else if (OB_FAIL(table_scan->set_is_skip_rowkey_doc(tr_info.rowkey_idx_tid_ == OB_INVALID_ID))) {
+      }
     }
   }
 
