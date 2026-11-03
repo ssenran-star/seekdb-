@@ -242,6 +242,8 @@ public:
   static int get_json_string(ObIAllocator &allocator, ObString &str, ObJsonString *&str_node);
   static int get_json_int(ObIAllocator &allocator, int64_t num, ObJsonInt *&int_node);
   static int get_json_boolean(ObIAllocator &allocator, bool value, ObJsonBoolean *&boolean_node);
+  static int get_json_int_value(const ObJsonNode *node, int64_t &value);
+  static int get_json_double_value(const ObJsonNode *node, double &value);
   static int get_json_object_form_str(ObIAllocator &allocator, ObString &str, ObJsonObject *&obj_node);
   static int print_json_to_str(ObIAllocator &allocator, ObIJsonBase *base_node, ObString &str);
   static int compact_json_object(ObIAllocator &allocator, ObJsonObject *obj_node, ObJsonObject *compact_obj);
