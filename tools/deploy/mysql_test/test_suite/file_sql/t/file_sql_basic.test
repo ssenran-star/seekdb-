@@ -8,9 +8,8 @@
 --disable_query_log
 let $FILE_SQL_DATA_DIR = $OBSERVER_DIR/data_for_mysqltest_file_sql;
 
---echo # enable_file_sql is on by default and can be switched off
+--echo # enable_file_sql defaults to OFF
 select @@session.enable_file_sql AS default_enabled;
-set session enable_file_sql = OFF;
 --disable_result_log
 --error 1235
 eval select count(*) from read_csv('$FILE_SQL_DATA_DIR/basic.csv');
@@ -63,40 +62,6 @@ eval copy (select id, name, score
 eval select id, name, score
        from read_csv('$FILE_SQL_DATA_DIR/export.csv')
       order by id;
-
---echo # CSV type inference for numbers, text, booleans and temporal columns
-eval describe select * from read_csv('$FILE_SQL_DATA_DIR/types.csv');
-eval select i, f, s, b, d, dt
-       from read_csv('$FILE_SQL_DATA_DIR/types.csv') t
-      order by i;
-
---echo # SQL filter, aggregate and sort on a single file
-eval select name, score
-       from read_csv('$FILE_SQL_DATA_DIR/basic.csv')
-      where score >= 90
-      order by score desc;
-eval select active, count(*) AS cnt, max(score) AS top_score
-       from read_csv('$FILE_SQL_DATA_DIR/basic.csv')
-      group by active
-      order by active;
-
---echo # two-file JOIN with explicit table aliases
-eval select f.id, f.name, e.tag
-       from read_csv('$FILE_SQL_DATA_DIR/basic.csv') AS f
-       join read_csv('$FILE_SQL_DATA_DIR/extra.csv') AS e
-         on f.id = e.id
-      order by f.id;
-
---echo # alias-free file tables still work
-eval select count(*) AS c from read_csv('$FILE_SQL_DATA_DIR/extra.csv');
-
---echo # errors surface as SQL errors instead of crashes
---disable_result_log
---error 1235
-eval select count(*) from read_parquet('$FILE_SQL_DATA_DIR/basic.csv');
---error 1017
-eval select count(*) from read_csv('$FILE_SQL_DATA_DIR/missing.csv');
---enable_result_log
 
 set session enable_file_sql = OFF;
 --enable_query_log

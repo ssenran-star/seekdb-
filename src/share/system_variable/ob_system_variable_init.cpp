@@ -9916,12 +9916,12 @@ static struct VarsInit{
       cur_max_var_id = MAX(cur_max_var_id, static_cast<int64_t>(SYS_VAR_ENABLE_FILE_SQL)) ;
       ObSysVarsIdToArrayIdx[SYS_VAR_ENABLE_FILE_SQL] = 719 ;
       ObSysVars[719].name_ = "enable_file_sql" ;
-      ObSysVars[719].default_value_ = "1" ;
-      ObSysVars[719].base_value_ = "1" ;
+      ObSysVars[719].default_value_ = "0" ;
+      ObSysVars[719].base_value_ = "0" ;
       ObSysVars[719].data_type_ = ObIntType ;
-      ObSysVars[719].info_ = "Allow read_csv/read_json/read_parquet/glob and COPY to query or export local files. On by default and restricted by secure_file_priv." ;
+      ObSysVars[719].info_ = "Allow read_csv/read_json/read_parquet/glob and COPY to query or export local files. Default off. Access is still limited by secure_file_priv." ;
       ObSysVars[719].flags_ = ObSysVarFlag::GLOBAL_SCOPE | ObSysVarFlag::SESSION_SCOPE ;
-      ObSysVars[719].alias_ = "OB_SV_ENABLE_FILE_SQL" ;
+    ObSysVars[719].alias_ = "OB_SV_ENABLE_FILE_SQL" ;
     }();
 
     if (cur_max_var_id >= ObSysVarMeta::OB_MAX_SYS_VAR_ID) {
