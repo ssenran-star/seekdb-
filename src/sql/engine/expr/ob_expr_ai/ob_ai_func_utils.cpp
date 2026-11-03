@@ -301,10 +301,12 @@ int ObOllamaUtils::get_header(common::ObIAllocator &allocator,
   int ret = OB_SUCCESS;
   // Native Ollama does not use Authorization. A Content-Type header is still
   // required: the HTTP client rejects an empty header list.
+  // Like the OpenAI header above, the "X: value" header is pushed as the
+  // caller-owned literal; ob_write_string would store the NUL terminator in
+  // ObString::length() and libcurl would then send trailing bytes after the
+  // header value, which malforms the request.
   ObString content_type_str("Content-Type: application/json");
-  ObString content_type_c_str;
-  if (OB_FAIL(ob_write_string(allocator, content_type_str, content_type_c_str, true))) {
-  } else if (OB_FAIL(headers.push_back(content_type_c_str))) {
+  if (OB_FAIL(headers.push_back(content_type_str))) {
   }
   return ret;
 }
@@ -1418,18 +1420,22 @@ int ObAIFuncModel::call_completion(ObString &prompt, ObJsonObject *config, ObStr
   ObJsonObject *response = nullptr;
   ObIJsonBase *result_base = nullptr;
   ObAIFuncIComplete *complete_provider = nullptr;
-  ObString prompt_str;
   ObString result_str;
   ObAIFuncClient client;
   ObString unencrypted_access_key;
   ObString request_model_name = get_request_model_name();
+  // Provider get_body(model, prompt, content, ...) maps prompt to the optional
+  // system message and content to the user message. ai_complete() has no system
+  // message, so pass an explicit empty string instead of an uninitialized local
+  // that the provider would treat as a system message.
+  ObString empty_system_prompt;
   if (!is_completion_type()) {
     ret = OB_INVALID_ARGUMENT;
     LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_complete, info type is not completion");
   } else if (OB_FAIL(ObAIFuncUtils::get_complete_provider(*allocator_, endpoint_info_.get_provider(), complete_provider))) {
   } else if (OB_FAIL(endpoint_info_.get_unencrypted_access_key(*allocator_, unencrypted_access_key))) {
   } else if (OB_FAIL(complete_provider->get_header(*allocator_, unencrypted_access_key, headers))) {
-  } else if (OB_FAIL(complete_provider->get_body(*allocator_, request_model_name, prompt_str, prompt, config, body))) {
+  } else if (OB_FAIL(complete_provider->get_body(*allocator_, request_model_name, empty_system_prompt, prompt, config, body))) {
   } else if (OB_FAIL(client.send_post(*allocator_, endpoint_info_.get_url(), headers, body, response))) {
   } else if (OB_FAIL(complete_provider->parse_output(*allocator_, response, result_base))) {
   } else if (OB_FAIL(ObAIFuncJsonUtils::print_json_to_str(*allocator_, result_base, result_str))) {
@@ -1459,11 +1465,11 @@ int ObAIFuncModel::call_completion_vector(ObArray<ObString> &prompts, ObJsonObje
   ObArray<ObJsonObject *> response_array;
   ObIJsonBase *result_base = nullptr;
   ObAIFuncIComplete *complete_provider = nullptr;
-  ObString prompt_str;
   ObString result_str;
   ObAIFuncClient client;
   ObString unencrypted_access_key;
   ObString request_model_name = get_request_model_name();
+  ObString empty_system_prompt;
   if (!is_completion_type()) {
     ret = OB_INVALID_ARGUMENT;
     LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_complete, info type is not completion");
@@ -1473,7 +1479,7 @@ int ObAIFuncModel::call_completion_vector(ObArray<ObString> &prompts, ObJsonObje
   } else {
     for (int i = 0; OB_SUCC(ret) && i < prompts.count(); i++) {
       ObString prompt = prompts[i];
-      if (OB_FAIL(complete_provider->get_body(*allocator_, request_model_name, prompt_str, prompt, config, body))) {
+      if (OB_FAIL(complete_provider->get_body(*allocator_, request_model_name, empty_system_prompt, prompt, config, body))) {
       } else if (OB_FAIL(body_array.push_back(body))) {
       }
     }

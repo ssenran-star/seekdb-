@@ -68,7 +68,6 @@ int ObExprAIEmbed::calc_result_typeN(ObExprResType &type,
       }
     }
     type.set_varchar();
-    type.set_length(static_cast<ObLength>(OB_MAX_MYSQL_VARCHAR_LENGTH));
     type.set_collation_type(CS_TYPE_UTF8MB4_BIN);
     type.set_collation_level(CS_LEVEL_COERCIBLE);
   }
@@ -258,9 +257,12 @@ int ObExprAIEmbed::eval_ai_embed_batch(const ObExpr &expr,
       eval_flags.set(i);
       continue;
     } else if (OB_ISNULL(model_datum) || model_datum->is_null()) {
+      // A broken row must not abort the whole batch: the remaining rows still
+      // have to be filled, otherwise the batch never completes.
       ret = OB_INVALID_ARGUMENT;
       LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_embed, model id is null");
       result_datums[i].set_null();
+      eval_flags.set(i);
       continue;
     }
     ObString row_model;
@@ -272,6 +274,7 @@ int ObExprAIEmbed::eval_ai_embed_batch(const ObExpr &expr,
       ret = OB_INVALID_ARGUMENT;
       LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_embed, model id or input is empty");
       result_datums[i].set_null();
+      eval_flags.set(i);
     } else if (has_dim) {
       ObDatum *dim_datum = dim_vec.at(i);
       if (OB_NOT_NULL(dim_datum) && !dim_datum->is_null()) {
@@ -280,6 +283,7 @@ int ObExprAIEmbed::eval_ai_embed_batch(const ObExpr &expr,
           ret = OB_INVALID_ARGUMENT;
           LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_embed, dimension parameter must be a positive integer");
           result_datums[i].set_null();
+          eval_flags.set(i);
         }
       }
     }
