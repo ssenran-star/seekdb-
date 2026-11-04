@@ -382,17 +382,24 @@ int ObFTRangeDict::find_first_char_range(const ObString &single_word, ObIFTDict 
 {
   int ret = OB_SUCCESS;
   bool found = false;
-  for (int i = 0; OB_SUCC(ret) && !found && i < range_dicts_.size(); ++i) {
-    if (ObCharset::strcmp(ObCollationType::CS_TYPE_UTF8MB4_BIN,
-                          range_dicts_[i].start_.get_word(),
-                          single_word)
-            <= 0
-        && ObCharset::strcmp(ObCollationType::CS_TYPE_UTF8MB4_BIN,
-                             range_dicts_[i].end_.get_word(),
-                             single_word)
-               >= 0) {
-      dict = range_dicts_[i].dict_;
+  const int64_t range_cnt = range_dicts_.size();
+  const bool bin_cmp = (ObCollationType::CS_TYPE_UTF8MB4_BIN == desc_.coll_type_);
+
+  // 先探测上次命中的 range：分词按字符顺序推进，相邻字符大概率仍在同一 range
+  if (last_range_idx_ >= 0 && last_range_idx_ < range_cnt) {
+    const ObFTRange &last = range_dicts_[last_range_idx_];
+    if (range_contains(last, single_word, bin_cmp)) {
+      dict = last.dict_;
       found = true;
+    }
+  }
+
+  for (int64_t i = 0; !found && i < range_cnt; ++i) {
+    const ObFTRange &range = range_dicts_[i];
+    if (range_contains(range, single_word, bin_cmp)) {
+      dict = range.dict_;
+      found = true;
+      last_range_idx_ = i;
     }
   }
   if (!found) {

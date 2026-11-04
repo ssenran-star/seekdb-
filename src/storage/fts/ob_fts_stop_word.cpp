@@ -164,15 +164,34 @@ int ObAddWord::casedown_word(const ObFTWord &src, ObFTWord &dst)
   if (OB_UNLIKELY(src.empty())) {
     ret = OB_INVALID_ARGUMENT;
   } else if (flag_.casedown()) {
-    ObString dst_str;
-    if (OB_FAIL(ObCharset::tolower(
-                    word_meta_.get_collation_type(),
-                    src.get_word().get_string(),
-                    dst_str,
-                    allocator_))) {
+    // 只有 ASCII 大写字母会被 casedn 改写，其余字符在小写化时保持不变。
+    // 词中不含大写字母时转换是恒等变换，直接复用原串可以省掉一次
+    // 内存分配和逐字符解码（分词热路径上每个词都会走到这里）。
+    const ObString &src_str = src.get_word().get_string();
+    bool need_casedown = false;
+    for (int64_t i = 0; OB_SUCC(ret) && !need_casedown && i < src_str.length(); ++i) {
+      const unsigned char c = static_cast<unsigned char>(src_str.ptr()[i]);
+      if (c >= 'A' && c <= 'Z') {
+        need_casedown = true;
+      } else if (c >= 0x80) {
+        // 非 ASCII 字符保守走完整转换路径
+        need_casedown = true;
+      }
+    }
+    if (OB_FAIL(ret)) {
+    } else if (!need_casedown) {
+      dst = src;
     } else {
-      ObFTWord tmp(dst_str.length(), dst_str.ptr(), word_meta_);
-      dst = tmp;
+      ObString dst_str;
+      if (OB_FAIL(ObCharset::tolower(
+                      word_meta_.get_collation_type(),
+                      src_str,
+                      dst_str,
+                      allocator_))) {
+      } else {
+        ObFTWord tmp(dst_str.length(), dst_str.ptr(), word_meta_);
+        dst = tmp;
+      }
     }
   } else {
     dst = src;
