@@ -1,0 +1,20 @@
+{
+  "engine": "cpu-ivf",
+  "metric": "l2",
+  "n": 100000,
+  "dim": 128,
+  "m": 16,
+  "knn_k": 64,
+  "knn_stage_ms": 1559.138,
+  "layer_stage_ms": 211.191,
+  "build_total_ms": 1770.329,
+  "build_wall_ms": 1774.760,
+  "vectors_per_sec": 56486.7,
+  "max_level": 4,
+  "edges": 3305600,
+  "topk": 10,
+  "ef_search": 64,
+  "recall_at_k": 0.9800,
+  "search_us_per_query": 3310.30,
+  "io_roundtrip_ok": true
+}
