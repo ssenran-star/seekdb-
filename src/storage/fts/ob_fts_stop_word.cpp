@@ -74,25 +74,35 @@ void ObStopWordChecker::destroy()
 int ObStopWordChecker::check_stopword(const ObFTWord &word, bool &is_stopword)
 {
   int ret = OB_SUCCESS;
-  
-  
-  common::ObArenaAllocator allocator(lib::ObMemAttr("ChkStopWord"));
   if (OB_UNLIKELY(!inited_)) {
     ret = OB_NOT_INIT;
   } else if (OB_UNLIKELY(word.empty())) {
     ret = OB_INVALID_ARGUMENT;
   } else {
+    // 停用词表与待检查词通常字符集相同，此时 charset_convert 只是原样拷贝。
+    // 这一层在分词热路径上每个词都会走一次，直接复用原串可以省掉每词一次的
+    // arena 构造与内存分配。
+    const ObString &src_str = word.get_word().get_string();
+    ObFTWord cmp_word;
     common::ObString cmp_str;
-    // do nothing set out with in if type is the same.
-    if (OB_FAIL(common::ObCharset::charset_convert(
-                                       allocator,
-                                       word.get_word().get_string(),
-                                       word.get_collation_type(),
-                                       stopword_type_.get_collation_type(),
-                                       cmp_str))) {
+    if (ObCharset::charset_type_by_coll(word.get_collation_type())
+        == ObCharset::charset_type_by_coll(stopword_type_.get_collation_type())) {
+      cmp_word = ObFTWord(src_str.length(), src_str.ptr(), stopword_type_);
     } else {
-      ObFTWord converted(cmp_str.length(), cmp_str.ptr(), stopword_type_);
-      ret = stopword_set_.exist_refactored(converted);
+      common::ObArenaAllocator allocator(lib::ObMemAttr("ChkStopWord"));
+      if (OB_FAIL(common::ObCharset::charset_convert(allocator,
+                                                     src_str,
+                                                     word.get_collation_type(),
+                                                     stopword_type_.get_collation_type(),
+                                                     cmp_str))) {
+      } else {
+        cmp_word = ObFTWord(cmp_str.length(), cmp_str.ptr(), stopword_type_);
+      }
+    }
+
+    if (OB_FAIL(ret)) {
+    } else {
+      ret = stopword_set_.exist_refactored(cmp_word);
       if (OB_HASH_NOT_EXIST == ret) {
         is_stopword = false;
         ret = OB_SUCCESS;
@@ -223,14 +233,13 @@ int ObAddWord::groupby_word(const ObFTWord &word, const int64_t word_freq)
   } else if (!flag_.groupby_word()) {
     if (OB_FAIL(word_map_.set_refactored(word, 1/*word count*/))) {
     }
-  } else if (OB_FAIL(word_map_.get_refactored(word, word_count)) && OB_HASH_NOT_EXIST != ret) {
-  } else {
-    if (OB_HASH_NOT_EXIST == ret) {
-      word_count = 1;
-    } else {
-      word_count += word_freq;
-    }
-    if (OB_FAIL(word_map_.set_refactored(word, word_count, 1/*overwrite*/))) {
+  } else if (OB_FAIL(word_map_.set_refactored(word, 1))) {
+    // 词在文档内大多只出现一次，先按“首次出现”插入：命中时只需一次查表，
+    // 未命中再回退到“读-改-写”的累加路径。
+    if (OB_HASH_EXIST != ret) {
+      // keep ret
+    } else if (OB_FAIL(word_map_.get_refactored(word, word_count))) {
+    } else if (OB_FAIL(word_map_.set_refactored(word, word_count + word_freq, 1/*overwrite*/))) {
     }
   }
   return ret;

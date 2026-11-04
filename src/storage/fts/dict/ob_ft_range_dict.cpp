@@ -394,7 +394,30 @@ int ObFTRangeDict::find_first_char_range(const ObString &single_word, ObIFTDict 
     }
   }
 
-  for (int64_t i = 0; !found && i < range_cnt; ++i) {
+  if (!found && bin_cmp && range_cnt > 0) {
+    // range 是按词典序切分的，start_ 单调递增，可以直接二分定位候选 range。
+    // 原来逐个 range 线性试探，每个字符都要白扫若干次字符串比较。
+    int64_t lo = 0;
+    int64_t hi = range_cnt - 1;
+    int64_t candidate = -1;
+    while (lo <= hi) {
+      const int64_t mid = (lo + hi) / 2;
+      const int cmp = ft_bin_strcmp(range_dicts_[mid].start_.get_word(), single_word);
+      if (cmp <= 0) {
+        candidate = mid;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    if (candidate >= 0 && ft_bin_strcmp(range_dicts_[candidate].end_.get_word(), single_word) >= 0) {
+      dict = range_dicts_[candidate].dict_;
+      found = true;
+      last_range_idx_ = candidate;
+    }
+  }
+
+  for (int64_t i = 0; !found && !bin_cmp && i < range_cnt; ++i) {
     const ObFTRange &range = range_dicts_[i];
     if (range_contains(range, single_word, bin_cmp)) {
       dict = range.dict_;

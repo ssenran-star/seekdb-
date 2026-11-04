@@ -24,6 +24,7 @@
 #include "share/ob_force_print_log.h"
 #include "storage/fts/dict/ob_ft_dict_hub.h"
 #include "storage/fts/ob_beng_ft_parser.h"
+#include "storage/fts/ob_fts_literal.h"
 #include "storage/fts/ob_ik_ft_parser.h"
 #include "storage/fts/ob_ngram2_ft_parser.h"
 #include "storage/fts/ob_ngram_ft_parser.h"
@@ -335,14 +336,26 @@ int ObFTParseHelper::init(
   } else if (OB_ISNULL(allocator) || OB_UNLIKELY(parser_name.empty())) {
     ret = OB_INVALID_ARGUMENT;
   } else if (OB_FAIL(parser_name_.parse_from_str(parser_name.ptr(), parser_name.length()))) {
-  } else if (OB_FAIL(parser_property_.parse_for_parser_helper(parser_name_, parser_properties))) {
-  } else if (OB_FAIL(parser_name_.get_desc(parser_desc_))) {
-  } else if (OB_ISNULL(parser_desc_)) {
-    ret = OB_ERR_UNEXPECTED;
-  } else if (OB_FAIL(set_add_word_flag(*parser_desc_))) {
   } else {
-    allocator_ = allocator;
-    is_inited_ = true;
+    // 解析器属性：显式指定时按 JSON 解析；未指定时属性就是默认值本身。
+    // 原实现会先把空属性重建成规范 JSON 再解析一遍，这里直接使用默认值，
+    // 省掉一次 JSON 构造 + 解析的开销。
+    if (!parser_properties.empty()) {
+      ret = parser_property_.parse_for_parser_helper(parser_name_, parser_properties);
+    } else if (parser_name_.is_ik()) {
+      parser_property_.dict_table_ = ObString(ObFTSLiteral::CONFIG_NAME_DICT_TABLE);
+      parser_property_.stopword_table_ = ObString(ObFTSLiteral::CONFIG_NAME_STOPWORD_TABLE);
+      parser_property_.quantifier_table_ = ObString(ObFTSLiteral::CONFIG_NAME_QUANTIFIER_TABLE);
+    }
+    if (OB_FAIL(ret)) {
+    } else if (OB_FAIL(parser_name_.get_desc(parser_desc_))) {
+    } else if (OB_ISNULL(parser_desc_)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (OB_FAIL(set_add_word_flag(*parser_desc_))) {
+    } else {
+      allocator_ = allocator;
+      is_inited_ = true;
+    }
   }
   if (OB_FAIL(ret) && OB_UNLIKELY(!is_inited_)) {
     reset();

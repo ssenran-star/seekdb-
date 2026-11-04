@@ -46,7 +46,8 @@ public:
         cache_stop_(allocator),
         dict_main_(nullptr),
         dict_quan_(nullptr),
-        dict_stop_(nullptr)
+        dict_stop_(nullptr),
+        owns_dict_(true)
   {
   }
 
@@ -106,6 +107,8 @@ private:
   ObIFTDict *dict_main_;
   ObIFTDict *dict_quan_;
   ObIFTDict *dict_stop_;
+  // 词典是否由本实例独占持有：false 表示指向进程级共享词典，析构时只解引用。
+  bool owns_dict_;
 
   DISABLE_COPY_ASSIGN(ObIKFTParser);
 };
