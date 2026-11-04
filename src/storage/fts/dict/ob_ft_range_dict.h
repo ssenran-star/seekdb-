@@ -20,6 +20,7 @@
 #include "lib/alloc/alloc_struct.h"
 #include "lib/allocator/ob_allocator.h"
 #include "lib/allocator/page_arena.h"
+#include "lib/charset/ob_charset.h"
 #include "lib/container/ob_vector.h"
 #include "lib/utility/ob_macro_utils.h"
 #include "share/rc/ob_server_runtime.h"
@@ -39,7 +40,8 @@ public:
                 ObFTCacheRangeContainer *range_container,
                 const ObFTDictDesc &desc)
       : is_inited_(false), desc_(desc), range_alloc_(lib::ObMemAttr("Range Dict")),
-        range_dicts_(&range_alloc_), range_container_(range_container)
+        range_dicts_(&range_alloc_), range_container_(range_container),
+        last_range_idx_(-1)
   {
   }
   ~ObFTRangeDict() override{};
@@ -99,6 +101,38 @@ private:
 
   int find_first_char_range(const ObString &single_word, ObIFTDict *&dict) const;
 
+  // 判断 single_word 是否落在某个 range 的 [start_, end_] 区间内。
+  // UTF8MB4_BIN 的排序语义就是码点序，而合法的 UTF-8 编码保持码点序，
+  // 因此可以直接用无符号字节比较，省掉 strnncoll 的逐字符解码开销。
+  static inline bool range_contains(const ObFTRange &range,
+                                    const ObString &single_word,
+                                    const bool bin_cmp)
+  {
+    bool contained = false;
+    if (bin_cmp) {
+      contained = (ft_bin_strcmp(range.start_.get_word(), single_word) <= 0)
+                  && (ft_bin_strcmp(range.end_.get_word(), single_word) >= 0);
+    } else {
+      contained = (ObCharset::strcmp(ObCollationType::CS_TYPE_UTF8MB4_BIN,
+                                     range.start_.get_word(),
+                                     single_word) <= 0)
+                  && (ObCharset::strcmp(ObCollationType::CS_TYPE_UTF8MB4_BIN,
+                                        range.end_.get_word(),
+                                        single_word) >= 0);
+    }
+    return contained;
+  }
+
+  static inline int ft_bin_strcmp(const ObString &l, const ObString &r)
+  {
+    const int64_t min_len = MIN(l.length(), r.length());
+    int result = (min_len > 0) ? memcmp(l.ptr(), r.ptr(), static_cast<size_t>(min_len)) : 0;
+    if (0 == result) {
+      result = (l.length() < r.length()) ? -1 : ((l.length() > r.length()) ? 1 : 0);
+    }
+    return result;
+  }
+
 private:
   static constexpr int DEFAULT_KEY_PER_RANGE = 50000; // by estimated
   bool is_inited_;
@@ -106,6 +140,10 @@ private:
   ObArenaAllocator range_alloc_;
   ObVector<ObFTRange, ObArenaAllocator> range_dicts_;
   ObFTCacheRangeContainer *range_container_; // only used to read cache
+  // 分词是顺序扫描文本，连续字符通常落在同一个 range 上，
+  // 记住上次命中的 range 可以省掉大部分线性比较。
+  // 该字段只是查找提示，即使并发写坏也只会退化成一次全扫描，不影响正确性。
+  mutable int64_t last_range_idx_;
 
 private:
   DISALLOW_COPY_AND_ASSIGN(ObFTRangeDict);
