@@ -47,6 +47,11 @@ namespace observer
 
 constexpr const char ObInnerSQLConnection::LABEL[];
 
+// DDL 内部 SQL 使用的 work area 百分比。索引构建需要把一批输入行展开成
+// 更多的输出行（全文索引一篇文档展开成几十个词行），排序行数远超优化器
+// 对输入行数的估算，沿用默认的 5% 会让排序频繁落盘。
+constexpr int64_t DDL_INNER_SQL_WORK_AREA_PERCENTAGE = 20;
+
 class ObInnerSQLConnection::ObSqlQueryExecutor : public sqlclient::ObIExecutor
 {
 public:
@@ -407,6 +412,20 @@ int ObInnerSQLConnection::init_session_info(
             //TODO shengle ?
             session->get_ddl_info().set_is_ddl(is_ddl);
             session->reset_timezone();
+            if (is_ddl) {
+              // DDL 的 inner sql 是 insert ... select，索引构建侧要先把文档
+              // 展开成行再按索引键排序：一篇全文索引文档会被展开成几十行
+              // (word, doc_id, word_count, doc_length)，展开后的行数远大于
+              // 优化器估算的输入行数，默认 5% 的 work area 会让这类排序
+              // 必然落盘。DDL 并发低且不常驻，这里给到 20% 让排序尽量
+              // 全内存完成，避免溢写后再归并的额外开销。
+              ObObj work_area_pct;
+              work_area_pct.set_int(ObIntType, DDL_INNER_SQL_WORK_AREA_PERCENTAGE);
+              if (OB_FAIL(session->update_sys_variable(
+                      SYS_VAR_OB_SQL_WORK_AREA_PERCENTAGE, work_area_pct))) {
+                LOG_WARN("failed to update sql work area percentage for ddl inner session", K(ret));
+              }
+            }
           }
         }
       }
