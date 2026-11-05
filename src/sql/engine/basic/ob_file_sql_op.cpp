@@ -2155,15 +2155,25 @@ public:
   int open() override
   {
     int ret = OB_SUCCESS;
-    int rc = glob(path_.ptr(), 0, NULL, &gl_);
-    if (0 != rc && GLOB_NOMATCH != rc) {
+    char pattern[PATH_MAX];
+    if (path_.length() <= 0 || path_.length() >= PATH_MAX) {
       ret = OB_INVALID_ARGUMENT;
-      LOG_WARN("glob failed", K(ret), K(rc), K(path_));
+      LOG_WARN("invalid glob pattern", K(ret), K(path_));
     } else {
-      inited_ = true;
-      idx_ = 0;
-      if (GLOB_NOMATCH == rc) {
-        gl_.gl_pathc = 0;
+      // ObString::ptr() is not guaranteed to be NUL-terminated, but libc
+      // glob() requires a C string. Copy into a local buffer first.
+      MEMCPY(pattern, path_.ptr(), path_.length());
+      pattern[path_.length()] = '\0';
+      int rc = glob(pattern, 0, NULL, &gl_);
+      if (0 != rc && GLOB_NOMATCH != rc) {
+        ret = OB_INVALID_ARGUMENT;
+        LOG_WARN("glob failed", K(ret), K(rc), K(path_));
+      } else {
+        inited_ = true;
+        idx_ = 0;
+        if (GLOB_NOMATCH == rc) {
+          gl_.gl_pathc = 0;
+        }
       }
     }
     return ret;

@@ -244,7 +244,13 @@ int ObOllamaUtils::get_header(common::ObIAllocator &allocator,
                               common::ObArray<ObString> &headers) 
 {
   int ret = OB_SUCCESS;
-  // ollama header is empty, do nothing
+  // Ollama has no access key, but ObAIFuncClient::init() requires at least
+  // one header. Send the JSON content type so the request can be issued.
+  ObString content_type_str("Content-Type: application/json");
+  ObString content_type_c_str;
+  if (OB_FAIL(ob_write_string(allocator, content_type_str, content_type_c_str, true))) {
+  } else if (OB_FAIL(headers.push_back(content_type_c_str))) {
+  }
   return ret;
 }
 
@@ -1339,6 +1345,20 @@ int ObAIFuncModel::call_completion(ObString &prompt, ObJsonObject *config, ObStr
   ObIJsonBase *result_base = nullptr;
   ObAIFuncIComplete *complete_provider = nullptr;
   ObString prompt_str;
+  // The AI COLUMN worker passes a typed system prompt through the config
+  // object. Ordinary ai_complete() calls (config == NULL) are unchanged.
+  if (OB_NOT_NULL(config)) {
+    ObString aic_key;
+    for (int64_t aic_i = 0; OB_SUCC(ret) && aic_i < config->element_count(); ++aic_i) {
+      ObJsonNode *aic_node = config->get_value(aic_i);
+      if (OB_ISNULL(aic_node)) { continue; }
+      if (OB_FAIL(config->get_key(aic_i, aic_key))) { break; }
+      if (0 == aic_key.case_compare(ObString("ai_system_prompt"))
+          && ObJsonNodeType::J_STRING == aic_node->json_type()) {
+        prompt_str = static_cast<ObJsonString *>(aic_node)->get_str();
+      }
+    }
+  }
   ObString result_str;
   ObAIFuncClient client;
   ObString unencrypted_access_key;

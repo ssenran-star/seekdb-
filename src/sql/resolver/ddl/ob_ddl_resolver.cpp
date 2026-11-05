@@ -2281,6 +2281,12 @@ int ObDDLResolver::resolve_normal_column_attribute(ObColumnSchemaV2 &column,
         }
         break;
       }
+      case T_AI_COLUMN_DEF:
+      {
+        // Parsed by ObCreateTableResolver::resolve_table_elements, which owns
+        // the table schema and can add the hidden bookkeeping columns.
+        break;
+      }
       case T_VISIBLE:
       case T_INVISIBLE:
       {

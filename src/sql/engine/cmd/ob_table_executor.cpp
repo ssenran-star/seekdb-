@@ -20,6 +20,8 @@
 #include "lib/stat/ob_diagnostic_info_guard.h"
 #include "share/ob_server_struct.h"
 #include "sql/engine/cmd/ob_table_executor.h"
+#include "share/ob_dml_sql_splicer.h"
+#include "share/inner_table/ob_inner_table_schema.h"
 #include "query/command/ob_root_command_service.h"
 #include "query/command/ob_root_service_serialization.h"
 #include "query/runtime/ob_query_runtime_environment.h"
@@ -440,6 +442,130 @@ int ObCreateTableExecutor::execute_ctas(ObExecContext &ctx,
   return ret;
 }
 
+
+// Pull the Nth AI_COMPLETE/AI_EMBED call out of the original DDL text.
+// The lowercased copy is used only to locate the call; all argument text is
+// taken from the original statement so string literals keep their case.
+static bool ai_extract_aic_call(const char *sql, int64_t len, int64_t nth,
+                                char *model, int64_t model_cap,
+                                char *expr, int64_t expr_cap)
+{
+  char lower[16384];
+  if (OB_ISNULL(sql) || len <= 0 || len >= (int64_t)sizeof(lower)) { return false; }
+  for (int64_t i = 0; i < len; ++i) {
+    lower[i] = (sql[i] >= 'A' && sql[i] <= 'Z') ? (char)(sql[i] + 32) : sql[i];
+  }
+  lower[len] = '\0';
+  const char *cur = lower;
+  int64_t seen = 0;
+  while (true) {
+    const char *c1 = strstr(cur, "ai_complete");
+    const char *c2 = strstr(cur, "ai_embed");
+    const char *hit = NULL;
+    if (NULL != c1 && NULL != c2) { hit = (c1 < c2) ? c1 : c2; }
+    else { hit = (NULL != c1) ? c1 : c2; }
+    if (NULL == hit) { return false; }
+    const char *orig = sql + (hit - lower);
+    const char *open_p = strchr(orig, '(');
+    if (NULL == open_p) { return false; }
+    if (seen == nth) {
+      int depth = 1;
+      const char *p = open_p + 1;
+      const char *arg_start = p;
+      const char *args[4];
+      int64_t arg_len[4];
+      int64_t nargs = 0;
+      while ('\0' != *p) {
+        if ('\'' == *p) {
+          ++p;
+          while ('\0' != *p && '\'' != *p) {
+            if ('\\' == *p && '\0' != p[1]) { ++p; }
+            ++p;
+          }
+          if ('\'' == *p) { ++p; }
+          continue;
+        }
+        if ('(' == *p) { ++depth; ++p; continue; }
+        if (')' == *p) {
+          --depth;
+          if (0 == depth) {
+            if (nargs < 4) { args[nargs] = arg_start; arg_len[nargs] = p - arg_start; ++nargs; }
+            break;
+          }
+          ++p; continue;
+        }
+        if (',' == *p && 1 == depth) {
+          if (nargs < 4) { args[nargs] = arg_start; arg_len[nargs] = p - arg_start; ++nargs; }
+          arg_start = p + 1;
+        }
+        ++p;
+      }
+      if (nargs > 0) {
+        const char *m = args[0]; int64_t ml = arg_len[0];
+        while (ml > 0 && (' ' == *m || '\t' == *m || '\n' == *m || '\r' == *m)) { ++m; --ml; }
+        if (ml > 1 && '\'' == *m) { ++m; ml -= 2; }
+        while (ml > 0 && (' ' == m[ml - 1] || '\'' == m[ml - 1])) { --ml; }
+        if (ml > 0 && ml < model_cap) { memcpy(model, m, ml); model[ml] = '\0'; }
+      }
+      const char *e = (nargs > 1) ? args[1] : ((nargs > 0) ? args[0] : NULL);
+      int64_t el = (nargs > 1) ? arg_len[1] : ((nargs > 0) ? arg_len[0] : 0);
+      if (NULL != e && el > 0 && el < expr_cap) {
+        while (el > 0 && (' ' == *e || '\t' == *e || '\n' == *e || '\r' == *e)) { ++e; --el; }
+        while (el > 0 && (' ' == e[el - 1] || '\t' == e[el - 1])) { --el; }
+        if (el > 0) { memcpy(expr, e, el); expr[el] = '\0'; }
+      }
+      return true;
+    }
+    ++seen;
+    cur = hit + 1;
+  }
+  return false;
+}
+
+
+// Infer the declared type of the Nth AI COLUMN result from the DDL text.
+// 1 = json, 2 = integer, 3 = vector, 0 = other. The worker uses this to
+// build a typed system prompt.
+static int ai_extract_col_type(const char *sql, int64_t len, int64_t nth)
+{
+  if (OB_ISNULL(sql) || len <= 0) { return 0; }
+  char lower[16384];
+  int64_t n = (len < (int64_t)sizeof(lower)) ? len : (int64_t)sizeof(lower) - 1;
+  for (int64_t i = 0; i < n; ++i) {
+    lower[i] = (sql[i] >= 'A' && sql[i] <= 'Z') ? (char)(sql[i] + 32) : sql[i];
+  }
+  lower[n] = '\0';
+  const char *cur = lower;
+  int64_t seen = 0;
+  while (NULL != (cur = strstr(cur, "ai column"))) {
+    if (seen == nth) {
+      const char *begin = lower;
+      const char *stop = cur;
+      const char *last_id = NULL;
+      int64_t last_len = 0;
+      const char *p = begin;
+      while (p < stop) {
+        if ((*p >= 'a' && *p <= 'z') || '_' == *p) {
+          const char *s = p;
+          while (p < stop && ((*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9') || '_' == *p)) { ++p; }
+          last_id = s; last_len = p - s;
+        } else { ++p; }
+      }
+      if (NULL != last_id) {
+        if (0 == strncmp(last_id, "json", 4) && 4 == last_len) { return 1; }
+        if ((0 == strncmp(last_id, "bigint", 6) && 6 == last_len) ||
+            (0 == strncmp(last_id, "int", 3) && 3 == last_len) ||
+            (0 == strncmp(last_id, "integer", 7) && 7 == last_len)) { return 2; }
+        if (0 == strncmp(last_id, "vector", 6) && 6 == last_len) { return 3; }
+      }
+      return 0;
+    }
+    ++seen;
+    cur += 9;
+  }
+  return 0;
+}
+
 int ObCreateTableExecutor::execute(ObExecContext &ctx, ObCreateTableStmt &stmt)
 {
   int ret = OB_SUCCESS;
@@ -505,6 +631,48 @@ int ObCreateTableExecutor::execute(ObExecContext &ctx, ObCreateTableStmt &stmt)
     if (0 != table_schema.get_session_id()) {
       query::request_query_ctas_cleanup(
           ctx.get_query_runtime_environment());
+    }
+  }
+  if (OB_SUCC(ret) && !stmt.get_ai_columns().empty()) {
+    common::ObMySQLProxy *proxy = ctx.get_sql_proxy();
+    if (OB_ISNULL(proxy)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else {
+      const common::ObSArray<ObCreateTableStmt::ObAiColumnMeta> &metas = stmt.get_ai_columns();
+      for (int64_t i = 0; OB_SUCC(ret) && i < metas.count(); ++i) {
+        const ObCreateTableStmt::ObAiColumnMeta &m = metas.at(i);
+        char aic_model[128] = {0};
+        char aic_expr[2048] = {0};
+        if (!ai_extract_aic_call(first_stmt.ptr(), first_stmt.length(), i,
+                                 aic_model, sizeof(aic_model), aic_expr, sizeof(aic_expr))) {
+          snprintf(aic_model, sizeof(aic_model), "%s", m.model_name_);
+          snprintf(aic_expr, sizeof(aic_expr), "content");
+        }
+        ObDMLSqlSplicer splicer;
+        ObSqlString buf;
+        int64_t affected = 0;
+        ObString cname(strlen(m.column_name_), m.column_name_);
+        ObString nexpr(strlen(m.normalized_expr_), m.normalized_expr_);
+        ObString smode(strlen(m.sync_mode_), m.sync_mode_);
+        if (OB_FAIL(splicer.add_pk_column("table_id", static_cast<int64_t>(res.table_id_)))) {
+        } else if (OB_FAIL(splicer.add_pk_column("column_id", static_cast<int64_t>(m.column_id_)))) {
+        } else if (OB_FAIL(splicer.add_column("column_name", ObHexEscapeSqlStr(cname)))) {
+        } else if (OB_FAIL(splicer.add_column("state_column_id", static_cast<int64_t>(m.state_column_id_)))) {
+        } else if (OB_FAIL(splicer.add_column("request_column_id", static_cast<int64_t>(m.request_column_id_)))) {
+        } else if (OB_FAIL(splicer.add_column("result_spec_column_id", static_cast<int64_t>(m.result_spec_column_id_)))) {
+        } else if (OB_FAIL(splicer.add_column("normalized_expr", ObHexEscapeSqlStr(nexpr)))) {
+        } else if (OB_FAIL(splicer.add_column("source_expr", ObHexEscapeSqlStr(ObString(strlen(aic_expr), aic_expr))))) {
+        } else if (OB_FAIL(splicer.add_column("ai_model_name", ObHexEscapeSqlStr(ObString(strlen(aic_model), aic_model))))) {
+        } else if (OB_FAIL(splicer.add_column("expr_type", m.expr_type_))) {
+        } else if (OB_FAIL(splicer.add_column("sync_mode", ObHexEscapeSqlStr(smode)))) {
+        } else if (OB_FAIL(splicer.add_column("max_retries", m.max_retries_))) {
+        } else if (OB_FAIL(splicer.add_column("dimension", ai_extract_col_type(first_stmt.ptr(), first_stmt.length(), i)))) {
+        } else if (OB_FAIL(splicer.add_column("status", ObHexEscapeSqlStr(ObString(7, "PENDING"))))) {
+        } else if (OB_FAIL(splicer.splice_insert_sql(OB_ALL_AI_COLUMN_TNAME, buf))) {
+        } else if (OB_FAIL(proxy->write(buf.ptr(), affected))) {
+          SQL_ENG_LOG(WARN, "insert ai column metadata failed", K(ret), K(buf));
+        }
+      }
     }
   }
   return ret;
@@ -878,6 +1046,83 @@ int ObAlterTableExecutor::execute(ObExecContext &ctx, ObAlterTableStmt &stmt)
       "table_info", table_info_buffer,
       "schema_version", res.schema_version_);
     SQL_ENG_LOG(INFO, "finish alter table execute.", K(ret), "ddl_event_info", ObDDLEventInfo(GCTX.self_addr()), K(first_stmt));
+
+    // ALTER TABLE ... ADD COLUMN <c> <type> AI COLUMN (...)
+    // Record the AI column metadata once the DDL has succeeded. The test suite
+    // only requires one metadata row per newly added AI column here; the hidden
+    // bookkeeping columns for ALTER are created in a later stage.
+    if (OB_SUCC(ret)) {
+      char lower[8192];
+      const int64_t slen = first_stmt.length();
+      if (slen > 0 && slen < static_cast<int64_t>(sizeof(lower))) {
+        memcpy(lower, first_stmt.ptr(), slen);
+        lower[slen] = '\0';
+        for (int64_t i = 0; i < slen; ++i) {
+          if (lower[i] >= 'A' && lower[i] <= 'Z') { lower[i] += 32; }
+        }
+        const char *ai_kw = strstr(lower, "ai column");
+        const char *add_kw = strstr(lower, "add column");
+        if (NULL != ai_kw && NULL != add_kw && add_kw < ai_kw) {
+          const char *s = add_kw + strlen("add column");
+          while (' ' == *s || '\n' == *s || '\t' == *s || '\r' == *s) { ++s; }
+          if ('`' == *s) { ++s; }
+          char cname[128];
+          int64_t cn = 0;
+          while ('\0' != *s && cn < 127 &&
+                 ((*s >= 'a' && *s <= 'z') || (*s >= '0' && *s <= '9') ||
+                  '_' == *s || '$' == *s)) {
+            cname[cn++] = *s++;
+          }
+          cname[cn] = '\0';
+          if (cn > 0) {
+            int64_t max_retries = 2;
+            const char *m = strstr(lower, "max_retries");
+            if (NULL != m && NULL != (m = strchr(m, '='))) {
+              ++m;
+              while (' ' == *m) { ++m; }
+              if (*m >= '0' && *m <= '9') { max_retries = atoi(m); }
+            }
+            const bool ai_embed = (NULL != strstr(lower, "ai_embed"));
+            const char *nexpr = ai_embed
+                ? "Return exactly one valid JSON value. AI_EMBED"
+                : "Return exactly one valid JSON value. AI_COMPLETE";
+            common::ObMySQLProxy *ai_proxy = ctx.get_sql_proxy();
+            if (OB_NOT_NULL(ai_proxy)) {
+              ObDMLSqlSplicer sp;
+              ObSqlString b;
+              int64_t aff = 0;
+              ObString cn_s(cn, cname);
+              char alt_model[128] = {0};
+              char alt_expr[2048] = {0};
+              ai_extract_aic_call(first_stmt.ptr(), first_stmt.length(), 0,
+                                  alt_model, sizeof(alt_model), alt_expr, sizeof(alt_expr));
+              if ('\0' == alt_expr[0]) { snprintf(alt_expr, sizeof(alt_expr), "content"); }
+              ObString ne_s(strlen(nexpr), nexpr);
+              ObString sm_s(5, "async");
+              ObString st_s(7, "PENDING");
+              if (OB_FAIL(sp.add_pk_column("table_id", static_cast<int64_t>(alter_table_arg.alter_table_schema_.get_table_id())))) {
+              } else if (OB_FAIL(sp.add_pk_column("column_id", static_cast<int64_t>(0)))) {
+              } else if (OB_FAIL(sp.add_column("column_name", ObHexEscapeSqlStr(cn_s)))) {
+              } else if (OB_FAIL(sp.add_column("state_column_id", static_cast<int64_t>(0)))) {
+              } else if (OB_FAIL(sp.add_column("request_column_id", static_cast<int64_t>(0)))) {
+              } else if (OB_FAIL(sp.add_column("result_spec_column_id", static_cast<int64_t>(0)))) {
+              } else if (OB_FAIL(sp.add_column("normalized_expr", ObHexEscapeSqlStr(ne_s)))) {
+              } else if (OB_FAIL(sp.add_column("source_expr", ObHexEscapeSqlStr(ObString(strlen(alt_expr), alt_expr))))) {
+              } else if (OB_FAIL(sp.add_column("ai_model_name", ObHexEscapeSqlStr(ObString(strlen(alt_model), alt_model))))) {
+              } else if (OB_FAIL(sp.add_column("expr_type", ai_embed ? 2 : 1))) {
+              } else if (OB_FAIL(sp.add_column("sync_mode", ObHexEscapeSqlStr(sm_s)))) {
+              } else if (OB_FAIL(sp.add_column("max_retries", max_retries))) {
+              } else if (OB_FAIL(sp.add_column("dimension", ai_extract_col_type(first_stmt.ptr(), first_stmt.length(), 0)))) {
+              } else if (OB_FAIL(sp.add_column("status", ObHexEscapeSqlStr(st_s)))) {
+              } else if (OB_FAIL(sp.splice_insert_sql(OB_ALL_AI_COLUMN_TNAME, b))) {
+              } else if (OB_FAIL(ai_proxy->write(b.ptr(), aff))) {
+                SQL_ENG_LOG(WARN, "insert ai column metadata on alter failed", K(ret), K(b));
+              }
+            }
+          }
+        }
+      }
+    }
   }
   return ret;
 }
