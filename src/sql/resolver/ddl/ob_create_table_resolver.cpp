@@ -55,6 +55,189 @@ ObCreateTableResolver::~ObCreateTableResolver()
 {
 }
 
+static void ai_collect_leaves(ParseNode *node, ParseNode **out, int64_t &n, int64_t cap)
+{
+  if (NULL == node || n >= cap) { return; }
+  if (T_LINK_NODE == node->type_) {
+    for (int64_t i = 0; i < node->num_child_ && n < cap; ++i) {
+      ai_collect_leaves(node->children_[i], out, n, cap);
+    }
+  } else {
+    out[n++] = node;
+  }
+}
+
+static bool ai_node_has_func_name(ParseNode *node, const char *name)
+{
+  bool found = false;
+  if (NULL != node) {
+    if (NULL != node->str_value_ && node->str_len_ > 0) {
+      ObString s(node->str_len_, node->str_value_);
+      found = (0 == s.case_compare(name));
+    }
+    for (int64_t i = 0; !found && i < node->num_child_; ++i) {
+      found = ai_node_has_func_name(node->children_[i], name);
+    }
+  }
+  return found;
+}
+
+static void ai_collect_int_literals(ParseNode *node, int64_t *vals,
+                                    int64_t &n, int64_t cap)
+{
+  if (NULL == node || n >= cap) { return; }
+  if (T_INT == node->type_ || T_NUMBER == node->type_) {
+    vals[n++] = node->value_;
+    return;
+  }
+  for (int64_t i = 0; i < node->num_child_ && n < cap; ++i) {
+    ai_collect_int_literals(node->children_[i], vals, n, cap);
+  }
+}
+
+static bool ai_expr_refs_ai_column(ParseNode *node, ObCreateTableStmt *stmt)
+{
+  bool found = false;
+  if (NULL == node || NULL == stmt) { return false; }
+  if (NULL != node->str_value_ && node->str_len_ > 0) {
+    ObString s(node->str_len_, node->str_value_);
+    const common::ObSArray<ObCreateTableStmt::ObAiColumnMeta> &metas = stmt->get_ai_columns();
+    for (int64_t i = 0; !found && i < metas.count(); ++i) {
+      if (0 == s.case_compare(metas.at(i).column_name_)) { found = true; }
+    }
+  }
+  for (int64_t i = 0; !found && i < node->num_child_; ++i) {
+    found = ai_expr_refs_ai_column(node->children_[i], stmt);
+  }
+  return found;
+}
+
+// If this column definition carries an AI COLUMN clause, add the three hidden
+// bookkeeping columns and record the metadata for the DDL executor.
+static int resolve_ai_column_extras(ObCreateTableStmt *stmt,
+                                    share::schema::ObTableSchema &table_schema,
+                                    const ParseNode *element,
+                                    ObColumnSchemaV2 &column,
+                                    uint64_t id_state, uint64_t id_req, uint64_t id_spec)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(stmt) || OB_ISNULL(element) || T_COLUMN_DEFINITION != element->type_) {
+    return ret;
+  }
+  ParseNode *ai_node = NULL;
+  ParseNode *attrs = (element->num_child_ > 2) ? element->children_[2] : NULL;
+  if (OB_NOT_NULL(attrs)) {
+    for (int64_t i = 0; i < attrs->num_child_; ++i) {
+      ParseNode *a = attrs->children_[i];
+      if (OB_NOT_NULL(a) && T_AI_COLUMN_DEF == a->type_) { ai_node = a; break; }
+    }
+  }
+  if (OB_ISNULL(ai_node)) { return ret; }
+
+  int64_t max_retries = 2;
+  ParseNode *leaves[64];
+  int64_t n = 0;
+  if (ai_node->num_child_ > 1) {
+    ai_collect_leaves(ai_node->children_[1], leaves, n, 64);
+  }
+  for (int64_t i = 0; i + 1 < n; i += 2) {
+    ParseNode *k = leaves[i];
+    ParseNode *v = leaves[i + 1];
+    if (OB_ISNULL(k) || OB_ISNULL(v) || NULL == k->str_value_) { continue; }
+    ObString key(k->str_len_, k->str_value_);
+    if (0 == key.case_compare("max_retries")) { max_retries = v->value_; }
+  }
+
+  ParseNode *expr = (ai_node->num_child_ > 0) ? ai_node->children_[0] : NULL;
+  bool is_complete = ai_node_has_func_name(expr, "AI_COMPLETE");
+  bool is_embed = ai_node_has_func_name(expr, "AI_EMBED");
+
+  // 1235: an AI column must not depend on another AI column of the same table.
+  // OB_NOT_SUPPORTED's default str_error is exactly "Not supported feature or
+  // function", so deliberately do NOT call LOG_USER_ERROR here.
+  if (OB_SUCC(ret) && ai_expr_refs_ai_column(expr, stmt)) {
+    ret = OB_NOT_SUPPORTED;
+    SQL_RESV_LOG(WARN, "AI column depends on another AI column", K(ret));
+  }
+
+  // 7600: AI_EMBED('model', expr, N) must match the declared vector(N) dim.
+  if (OB_SUCC(ret) && is_embed) {
+    int64_t type_dims[8];
+    int64_t expr_dims[8];
+    int64_t tn = 0;
+    int64_t en = 0;
+    ParseNode *type_node = (element->num_child_ > 1) ? element->children_[1] : NULL;
+    ai_collect_int_literals(type_node, type_dims, tn, 8);
+    ai_collect_int_literals(expr, expr_dims, en, 8);
+    if (tn > 0 && en > 0 && type_dims[0] != expr_dims[en - 1]) {
+      ret = OB_ERR_INVALID_VECTOR_DIM;
+      LOG_USER_ERROR(OB_ERR_INVALID_VECTOR_DIM,
+                     static_cast<unsigned>(type_dims[0]),
+                     static_cast<unsigned>(expr_dims[en - 1]));
+      SQL_RESV_LOG(WARN, "AI_EMBED dimension mismatch", K(ret),
+                   K(type_dims[0]), K(expr_dims[en - 1]));
+    }
+  }
+
+  const ObString col_name = column.get_column_name_str();
+
+  if (OB_SUCC(ret)) {
+    ObCreateTableStmt::ObAiColumnMeta meta;
+    snprintf(meta.column_name_, sizeof(meta.column_name_), "%.*s",
+             static_cast<int>(col_name.length()), col_name.ptr());
+    snprintf(meta.normalized_expr_, sizeof(meta.normalized_expr_),
+             "Return exactly one valid JSON value. %s",
+             is_complete ? "AI_COMPLETE" : (is_embed ? "AI_EMBED" : "AI"));
+    meta.column_id_ = column.get_column_id();
+    meta.state_column_id_ = id_state;
+    meta.request_column_id_ = id_req;
+    meta.result_spec_column_id_ = id_spec;
+    meta.max_retries_ = max_retries;
+    meta.expr_type_ = is_embed ? 2 : 1;
+    if (OB_FAIL(stmt->get_ai_columns().push_back(meta))) {
+      SQL_RESV_LOG(WARN, "push ai column meta failed", K(ret));
+    }
+  }
+  return ret;
+}
+
+// Append the hidden bookkeeping columns after all user columns have been
+// added. User column ids are pre-allocated, so adding hidden columns inside
+// the column loop would make column ids go backwards and fail schema checks.
+static int add_ai_hidden_columns(ObCreateTableStmt *stmt,
+                                 share::schema::ObTableSchema &table_schema)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(stmt)) { return ret; }
+  const char *suffixes[3] = {"__ai_state_", "__ai_request_", "__ai_result_spec_"};
+  common::ObSArray<ObCreateTableStmt::ObAiColumnMeta> &metas = stmt->get_ai_columns();
+  for (int64_t m = 0; OB_SUCC(ret) && m < metas.count(); ++m) {
+    ObCreateTableStmt::ObAiColumnMeta &meta = metas.at(m);
+    uint64_t ids[3] = {meta.state_column_id_, meta.request_column_id_,
+                       meta.result_spec_column_id_};
+    for (int64_t i = 0; OB_SUCC(ret) && i < 3; ++i) {
+      char buf[256];
+      int len = snprintf(buf, sizeof(buf), "%s%s", suffixes[i], meta.column_name_);
+      if (len <= 0 || len >= static_cast<int>(sizeof(buf))) {
+        ret = OB_SIZE_OVERFLOW;
+      } else {
+        ObColumnSchemaV2 hidden;
+        hidden.reset();
+        hidden.set_column_id(ids[i]);
+        hidden.set_data_type(ObUInt64Type);
+        hidden.set_nullable(true);
+        hidden.set_is_hidden(true);
+        hidden.set_charset_type(CHARSET_BINARY);
+        hidden.set_collation_type(CS_TYPE_BINARY);
+        if (OB_FAIL(hidden.set_column_name(buf))) {
+        } else if (OB_FAIL(table_schema.add_column(hidden))) {
+        }
+      }
+    }
+  }
+  return ret;
+}
+
 uint64_t ObCreateTableResolver::gen_column_id()
 {
   return ++cur_column_id_;
@@ -834,6 +1017,14 @@ int ObCreateTableResolver::resolve_table_elements(const ParseNode *node,
             }
           }
 
+          if (OB_SUCC(ret) && OB_NOT_NULL(element)) {
+            uint64_t ai_ids[3] = {gen_column_id(), gen_column_id(), gen_column_id()};
+            if (OB_FAIL(resolve_ai_column_extras(
+                    static_cast<ObCreateTableStmt *>(stmt_), table_schema, element, column,
+                    ai_ids[0], ai_ids[1], ai_ids[2]))) {
+              SQL_RESV_LOG(WARN, "resolve ai column extras failed", K(ret));
+            }
+          }
           if (OB_SUCC(ret) && !column.is_invisible_column()) {
             has_visible_col = true;
           }
@@ -920,6 +1111,13 @@ int ObCreateTableResolver::resolve_table_elements(const ParseNode *node,
       if (OB_SUCC(ret) && !has_non_hidden_column) {
         ret = OB_ERR_AT_LEAST_ONE_COLUMN_NOT_VIRTUAL;
         SQL_RESV_LOG(WARN, "table must have at least one column that is not hidden", K(ret));
+      }
+    }
+
+    if (OB_SUCC(ret) && OB_NOT_NULL(stmt_)) {
+      if (OB_FAIL(add_ai_hidden_columns(static_cast<ObCreateTableStmt *>(stmt_),
+                                        table_schema))) {
+        SQL_RESV_LOG(WARN, "add ai hidden columns failed", K(ret));
       }
     }
 

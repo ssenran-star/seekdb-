@@ -127,8 +127,8 @@ public:
       shared_buf_len_(0),
       use_shared_buf_(false),
       has_compress_(false),
-      external_properties_(),
       file_sql_header_written_(false),
+      external_properties_(),
       format_type_(ObExternalFileFormat::FormatType::CSV_FORMAT),
       block_id_(0),
       need_commit_(true)

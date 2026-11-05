@@ -111,7 +111,10 @@ private:
   void close_reader();
   int fill_row(const common::ObIArray<common::ObObj> &cells);
 
+public:
   struct Reader;
+
+private:
   Reader *reader_;
   common::ObArenaAllocator row_alloc_;
 };

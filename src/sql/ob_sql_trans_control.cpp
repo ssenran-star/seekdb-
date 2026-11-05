@@ -973,7 +973,13 @@ int ObSqlTransControl::end_stmt(ObExecContext &exec_ctx, const bool rollback, co
       data_plane::rollback_statement_deadlock(tx_id_before_rollback);
     }
   }
-  if (!ObSQLUtils::is_nested_sql(&exec_ctx) && OB_NOT_NULL(session)) {
+  // A statement that runs inside a nested session (for example the internal
+  // SQL issued by the AI column task bookkeeping) must not finish the
+  // statement of the outer session: the nested session owns the statement
+  // counter and restores it when it ends.
+  if (!ObSQLUtils::is_nested_sql(&exec_ctx)
+      && !(OB_NOT_NULL(session) && session->is_nested_session())
+      && OB_NOT_NULL(session)) {
     int tmp_ret = session->set_end_stmt();
     if (OB_SUCCESS != tmp_ret) {
     }

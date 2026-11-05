@@ -2179,6 +2179,10 @@ int ObDMLService::handle_after_processing_multi_row(ObDMLModifyRowsList *dml_mod
           } else if (OB_FAIL(TriggerHandle::do_handle_after_row(op, dml_ctdef.trig_ctdef_, dml_rtdef.trig_rtdef_, dml_event))) {
           }
         }
+        // process ai column tasks of this row (same transaction as the user DML)
+        if (OB_SUCC(ret) && OB_FAIL(op.process_ai_column_row(modify_row))) {
+          SQL_ENG_LOG(WARN, "process ai column row failed", K(ret));
+        }
       }
     }
 
@@ -2218,6 +2222,10 @@ int ObDMLService::handle_after_processing_single_row(ObDMLModifyRowNode &modify_
       }
     }
     if (OB_SUCC(ret) && OB_FAIL(TriggerHandle::do_handle_after_row(op, dml_ctdef.trig_ctdef_, dml_rtdef.trig_rtdef_, dml_event))) {
+    }
+    // process ai column tasks of this row (same transaction as the user DML)
+    if (OB_SUCC(ret) && OB_FAIL(op.process_ai_column_row(modify_row))) {
+      SQL_ENG_LOG(WARN, "process ai column row failed", K(ret));
     }
   }
   return ret;

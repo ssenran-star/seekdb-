@@ -64,6 +64,7 @@
 #include "observer/ob_internal_table_refresh_adapter.h"
 #include "observer/ob_ls_runtime_adapter.h"
 #include "observer/ob_server_duty_task.h"
+#include "observer/ai_service/ob_ai_column_worker.h"
 #include "observer/ob_srv_network_frame.h"
 #include "observer/ob_service.h"
 #include "observer/ob_server_reload_config.h"
@@ -488,6 +489,7 @@ private:
   ObCTASCleanUpTask ctas_clean_up_task_;     // repeat & no retry
   ObRedefTableHeartBeatTask redef_table_heart_beat_task_;
   ObRefreshCpuFreqTimeTask refresh_cpu_frequency_task_;
+  ObAiColumnWorker ai_column_worker_;
   blocksstable::ObStorageEnv storage_env_;
   share::ObSchemaStatusProxy schema_status_proxy_;
 

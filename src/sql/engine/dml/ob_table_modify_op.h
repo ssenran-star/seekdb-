@@ -22,6 +22,7 @@
 #include "sql/session/ob_inner_sql_connection.h"
 #include "sql/engine/ob_exec_context.h"
 #include "sql/engine/dml/ob_fk_checker.h"
+#include "share/ai_service/ob_ai_column_def.h"
 
 namespace oceanbase
 {
@@ -238,7 +239,13 @@ public:
   bool has_before_row_trigger(const ObDMLBaseCtDef &dml_ctdef) { return dml_ctdef.is_primary_index_ && dml_ctdef.trig_ctdef_.all_tm_points_.has_before_row(); }
   bool has_after_row_trigger(const ObDMLBaseCtDef &dml_ctdef) { return dml_ctdef.is_primary_index_ && dml_ctdef.trig_ctdef_.all_tm_points_.has_after_row(); }
   bool need_foreign_key_check(const ObDMLBaseCtDef &dml_ctdef) { return dml_ctdef.is_primary_index_ && dml_ctdef.fk_args_.count() > 0; }
-  bool need_after_row_process(const ObDMLBaseCtDef &dml_ctdef) { return need_foreign_key_check(dml_ctdef) || has_after_row_trigger(dml_ctdef); }
+  bool need_after_row_process(const ObDMLBaseCtDef &dml_ctdef) {
+    // A table with AI columns needs the after row phase as well: the
+    // regeneration tasks are queued there, inside the user transaction.
+    return need_foreign_key_check(dml_ctdef)
+        || has_after_row_trigger(dml_ctdef)
+        || share::ObAiColumnRegistry::get_instance().has_ai_columns(dml_ctdef.das_base_ctdef_.index_tid_);
+  }
   void set_execute_single_row() { execute_single_row_ = true; }
   void unset_execute_single_row() { execute_single_row_ = false; }
   bool get_execute_single_row() const { return execute_single_row_; }
@@ -253,6 +260,13 @@ public:
   int submit_all_dml_task();
 
   int perform_batch_fk_check();
+
+  // ================= AI column support =================
+  // Creates/invalidates the async regeneration tasks of the AI columns of the
+  // modified row. Runs in the after-row phase so that every task row is
+  // written through the session bound inner connection, i.e. inside the very
+  // same transaction as the user DML: a rollback removes the tasks as well.
+  int process_ai_column_row(const ObDMLModifyRowNode &modify_row);
 protected:
   OperatorOpenOrder get_operator_open_order() const;
   virtual int inner_open();
@@ -316,6 +330,50 @@ public:
 private:
   ObSQLSessionInfo::StmtSavedValue *saved_session_;
   char saved_session_buf_[sizeof(ObSQLSessionInfo::StmtSavedValue)] __attribute__((aligned (16)));;
+
+  // ================= AI column support =================
+  // Cached per statement: table layout (db/table name, row key positions) and
+  // the rows of oceanbase.__all_ai_column that belong to the modified table.
+  int load_ai_table_ctx_(uint64_t table_id);
+  int load_ai_column_metas_(uint64_t table_id);
+  int ai_process_insert_(const ObDMLBaseCtDef &dml_ctdef);
+  int ai_process_update_(const ObDMLBaseCtDef &dml_ctdef);
+  int ai_process_delete_(const ObDMLBaseCtDef &dml_ctdef);
+  int ai_gen_rowkey_predicate_(const ObDMLBaseCtDef &dml_ctdef,
+                               const ObExprPtrIArray &row,
+                               ObSqlString &pred,
+                               bool &is_null_pk);
+  int ai_gen_request_id_(ObSqlString &rid);
+  static bool ai_expr_has_identifier_(const char *expr, const char *ident);
+  static int64_t ai_row_pos_of_col_id_(const ObDMLBaseCtDef &dml_ctdef, uint64_t col_id);
+
+  struct ObAiTableCtx
+  {
+    ObAiTableCtx() { reset(); }
+    void reset()
+    {
+      table_id_ = common::OB_INVALID_ID;
+      db_name_[0] = '\0';
+      table_name_[0] = '\0';
+      col_cnt_ = 0;
+      rowkey_cnt_ = 0;
+    }
+    uint64_t table_id_;
+    char db_name_[128];
+    char table_name_[128];
+    static const int64_t MAX_AI_COLS = 64;
+    int64_t col_cnt_;
+    uint64_t col_ids_[MAX_AI_COLS];
+    char col_names_[MAX_AI_COLS][128];
+    int64_t rowkey_pos_[MAX_AI_COLS];
+    int64_t rowkey_cnt_;
+  };
+  ObAiTableCtx ai_table_ctx_;
+  bool ai_table_ctx_loaded_;
+  bool ai_metas_loaded_;
+  bool ai_metas_filtered_;
+  uint64_t ai_meta_table_id_;
+  common::ObSEArray<share::ObAiColumnMetaInfo, 4> ai_metas_;
 
   // used by check_rowkey_whether_distinct
   static const int64_t MIN_ROWKEY_DISTINCT_BUCKET_NUM = 1 * 1024;

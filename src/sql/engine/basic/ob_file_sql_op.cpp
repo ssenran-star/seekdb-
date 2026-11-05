@@ -441,7 +441,7 @@ public:
       ::close(fd_);
       fd_ = -1;
     }
-    buf_.reset();
+    buf_[0] = 0;
     buf_len_ = 0;
     pos_ = 0;
     eof_ = false;
@@ -635,6 +635,7 @@ public:
       } else if (ceof) {
         if (!saw_char && !field_started && 0 == fields.count() && 0 == field_.length()) {
           eof = true;
+          end = true;
         } else if (in_quotes) {
           ret = OB_INVALID_ARGUMENT;
           LOG_WARN("unterminated CSV quote", K(ret));
@@ -2154,15 +2155,25 @@ public:
   int open() override
   {
     int ret = OB_SUCCESS;
-    int rc = glob(path_.ptr(), 0, NULL, &gl_);
-    if (0 != rc && GLOB_NOMATCH != rc) {
+    char pattern[PATH_MAX];
+    if (path_.length() <= 0 || path_.length() >= PATH_MAX) {
       ret = OB_INVALID_ARGUMENT;
-      LOG_WARN("glob failed", K(ret), K(rc), K(path_));
+      LOG_WARN("invalid glob pattern", K(ret), K(path_));
     } else {
-      inited_ = true;
-      idx_ = 0;
-      if (GLOB_NOMATCH == rc) {
-        gl_.gl_pathc = 0;
+      // ObString::ptr() is not guaranteed to be NUL-terminated, but libc
+      // glob() requires a C string. Copy into a local buffer first.
+      MEMCPY(pattern, path_.ptr(), path_.length());
+      pattern[path_.length()] = '\0';
+      int rc = glob(pattern, 0, NULL, &gl_);
+      if (0 != rc && GLOB_NOMATCH != rc) {
+        ret = OB_INVALID_ARGUMENT;
+        LOG_WARN("glob failed", K(ret), K(rc), K(path_));
+      } else {
+        inited_ = true;
+        idx_ = 0;
+        if (GLOB_NOMATCH == rc) {
+          gl_.gl_pathc = 0;
+        }
       }
     }
     return ret;
@@ -2728,7 +2739,14 @@ int ObFileSqlOp::open_reader()
     }
   } else {
     ObString canon;
-    if (OB_FAIL(check_secure_realpath(ctx_.get_my_session(), path.ptr(), canon, row_alloc_))) {
+    char path_buf[PATH_MAX];
+    if (path.length() <= 0 || path.length() >= PATH_MAX) {
+      ret = OB_INVALID_ARGUMENT;
+    } else {
+      MEMCPY(path_buf, path.ptr(), path.length());
+      path_buf[path.length()] = '\0';
+      if (OB_FAIL(check_secure_realpath(ctx_.get_my_session(), path_buf, canon, row_alloc_))) {
+      }
     }
   }
   if (OB_FAIL(ret)) {

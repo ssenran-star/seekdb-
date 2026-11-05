@@ -45,22 +45,6 @@ int ObExplainResolver::resolve(const ParseNode &parse_tree)
     ObStmt *child_stmt = NULL;
     ObExplainDisplayOpt opt;
     opt.with_tree_line_ = true;
-    // DESCRIBE/DESC <select> returns result-set metadata. EXPLAIN keeps the plan.
-    if (1 == parse_tree.value_ && OB_NOT_NULL(child_node) && T_SELECT == child_node->type_) {
-      ObDescribeQueryResolver describe_resolver(params_);
-      ParseNode describe_node;
-      ParseNode *describe_child[1] = {child_node};
-      memset(&describe_node, 0, sizeof(describe_node));
-      describe_node.type_ = T_DESCRIBE_QUERY;
-      describe_node.num_child_ = 1;
-      describe_node.children_ = describe_child;
-      if (OB_FAIL(describe_resolver.resolve(describe_node))) {
-        LOG_WARN("resolve DESCRIBE SELECT failed", K(ret));
-      } else {
-        stmt_ = describe_resolver.get_basic_stmt();
-      }
-      return ret;
-    }
     if (OB_ISNULL(child_node)) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("empty parse tree for stmt");

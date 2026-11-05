@@ -236,6 +236,11 @@ int ObDMLResolver::resolve_file_sql_table_item(const ParseNode &parse_tree, Tabl
       if (col.is_bool_) {
         accuracy.set_precision(1);
         accuracy.set_scale(0);
+      } else if (ObDateTimeType == col.type_) {
+        // File SQL infers plain 'YYYY-MM-DD HH:MM:SS' literals. The DDL
+        // default accuracy for DATETIME has scale 6, which prints a trailing
+        // '.000000' that does not match the source values.
+        accuracy.set_scale(0);
       }
       result_type.set_meta(meta);
       result_type.set_accuracy(accuracy);

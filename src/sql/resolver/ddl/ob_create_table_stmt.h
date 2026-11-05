@@ -76,6 +76,34 @@ public:
   void set_insert_mode(uint64_t mode) { insert_mode_ = mode; }
   uint64_t get_insert_mode() const { return insert_mode_; }
 
+  // Metadata for AI COLUMN definitions collected by the resolver. POD only,
+  // it lives in the SQL-layer statement and is never sent over the DDL RPC.
+  struct ObAiColumnMeta {
+    char column_name_[128];
+    char model_name_[128];
+    char normalized_expr_[4096];
+    char sync_mode_[32];
+    uint64_t column_id_;
+    uint64_t state_column_id_;
+    uint64_t request_column_id_;
+    uint64_t result_spec_column_id_;
+    int64_t max_retries_;
+    int64_t expr_type_;
+    ObAiColumnMeta() { reset(); }
+    void reset() {
+      memset(column_name_, 0, sizeof(column_name_));
+      memset(model_name_, 0, sizeof(model_name_));
+      memset(normalized_expr_, 0, sizeof(normalized_expr_));
+      memset(sync_mode_, 0, sizeof(sync_mode_));
+      column_id_ = 0; state_column_id_ = 0;
+      request_column_id_ = 0; result_spec_column_id_ = 0;
+      max_retries_ = 2; expr_type_ = 0;
+      snprintf(sync_mode_, sizeof(sync_mode_), "async");
+    }
+  };
+  common::ObSArray<ObAiColumnMeta> &get_ai_columns() { return ai_columns_; }
+  const common::ObSArray<ObAiColumnMeta> &get_ai_columns() const { return ai_columns_; }
+
   ObTableType get_table_type() const { return create_table_arg_.schema_.get_table_type(); }
   INHERIT_TO_STRING_KV("ObTableStmt", ObTableStmt, K_(stmt_type), K_(create_table_arg), K_(index_arg_list));
 private:
@@ -84,6 +112,7 @@ private:
   bool is_view_stmt_;
   share::schema::ObStmtNeedPrivs::NeedPrivs view_need_privs_;
   common::ObSArray<obcall::ObCreateIndexArg> index_arg_list_;
+  common::ObSArray<ObAiColumnMeta> ai_columns_;
   common::ObString masked_sql_;
   //common::ObSEArray<ObRawExpr *, OB_DEFAULT_ARRAY_SIZE, common::ModulePageAllocator, true> partition_fun_expr_; // for range fun expr
   //common::ObSEArray<ObRawExpr *, OB_DEFAULT_ARRAY_SIZE, common::ModulePageAllocator, true> range_values_exprs_; //range partition expr
