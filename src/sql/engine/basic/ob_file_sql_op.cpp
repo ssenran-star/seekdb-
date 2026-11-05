@@ -441,7 +441,7 @@ public:
       ::close(fd_);
       fd_ = -1;
     }
-    buf_.reset();
+    buf_[0] = 0;
     buf_len_ = 0;
     pos_ = 0;
     eof_ = false;
