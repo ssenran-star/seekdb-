@@ -45,6 +45,7 @@ ObTextRetrievalTokenIter::ObTextRetrievalTokenIter()
     token_doc_cnt_(0),
     max_token_relevance_(-1.0),
     advance_doc_id_(),
+    est_alloc_(lib::ObMemAttr("FTTokEst")),
     token_doc_cnt_calculated_(false),
     inv_idx_agg_cache_mode_(false),
     is_inited_(false)
@@ -362,7 +363,7 @@ int ObTextRetrievalTokenIter::estimate_token_doc_cnt()
   int64_t logical_row_cnt = 0;
   int64_t physical_row_cnt = 0;
   ObSEArray<ObEstRowCountRecord, 1> est_records;
-  ObArenaAllocator allocator;
+  est_alloc_.reuse();
   const int64_t timeout_us = THIS_WORKER.get_timeout_remain();
   ObAccessService *access_service = NULL;
   storage::ObTableScanRange table_scan_range;
@@ -378,7 +379,7 @@ int ObTextRetrievalTokenIter::estimate_token_doc_cnt()
   est_param.frozen_version_ = GET_BATCH_ROWS_READ_SNAPSHOT_VERSION;
   if (OB_ISNULL(access_service = ::oceanbase::share::server_service<::oceanbase::storage::ObAccessService>())) {
     ret = OB_ERR_UNEXPECTED;
-  } else if (OB_FAIL(table_scan_range.init(*inv_idx_agg_param_, batch, allocator))) {
+  } else if (OB_FAIL(table_scan_range.init(*inv_idx_agg_param_, batch, est_alloc_))) {
   } else if (OB_FAIL(access_service->estimate_row_count(est_param,
                                                         table_scan_range,
                                                         timeout_us,

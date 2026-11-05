@@ -394,6 +394,35 @@ int ObFTRangeDict::find_first_char_range(const ObString &single_word, ObIFTDict 
     }
   }
 
+  if (!found && range_cnt > 0) {
+    // range 按字典序追加，start_ 单调不减：二分定位最后一个 start_ <= word 的
+    // range。若数据异常导致未命中，下面保留的全量线性扫描仍按原语义返回首个
+    // 包含该字的 range，正确性不受影响。
+    int64_t lo = 0;
+    int64_t hi = range_cnt;
+    while (lo < hi) {
+      const int64_t mid = lo + ((hi - lo) >> 1);
+      const int cmp = bin_cmp
+          ? ft_bin_strcmp(range_dicts_[mid].start_.get_word(), single_word)
+          : ObCharset::strcmp(ObCollationType::CS_TYPE_UTF8MB4_BIN,
+                              range_dicts_[mid].start_.get_word(),
+                              single_word);
+      if (cmp <= 0) {
+        lo = mid + 1;
+      } else {
+        hi = mid;
+      }
+    }
+    if (lo > 0) {
+      const int64_t candidate = lo - 1;
+      if (range_contains(range_dicts_[candidate], single_word, bin_cmp)) {
+        dict = range_dicts_[candidate].dict_;
+        found = true;
+        last_range_idx_ = candidate;
+      }
+    }
+  }
+
   for (int64_t i = 0; !found && i < range_cnt; ++i) {
     const ObFTRange &range = range_dicts_[i];
     if (range_contains(range, single_word, bin_cmp)) {
