@@ -51,11 +51,7 @@
   } \
   malloc_non_terminal_node(explain_stmt, result->malloc_pool_, T_EXPLAIN, 5, \
                            type_node, display_node, into_table, set_statement_id, stmt); \
-  if (NULL != (flag_node)) { \
-    (explain_stmt)->value_ = (flag_node)->value_; \
-  } else { \
-    (explain_stmt)->value_ = 0; \
-  }
+  (void)(flag_node);
 %}
 
 %destructor {destroy_tree($$);}<node>
@@ -12276,7 +12272,14 @@ explain_or_desc relation_factor opt_desc_column_option
   malloc_non_terminal_node($$, result->malloc_pool_, T_SHOW_COLUMNS, 4, $$, $2, NULL, $3);
 }
 
-| explain_or_desc explainable_stmt { GEN_EXPLAN_STMT($1, $$, 0, 0, $2, NULL, NULL);}
+| explain_or_desc explainable_stmt
+{
+  if (NULL != $1 && 1 == $1->value_ && NULL != $2 && T_SELECT == $2->type_) {
+    malloc_non_terminal_node($$, result->malloc_pool_, T_DESCRIBE_QUERY, 1, $2);
+  } else {
+    GEN_EXPLAN_STMT($1, $$, 0, 0, $2, NULL, NULL);
+  }
+}
 | explain_or_desc PRETTY explainable_stmt { GEN_EXPLAN_STMT($1, $$, 0, T_PRETTY, $3, NULL, NULL);}
 | explain_or_desc PRETTY_COLOR explainable_stmt { GEN_EXPLAN_STMT($1, $$, 0, T_PRETTY_COLOR, $3, NULL, NULL);}
 
