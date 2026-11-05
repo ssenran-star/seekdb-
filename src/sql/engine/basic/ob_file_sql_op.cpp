@@ -635,6 +635,7 @@ public:
       } else if (ceof) {
         if (!saw_char && !field_started && 0 == fields.count() && 0 == field_.length()) {
           eof = true;
+          end = true;
         } else if (in_quotes) {
           ret = OB_INVALID_ARGUMENT;
           LOG_WARN("unterminated CSV quote", K(ret));
@@ -2728,7 +2729,14 @@ int ObFileSqlOp::open_reader()
     }
   } else {
     ObString canon;
-    if (OB_FAIL(check_secure_realpath(ctx_.get_my_session(), path.ptr(), canon, row_alloc_))) {
+    char path_buf[PATH_MAX];
+    if (path.length() <= 0 || path.length() >= PATH_MAX) {
+      ret = OB_INVALID_ARGUMENT;
+    } else {
+      MEMCPY(path_buf, path.ptr(), path.length());
+      path_buf[path.length()] = '\0';
+      if (OB_FAIL(check_secure_realpath(ctx_.get_my_session(), path_buf, canon, row_alloc_))) {
+      }
     }
   }
   if (OB_FAIL(ret)) {
