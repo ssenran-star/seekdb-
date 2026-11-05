@@ -1632,6 +1632,23 @@ int ObSqlParameterization::formalize_sql_filter_hint(ObIAllocator &allocator,
 
 
 
+static bool contains_file_sql_func(const ObString &sql)
+{
+  static const char *names[] = {"read_csv", "read_json", "read_parquet", "read_ndjson", "glob("};
+  const char *p = sql.ptr();
+  const int64_t n = sql.length();
+  bool found = false;
+  for (int64_t i = 0; !found && NULL != p && i + 4 <= n; ++i) {
+    for (int64_t k = 0; !found && k < static_cast<int64_t>(sizeof(names) / sizeof(names[0])); ++k) {
+      const int64_t len = static_cast<int64_t>(strlen(names[k]));
+      if (i + len <= n && 0 == strncasecmp(p + i, names[k], len)) {
+        found = true;
+      }
+    }
+  }
+  return found;
+}
+
 int ObSqlParameterization::fast_parser(ObIAllocator &allocator,
                                        const FPContext &fp_ctx,
                                        const ObString &sql,
@@ -1641,6 +1658,10 @@ int ObSqlParameterization::fast_parser(ObIAllocator &allocator,
   int ret = OB_SUCCESS;
   int64_t param_num = 0;
   char *no_param_sql_ptr = NULL;
+  if (contains_file_sql_func(sql)) {
+    (void)fp_result.pc_key_.name_.assign_ptr(sql.ptr(), sql.length());
+    return OB_SUCCESS;
+  }
   int64_t no_param_sql_len = 0;
   ParamList *p_list = NULL;
   bool is_call_procedure = false;
@@ -1717,6 +1738,10 @@ int ObSqlParameterization::raw_fast_parameterize_sql(ObIAllocator &allocator,
                                                      ParseMode parse_mode)
 {
   int ret = OB_SUCCESS;
+  if (contains_file_sql_func(sql)) {
+    no_param_sql.assign_ptr(sql.ptr(), sql.length());
+    return OB_SUCCESS;
+  }
   ObParser parser(allocator, session.get_sql_mode(), session.get_charsets4parser());
   ParseResult parse_result;
 

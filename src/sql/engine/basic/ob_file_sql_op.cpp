@@ -635,6 +635,7 @@ public:
       } else if (ceof) {
         if (!saw_char && !field_started && 0 == fields.count() && 0 == field_.length()) {
           eof = true;
+          end = true;
         } else if (in_quotes) {
           ret = OB_INVALID_ARGUMENT;
           LOG_WARN("unterminated CSV quote", K(ret));
