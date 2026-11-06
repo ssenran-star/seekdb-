@@ -17,8 +17,10 @@
 #ifndef _OCEANBASE_STORAGE_FTS_DICT_OB_FT_DICT_HUB_H_
 #define _OCEANBASE_STORAGE_FTS_DICT_OB_FT_DICT_HUB_H_
 
+#include "lib/allocator/page_arena.h"
 #include "lib/charset/ob_charset.h"
 #include "lib/lock/ob_bucket_lock.h"
+#include "lib/lock/ob_mutex.h"
 #include "storage/fts/dict/ob_ft_dict_def.h"
 
 namespace oceanbase
@@ -93,6 +95,8 @@ private:
 };
 
 class ObFTCacheRangeContainer;
+class ObIFTDict;
+struct ObFTSharedDict;
 class ObFTDictHub
 {
 public:
@@ -107,6 +111,15 @@ public:
 
   int load_cache(const ObFTDictDesc &desc, ObFTCacheRangeContainer &container);
 
+  /**
+   * Get the dictionary of the given type that is shared by all the parsers.
+   *
+   * The content of a dictionary does not change, so the range list of the
+   * dictionary is built once and then reused.  The returned dictionary stays
+   * valid as long as the hub lives, and the caller must not free it.
+   */
+  int get_shared_dict(const ObFTDictDesc &desc, ObIFTDict *&dict);
+
 private:
   int get_dict_info(const ObFTDictInfoKey &key, ObFTDictInfo &info);
 
@@ -118,6 +131,14 @@ private:
   // holds info of dict
   hash::ObHashMap<ObFTDictInfoKey, ObFTDictInfo> dict_map_;
   ObBucketLock rw_dict_lock_;
+
+  // The dictionaries that are shared by all the parsers.  They own the
+  // handle of the cache block, so they have to stay alive as long as the
+  // dictionary is used.
+  hash::ObHashMap<ObFTDictInfoKey, ObFTSharedDict *> shared_dict_map_;
+  common::ObArenaAllocator shared_dict_allocator_;
+  // only one thread builds a dictionary, the others wait for it
+  lib::ObMutex shared_dict_build_lock_;
 };
 
 } //  namespace storage

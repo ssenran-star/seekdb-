@@ -28,11 +28,25 @@ namespace oceanbase
 {
 namespace storage
 {
+
+/**
+ * A dictionary that is shared by all the parsers.
+ *
+ * The container keeps the handle of the cache block alive, the dictionary
+ * points at the container.
+ */
+struct ObFTSharedDict
+{
+  ObFTCacheRangeContainer container;
+  ObIFTDict *dict;
+  ObFTSharedDict(ObIAllocator &alloc) : container(alloc), dict(nullptr) {}
+};
 int ObFTDictHub::init()
 {
   static constexpr int K_MAX_DICT_BUCKET = 128; // for now, only built-in dicts.
   int ret = OB_SUCCESS;
   if (OB_FAIL(dict_map_.create(K_MAX_DICT_BUCKET, "dict_map"))) {
+  } else if (OB_FAIL(shared_dict_map_.create(K_MAX_DICT_BUCKET, "shared_dict_map"))) {
   } else if (OB_FAIL(rw_dict_lock_.init(K_MAX_DICT_BUCKET))) {
   } else {
     is_inited_ = true;
@@ -114,6 +128,92 @@ int ObFTDictHub::load_cache(const ObFTDictDesc &desc, ObFTCacheRangeContainer &c
   return ret;
 }
 
+
+int ObFTDictHub::get_shared_dict(const ObFTDictDesc &desc, ObIFTDict *&dict)
+{
+  int ret = OB_SUCCESS;
+  dict = nullptr;
+  if (!is_inited_) {
+    ret = OB_NOT_INIT;
+  } else {
+    ObFTDictInfoKey key(static_cast<uint64_t>(desc.type_));
+    // The fast path: the dictionary is already there.
+    {
+      ObBucketHashRLockGuard guard(rw_dict_lock_, key.hash());
+      ObFTSharedDict *entry = nullptr;
+      if (OB_FAIL(ret = shared_dict_map_.get_refactored(key, entry))) {
+        if (OB_HASH_NOT_EXIST == ret) {
+          ret = OB_SUCCESS;
+        }
+      } else if (OB_NOT_NULL(entry)) {
+        dict = entry->dict;
+      }
+    }
+    if (OB_SUCC(ret) && OB_ISNULL(dict)) {
+      // Only one thread builds the dictionary, the others wait for it.
+      lib::ObMutexGuard build_guard(shared_dict_build_lock_);
+      ObFTSharedDict *entry = nullptr;
+      {
+        // Another thread may have built it in the meantime.
+        ObBucketHashRLockGuard guard(rw_dict_lock_, key.hash());
+        if (OB_FAIL(ret = shared_dict_map_.get_refactored(key, entry))) {
+          if (OB_HASH_NOT_EXIST == ret) {
+            ret = OB_SUCCESS;
+          }
+        } else if (OB_NOT_NULL(entry)) {
+          dict = entry->dict;
+        }
+      }
+      if (OB_SUCC(ret) && OB_ISNULL(dict)) {
+        // The dictionary is built outside of the bucket lock, load_cache()
+        // and build_cache() take the lock themselves.
+        entry = OB_NEWx(ObFTSharedDict, &shared_dict_allocator_, shared_dict_allocator_);
+        if (OB_ISNULL(entry)) {
+          ret = OB_ALLOCATE_MEMORY_FAILED;
+        } else if (OB_FAIL(ret = load_cache(desc, entry->container))) {
+          if (OB_ENTRY_NOT_EXIST == ret) {
+            ret = OB_SUCCESS;
+            if (OB_FAIL(ret = build_cache(desc, entry->container))) {
+            }
+          }
+        }
+        if (OB_SUCC(ret)) {
+          ObFTRangeDict *range_dict = OB_NEWx(ObFTRangeDict,
+                                              &shared_dict_allocator_,
+                                              shared_dict_allocator_,
+                                              &entry->container,
+                                              desc);
+          if (OB_ISNULL(range_dict)) {
+            ret = OB_ALLOCATE_MEMORY_FAILED;
+          } else if (OB_FAIL(ret = range_dict->init())) {
+            // the arena keeps the memory, the dictionary is simply not used
+          } else {
+            entry->dict = range_dict;
+          }
+        }
+        if (OB_SUCC(ret)) {
+          ObBucketHashWLockGuard guard(rw_dict_lock_, key.hash());
+          ObFTSharedDict *published = nullptr;
+          if (OB_FAIL(ret = shared_dict_map_.get_refactored(key, published))) {
+            if (OB_HASH_NOT_EXIST == ret) {
+              ret = OB_SUCCESS;
+            }
+          }
+          if (OB_SUCC(ret)) {
+            if (OB_NOT_NULL(published)) {
+              // another thread was faster, use its dictionary
+              dict = published->dict;
+            } else if (OB_FAIL(ret = shared_dict_map_.set_refactored(key, entry, 1))) {
+            } else {
+              dict = entry->dict;
+            }
+          }
+        }
+      }
+    }
+  }
+  return ret;
+}
 
 int ObFTDictHub::get_dict_info(const ObFTDictInfoKey &key, ObFTDictInfo &info)
 {
