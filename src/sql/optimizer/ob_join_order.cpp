@@ -16,6 +16,7 @@
 
 #define USING_LOG_PREFIX SQL_JO
 #include "config_bridge.h"
+#include "sql/engine/basic/ob_file_sql_op.h"
 #include "ob_join_order.h"
 #include "sql/optimizer/ob_skyline_prunning.h"
 #include "sql/optimizer/ob_log_table_scan.h"

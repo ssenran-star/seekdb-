@@ -302,7 +302,115 @@ static inline void ob_tosort_unicode(ObUnicaseInfo *uni_plane, ob_wc_t *wc, unsi
   }
 }
 
+
+// Forward declarations for the generic loops the fast path falls back to.
+static int ob_strnncoll_utf8mb4_slow(const ObCharsetInfo *cs,
+                     const unsigned char *src, size_t srclen,
+                     const unsigned char *dst, size_t dstlen,
+                     bool t_is_prefix);
+static int ob_strnncollsp_utf8mb4_slow(const ObCharsetInfo *cs,
+                       const unsigned char *src, size_t srclen,
+                       const unsigned char *dst, size_t dstlen,
+                       bool diff_if_only_endspace_difference);
+
+// Fast path for utf8mb4_general_ci comparisons (see block comment above the
+// handler table). Returns true when *result is decided.
+static inline bool ob_utf8mb4_genci_try_fast(const unsigned char *src,
+                                             const size_t srclen,
+                                             const unsigned char *dst,
+                                             const size_t dstlen,
+                                             const bool pad_space,
+                                             const bool diff_endspace,
+                                             const bool t_is_prefix,
+                                             int &result)
+{
+  const size_t min_len = srclen < dstlen ? srclen : dstlen;
+  size_t i = 0;
+  if (min_len > 0 && 0 == memcmp(src, dst, min_len)) {
+    // Identical common region: identical bytes always fold the same way.
+    i = min_len;
+  } else
+  while (i < min_len) {
+    const unsigned char a = src[i];
+    const unsigned char b = dst[i];
+    if (a == b) {
+      ++i;
+      continue;
+    }
+    if (a >= 0x80 || b >= 0x80) {
+      return false; // multibyte divergence: generic loop
+    }
+    // Verified against the unicase plane: general_ci gives both cases of an
+    // ASCII letter the UPPERCASE code point as sort weight, so 'a' sorts
+    // below '['. All 16129 byte pairs 1..127 match this fold exactly.
+    const unsigned char fa =
+        (a >= 'a' && a <= 'z') ? static_cast<unsigned char>(a - ('a' - 'A')) : a;
+    const unsigned char fb =
+        (b >= 'a' && b <= 'z') ? static_cast<unsigned char>(b - ('a' - 'A')) : b;
+    if (fa != fb) {
+      result = fa > fb ? 1 : -1;
+      return true;
+    }
+    ++i; // case-only difference, keep scanning
+  }
+  // The common region compares equal; decide the remainder.
+  if (!pad_space) {
+    // Matches the generic loop's (se - src) - (te - dst) / (dst - te) tail.
+    result = t_is_prefix ? static_cast<int>(min_len - dstlen)
+                         : static_cast<int>(srclen - dstlen);
+    return true;
+  }
+  if (srclen == dstlen) {
+    result = 0;
+    return true;
+  }
+  const bool src_longer = srclen > dstlen;
+  const unsigned char *tail = src_longer ? src + min_len : dst + min_len;
+  const size_t tail_len = src_longer ? srclen - min_len : dstlen - min_len;
+  const int swap = src_longer ? 1 : -1;
+  size_t j = 0;
+  while (j < tail_len && ' ' == tail[j]) {
+    ++j;
+  }
+  if (tail_len == j) {
+    // Only trailing spaces differ.
+    result = diff_endspace ? swap : 0;
+    return true;
+  }
+  if (tail[j] < 0x80) {
+    // The PAD SPACE rule compares the raw byte with ' '; folding A-Z keeps
+    // every letter above ' ', so the raw byte decides the sign.
+    result = (!diff_endspace && tail[j] < ' ') ? -swap : swap;
+    return true;
+  }
+  // A multibyte tail byte is above ' ', so the rule already decides it.
+  result = swap;
+  return true;
+}
+
 static int ob_strnncoll_utf8mb4(const ObCharsetInfo *cs,
+                     const unsigned char *src, size_t srclen,
+                     const unsigned char *dst, size_t dstlen,
+                     bool t_is_prefix)
+{
+  int fast_res = 0;
+  size_t divergence = 0;
+  if (ob_utf8mb4_genci_try_fast(src, srclen, dst, dstlen,
+                                /*pad_space=*/false, /*diff_endspace=*/false,
+                                t_is_prefix, fast_res)) {
+    return fast_res;
+  }
+  // Resume the generic loop at the first divergent byte; the shared prefix
+  // decodes identically in both strings, so that byte starts a character.
+  while (divergence < srclen && divergence < dstlen
+         && src[divergence] == dst[divergence]) {
+    ++divergence;
+  }
+  return ob_strnncoll_utf8mb4_slow(cs, src + divergence, srclen - divergence,
+                                   dst + divergence, dstlen - divergence, t_is_prefix);
+}
+
+static int ob_strnncoll_utf8mb4_slow(const ObCharsetInfo *cs,
                      const unsigned char *src, size_t srclen,
                      const unsigned char *dst, size_t dstlen,
                      bool t_is_prefix)
@@ -373,6 +481,27 @@ int __attribute__ ((noinline))  ob_strnncollsp_utf8mb4_help(
 }
 
 static int ob_strnncollsp_utf8mb4(const ObCharsetInfo *cs,
+                       const unsigned char *src, size_t srclen,
+                       const unsigned char *dst, size_t dstlen,
+                       bool diff_if_only_endspace_difference)
+{
+  int fast_res = 0;
+  size_t divergence = 0;
+  if (ob_utf8mb4_genci_try_fast(src, srclen, dst, dstlen,
+                                /*pad_space=*/true, diff_if_only_endspace_difference,
+                                /*t_is_prefix=*/false, fast_res)) {
+    return fast_res;
+  }
+  while (divergence < srclen && divergence < dstlen
+         && src[divergence] == dst[divergence]) {
+    ++divergence;
+  }
+  return ob_strnncollsp_utf8mb4_slow(cs, src + divergence, srclen - divergence,
+                                     dst + divergence, dstlen - divergence,
+                                     diff_if_only_endspace_difference);
+}
+
+static int ob_strnncollsp_utf8mb4_slow(const ObCharsetInfo *cs,
                        const unsigned char *src, size_t srclen,
                        const unsigned char *dst, size_t dstlen,
                        bool diff_if_only_endspace_difference)
