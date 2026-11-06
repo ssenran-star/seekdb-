@@ -140,3 +140,177 @@ measure of the change.
   per thread) measured exactly neutral (the build time was identical with and
   without it, and the tokenize numbers are within noise), so it is kept for
   the allocation it removes rather than for a measured speedup.
+
+## 6. The evaluation machine changes the weighting of the work
+
+The first evaluation run of the submitted branch reported a score of 19.95
+out of 100, which corresponds to a mean improvement of 9.98 %. The report of
+that run carries the absolute numbers of the submitted binary, and they show
+what the evaluation machine looks like:
+
+| metric | evaluation machine | CI baseline machine | this machine |
+| --- | --- | --- | --- |
+| `select1_avg_ms` | 0.0252 | 0.21032 | 0.4538 |
+| `tokenize_ik_avg_ms` | 0.0743 | 0.76478 | 0.5142 |
+| `query_cn_avg_ms` | 1.3354 | 16.66282 | 1.7055 |
+| `build_ik_content_sec` | 5.026 | 28.3764 | 3.0500 |
+
+`select1_avg_ms` is the cost of running `SELECT 1`, so it is the price of one
+round trip through the framework. On the evaluation machine that price is
+0.0252 ms, which is 1.9 % of `query_cn_avg_ms` and 2.0 % of
+`query_beng_avg_ms`. The query metrics are therefore almost entirely server
+side work, and the same is true for the index build, where the round trip
+does not even appear.
+
+This has a direct consequence for the measurement. The same absolute amount
+of server side work is a much larger share of a metric on a machine with a
+small round trip cost:
+
+| category | metric on the evaluation machine | metric on this machine | factor |
+| --- | --- | --- | --- |
+| tokenize | 0.0743 ms | 0.6321 ms | **8.5x** |
+| query | 1.3354 ms | 2.1798 ms | 1.63x |
+| build | 5.026 s | 4.064 s | 0.81x |
+
+A kernel change that removes ten microseconds of work from a tokenize call
+is worth 13.5 % of `tokenize_ik_avg_ms` on the evaluation machine but only
+1.6 % on this machine. **A measurement taken here underestimates the effect
+of a kernel change on the query and tokenize metrics by up to eight times**,
+and it overstates the effect on the build metric, because the build of the
+evaluation machine is dominated by its storage rather than by its cpu.
+
+The build metric is also the one that this machine cannot represent well: the
+build of the evaluation machine takes 5.026 s for the same 20k rows that take
+4.064 s here, even though its cpu is the faster one, so the extra time is
+spent in the storage layer.
+
+## 7. The measurement has to be paired on the same machine
+
+The score of the evaluation run is not the ratio against the fixed baseline
+in `fts_large_bench_baseline.json`: the numbers of that file were taken on a
+much slower machine, and using them would report roughly 88 % improvement for
+the submitted binary. The evaluation compares the baseline branch and the
+submitted branch on the same machine, so the local measurement has to do the
+same.
+
+To be able to do that, the baseline branch has to compile. It needs four
+unrelated build fixes, which were kept out of the submitted branch because
+they are not part of the optimisation:
+
+* `rust/build.py`: `text=True` of `subprocess` needs python 3.7;
+* `src/sql/engine/basic/ob_select_into_op.h`: the initialisation list has to
+  follow the order of the member declarations;
+* `src/sql/engine/basic/ob_file_sql_op.cpp`: `buf_` is a char array and has
+  no `reset()`;
+* `src/sql/engine/basic/ob_file_sql_op.h`: the nested `Reader` type has to be
+  public and `ob_join_order.cpp` needs the definition of `ObFileSqlTableDef`.
+
+With a baseline binary built that way, the benchmark can be run on both
+binaries, each in its own data directory and on its own port, and the
+resulting reports can be compared with the official formula. The result for
+the submitted branch is in section 8.
+
+Note that the two binaries must not share a data directory: a binary that was
+rebuilt incrementally does not agree with the system variable schema of a
+data directory that was created by a binary that was built from scratch, and
+the observer refuses to start with `OB_ERR_SYS_VARIABLE_UNKNOWN`.
+
+## 8. Where the improvement of the submitted branch actually is
+
+Baseline `1e1ec7bc` and the submitted branch, same machine, each in its own
+data directory, the whole `fts_large_bench.sh` on both sides:
+
+| category | metric | baseline | submitted | change |
+| --- | --- | --- | --- | --- |
+| build | `build_ik_all_sec` | 5.920 | 5.294 | +10.6 % |
+| build | `build_ik_content_sec` | 4.277 | 4.064 | +5.0 % |
+| build | `build_beng_en_sec` | 2.250 | 2.049 | +8.9 % |
+| tokenize | `tokenize_ik_avg_ms` | 0.6382 | 0.6321 | +1.0 % |
+| tokenize | `tokenize_beng_avg_ms` | 0.5700 | 0.5912 | -3.7 % |
+| query | `query_cn_avg_ms` | 2.1236 | 2.1798 | -2.7 % |
+| query | `query_beng_avg_ms` | 2.8706 | 2.8883 | -0.6 % |
+| query | `query_mixed_avg_ms` | 2.3277 | 2.3532 | -1.1 % |
+| query | `query_limit_avg_ms` | 2.5734 | 2.6087 | -1.4 % |
+
+The hit counts are identical on both sides, so the numbers are comparable.
+
+The conclusion is not flattering but it is clear: **the gain of the
+submitted branch is in the index build, the tokenize and the query metrics
+are not improved by it.** The character set fast path that was added for the
+general_ci comparison is used by the sort of the inverted index rows and by
+the word comparison of the dictionary, but the sort of the inverted index
+rows is not the part that dominates the build of the evaluation machine, and
+the tokenize path spends most of its time in the parser and in the
+allocation of the word map rather than in the comparison.
+
+## 9. What was tried and did not work
+
+Four directions were implemented, measured and dropped again. They are
+listed here because the negative results are as much a part of the
+bottleneck analysis as the positive ones.
+
+* **Sharing the dictionaries between the parsers.** The three dictionaries of
+  the ik parser are rebuilt for every row of the index build and for every
+  tokenize call. Making them a process wide read only object looked
+  attractive, but the profile shows that the dictionary setup is only 0.99 %
+  of the build (`init_dict` 0.74 %, of which `try_load_cache` 0.42 %) and
+  about 6 % of a tokenize call. The change was dropped.
+* **The encoded sort key for the index build.** The rows of the inverted
+  index are sorted by the word column, and the comparison of that sort is
+  the largest single hotspot of the build (`ObNullSafeDatumStrCmp<45>` 5.43 %,
+  `memcmp` 3.50 %, `ob_strnncollsp_utf8mb4` 0.99 %). The sort could compare
+  the encoded keys with `memcmp` instead, but the build of the index does not
+  go through the optimiser: it is a pdml insert whose sort is an `ObSortOp`,
+  and `ObOrderPerservingEncoder::can_encode_sortkey` does not accept the
+  `ObVarcharType` of the word column at all. The measured effect of letting
+  the optimiser through was -2.2 %, and the profile confirmed that the
+  comparison was unchanged.
+* **The relevance score of the match expression.** A query like
+  `SELECT COUNT(*) FROM t WHERE MATCH(c) AGAINST('...')` never observes the
+  score, so the per document bm25 computation and the extra document length
+  column of the inverted index scan are wasted. The upstream code has a
+  function for exactly this question, but it was commented out because its
+  signature no longer matches. Reimplementing it is not enough: the legacy
+  text retrieval path decides whether a document matches by looking at the
+  relevance score, `need_calc_relevance()` is defined as
+  `relevance_expr_ != nullptr`, and the count of the documents is read out
+  of the aggregate expressions that only exist when the score is computed.
+  Switching the score off therefore crashes the query
+  (`ObDASLegacyTRMergeIter::init_daat_iter_param`, the aggregate output
+  array is empty and `.at(0)` dereferences it). Making this work needs a
+  boolean match path in the storage layer that does not go through the bm25
+  score, which is a larger change than this submission contains.
+* **The work area of the sort.** The build spills the sort to disk
+  (`ObSortOpImpl::do_dump` 19.65 % of the build). Raising
+  `ob_sql_work_area_percentage` from 5 to 20 removes the spill and is worth
+  -8.5 % of the build on this machine. Since the spill is what the slower
+  storage of the evaluation machine punishes, this is the direction that
+  should be pursued, but it has to be done in the code for the index build
+  path and not by changing a configuration value.
+
+## 10. Where the next improvement has to come from
+
+With the weighting of the evaluation machine in mind, the three categories
+have the following ceilings and the following problems:
+
+* **build** - the ceiling is high because the round trip is not part of the
+  metric, but the problem is the storage of the evaluation machine: the
+  spill of the sort and the write of the inverted index. The two things to
+  try are to keep the sort of the index build in memory and to write less
+  intermediate data.
+* **tokenize** - the ceiling is 52 % (the round trip is 34 % of
+  `tokenize_ik_avg_ms`), and the absolute savings are worth eight times
+  more here than on this machine. The profile of a tokenize call splits into
+  about a third of actual tokenisation, a fifth of the parameter handling
+  (the dictionary lookup and the parsing of the parser properties) and the
+  rest in the word map, the json result and the allocations. All of the
+  per call setup depends only on the parser name and the parser properties
+  and can be hoisted out of the call.
+* **query** - the ceiling is 98 %, the cost is 0.28 ms of fixed work plus
+  0.18 us per matching document, and it grows with the number of query words
+  as well. The match expression is evaluated as a pushed down filter by the
+  storage layer, and the inverted index scan projects the document length
+  and evaluates the bm25 score for every row of every posting list, while
+  only the rows that survive the intersection need it. Computing the score
+  after the intersection instead of during the scan is the change with the
+  largest expected effect.
