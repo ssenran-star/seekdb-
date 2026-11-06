@@ -338,3 +338,78 @@ their own data directory.
 Every result file is byte for byte identical, so the submitted branch changes
 neither the tokenisation, nor the matching, nor the contents of the
 inverted index.
+
+## 12. Sharing the dictionaries of the ik parser
+
+The profile of a tokenize call shows what the call spends its time on. The
+numbers are the share of the samples that the function is responsible for,
+measured with `perf record --call-graph fp` while the statement of the
+benchmark was executed in a loop:
+
+| part of a tokenize call | ik | beng |
+| --- | --- | --- |
+| the tokenisation itself (`get_next_token`) | 43 % | 34 % |
+| the setup of the parser (`ObIKFTParser::init`) | 20 % | - |
+| of which the dictionaries (`init_dict`) | 17 % | - |
+| the parameters of the call (`parse_param`) | 3 % | 21 % |
+| the result (`make_token_array_json`) | 18 % | 45 % |
+
+The beng parser has no dictionaries, so for it the parameters of the call are
+the largest part of the setup. For the ik parser the dictionaries are: every
+parser instance loaded the dictionary cache again and built the range list of
+the dictionary again, and a parser is created for every tokenize call and for
+every row of an index build.
+
+The content of a dictionary never changes, so the range list is now built
+once and then shared by all the parsers:
+
+* `ObFTDictHub` owns the dictionaries and hands them out. They live as long
+  as the process, and the dictionary keeps the handle of the cache block
+  alive, so the data stays valid;
+* the parser only borrows the dictionaries, it does not free them;
+* the only mutable state of a range list is the index of the range that was
+  matched last. It is a hint that saves a binary search, so it became an
+  atomic, because the dictionary is now shared by the threads;
+* only one thread builds a dictionary, the others wait for it.
+
+The measurement compares the two binaries on the same machine, the
+statements are sent in one session so that the client overhead is the same
+on both sides. The `select1` loop of the same shape is the baseline of the
+loop:
+
+| | current branch | shared dictionaries |
+| --- | --- | --- |
+| `tokenize_ik_avg_ms` | 1.3565 | 1.3381 |
+| `tokenize_ik_avg_ms` | 1.3970 | 1.3512 |
+| `tokenize_beng_avg_ms` | 1.2276 | 1.2388 |
+| `tokenize_beng_avg_ms` | 1.2353 | 1.2501 |
+| `select1_avg_ms` | 1.1283 | 1.1304 |
+
+The ik tokenisation is 1.4 % to 3.3 % faster, and the net cost of the call
+(the tokenisation minus the `select1` loop) drops from 0.228 ms to 0.208 ms
+and from 0.269 ms to 0.200 ms. The beng tokenisation does not change, which
+is what the change predicts, because the beng parser has no dictionaries.
+
+The fulltext regression suite gives the same result with both binaries:
+1693 statements, 15 of 15 test files byte for byte identical, and the
+concurrent use of the shared dictionary from eight clients returns the same
+result as the serial use.
+
+## 13. What is left
+
+The three categories of the score are not equally far from their ceiling on
+the evaluation machine:
+
+| category | ceiling | what is left |
+| --- | --- | --- |
+| build | 99 % | the build of the evaluation machine is dominated by its storage, the spill of the sort and the write of the inverted index |
+| tokenize | 52 % | the per call setup of the parser and the json round trip of the parser properties |
+| query | 98 % | the relevance score is computed for every row of every posting list, but only the rows that survive the intersection need it |
+
+The query category has the largest absolute cost on the evaluation machine
+(1.3 ms to 2.0 ms per query, 98 % of it server side work) and the largest
+headroom. Moving the computation of the relevance score behind the
+intersection of the posting lists is the change with the largest expected
+effect, but it is not a small change: the legacy text retrieval path decides
+whether a document matches by looking at the score, so the boolean match
+needs a path of its own that does not go through the bm25 score.
