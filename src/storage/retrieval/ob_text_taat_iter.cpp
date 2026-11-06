@@ -70,6 +70,7 @@ int ObTextTaaTIter::pre_process()
     } else if (OB_FAIL(bm25_param_estimator_.do_estimation(*iter_param_->eval_ctx_))) {
     } else {
       const int64_t total_doc_cnt = bm25_param_estimator_.get_total_doc_cnt();
+      total_doc_cnt_ = total_doc_cnt;
       partition_cnt_ = MIN((total_doc_cnt-1) / OB_HASHMAP_DEFAULT_SIZE + 1, OB_MAX_HASHMAP_COUNT);
     }
   }

@@ -56,6 +56,9 @@ protected:
   ObSparseRetrievalMergeParam *iter_param_;
   ObISparseRetrievalDimIter *dim_iter_;
   int64_t partition_cnt_;
+  // The number of the documents of the index, it is used to give the hash map
+  // of a partition a number of buckets that matches its content.
+  int64_t total_doc_cnt_;
   query::ObSpillRowStore **datum_stores_;
   query::ObSpillRowStoreIterator **datum_store_iters_;
   sql::ObBitVector **skips_;
