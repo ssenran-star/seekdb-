@@ -139,6 +139,28 @@ private:
       query::ObIRootCommandService &root_commands);
 
   int need_check_constraint_validity(obcall::ObAlterTableArg &alter_table_arg, bool &need_check);
+  // ALTER TABLE t RETRY AI COLUMN <col> [WHERE <expr>]
+  int execute_retry_ai_column_(ObExecContext &ctx,
+                               ObAlterTableStmt &stmt,
+                               const ObString &first_stmt);
+  // Builds the predicate that addresses one row by its row key, e.g.
+  // "`id` = 1". The format is the one the DML hook uses, so that the
+  // regeneration task of a row is found again by the worker.
+  int build_retry_rowkey_predicate_(common::sqlclient::ObMySQLResult *result,
+                                    const ObIArray<ObSqlString> &rowkey_names,
+                                    const ObIArray<bool> &rowkey_is_number,
+                                    ObSqlString &rowkey_predicate);
+  // Invalidates the AI column of the given rows and queues a regeneration
+  // task for every one of them.
+  int retry_queue_tasks_(ObExecContext &ctx,
+                         ObAlterTableStmt &stmt,
+                         const ObSqlString &qualified,
+                         const ObString &ai_column_name,
+                         int64_t column_id,
+                         int64_t max_retries,
+                         const ObSqlString &source_expr,
+                         const ObSqlString &ai_model_name,
+                         const ObIArray<ObSqlString> &rowkey_predicates);
 
 
   int check_alter_partition(

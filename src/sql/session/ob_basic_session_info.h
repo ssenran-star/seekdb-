@@ -435,6 +435,9 @@ public:
   }
   int get_explicit_defaults_for_timestamp(bool &explicit_defaults_for_timestamp) const;
   int get_sql_auto_is_null(bool &sql_auto_is_null) const;
+  // When enabled, a statement that references an AI column fails if that
+  // column still has unfinished regeneration tasks.
+  int get_ai_column_strict_read(bool &strict_read) const;
   int get_is_result_accurate(bool &is_result_accurate) const
   {
     is_result_accurate = sys_vars_cache_.get_is_result_accurate();

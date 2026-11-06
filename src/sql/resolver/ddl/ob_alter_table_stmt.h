@@ -104,7 +104,28 @@ public:
     alter_table_arg_.lock_session_create_ts_ = create_ts;
   }
   void set_lock_priority();
+
+  // ALTER TABLE t RETRY AI COLUMN <col> [WHERE <expr>]
+  // The retry does not change the table schema, it only re-queues the
+  // regeneration of one AI column for the rows the predicate selects.
+  bool has_retry_ai_column() const { return has_retry_ai_column_; }
+  void set_has_retry_ai_column(const bool flag) { has_retry_ai_column_ = flag; }
+  const common::ObString &get_retry_ai_column_name() const { return retry_ai_column_name_; }
+  void set_retry_ai_column_name(const common::ObString &name) { retry_ai_column_name_ = name; }
+  // The predicate of the retry, as it was written by the user. It is
+  // evaluated by the executor against the rows of the table.
+  const common::ObString &get_retry_ai_column_predicate() const { return retry_ai_column_predicate_; }
+  void set_retry_ai_column_predicate(const common::ObString &predicate) { retry_ai_column_predicate_ = predicate; }
+  // The predicate mentions the STATUS pseudo column, which stands for the
+  // regeneration state of the retried AI column.
+  bool retry_ai_column_predicate_has_status() const { return retry_ai_column_predicate_has_status_; }
+  void set_retry_ai_column_predicate_has_status(const bool flag) { retry_ai_column_predicate_has_status_ = flag; }
+
 private:
+  bool has_retry_ai_column_;
+  common::ObString retry_ai_column_name_;
+  common::ObString retry_ai_column_predicate_;
+  bool retry_ai_column_predicate_has_status_;
   obcall::ObAlterTableArg alter_table_arg_;
   bool is_comment_table_;
   bool is_alter_system_;

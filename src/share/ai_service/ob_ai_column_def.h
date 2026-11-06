@@ -17,6 +17,15 @@
 #include "lib/lock/ob_spin_rwlock.h"
 
 namespace oceanbase {
+namespace common {
+class ObMySQLProxy;
+template <typename T> class ObIArray;
+class ObString;
+class ObSqlString;
+}
+namespace sql {
+class ObSQLSessionInfo;
+}
 namespace share {
 
 // Task states stored in oceanbase.__all_ai_column_task.state.
@@ -85,6 +94,37 @@ private:
   uint64_t table_ids_[MAX_AI_COLUMN_TABLES];
   int64_t count_;
   mutable common::SpinRWLock lock_;
+};
+
+// The strict read check of the AI columns.
+//
+// When the session variable ai_column_strict_read is on, a statement that
+// references an AI column fails if that column is not completely generated
+// yet. The check is column wide: it does not matter which rows the statement
+// selects, as soon as the column is referenced the whole column must be
+// ready.
+//
+// An AI column is ready when all of its rows have a value. A column with a
+// NULL value has either a pending regeneration task or a task that failed for
+// good, in both cases the value is not available yet.
+class ObAiColumnStrictReadChecker
+{
+public:
+  // One AI column of one table that a statement references.
+  struct AiColumnRef
+  {
+    uint64_t table_id_;
+    uint64_t column_id_;
+    char column_name_[128];
+  };
+
+  // Checks the AI columns the statement references. The AI columns are
+  // recognised in the text of the statement, which is available for every
+  // kind of statement. Returns OB_SUCCESS when the strict read is off or
+  // when every referenced AI column is ready.
+  static int check_strict_read(sql::ObSQLSessionInfo *session,
+                               common::ObMySQLProxy *proxy,
+                               const common::ObString &sql_text);
 };
 
 } // namespace share

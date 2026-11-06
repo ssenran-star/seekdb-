@@ -2965,6 +2965,11 @@ int ObBasicSessionInfo::get_sql_auto_is_null(bool &sql_auto_is_null) const
   return get_bool_sys_var(SYS_VAR_SQL_AUTO_IS_NULL, sql_auto_is_null);
 }
 
+int ObBasicSessionInfo::get_ai_column_strict_read(bool &strict_read) const
+{
+  return get_bool_sys_var(SYS_VAR_AI_COLUMN_STRICT_READ, strict_read);
+}
+
 int ObBasicSessionInfo::get_div_precision_increment(int64_t &div_precision_increment) const
 {
   int ret = get_int64_sys_var(SYS_VAR_DIV_PRECISION_INCREMENT, div_precision_increment);

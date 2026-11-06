@@ -334,7 +334,7 @@ END_P SET_VAR DELIMITER
 
         READ_CSV READ_JSON READ_NDJSON READ_PARQUET
         RECOVER REDUNDANT REFRESH RELAY RELAYLOG RELAY_LOG_FILE RELAY_LOG_POS RELAY_THREAD RELOAD REMOVE
-        REPEATABLE RESET RESPECT RESTART RESTORE RESUME RETURNED_SQLSTATE RETURNS RETURNING REVERSE
+        REPEATABLE RESET RESPECT RESTART RESTORE RESUME RETRY RETURNED_SQLSTATE RETURNS RETURNING REVERSE
         REWRITE ROLLBACK ROLLUP ROUTINE ROW ROWID ROW_COUNT ROW_FORMAT ROWS RTREE
         RUN RECYCLEBIN REPLICATION ROTATE ROW_NUMBER RUDUNDANT RECURSIVE RANDOM REDO_TRANSPORT_OPTIONS
         RANK READ_ONLY RECOVERY REJECT ROLE
@@ -421,7 +421,7 @@ END_P SET_VAR DELIMITER
 %type <node> opt_float_precision opt_number_precision
 %type <node> opt_equal_mark opt_default_mark read_only_or_write not not2
 %type <node> int_or_decimal
-%type <node> opt_column_attribute_list column_attribute column_attribute_list opt_column_default_value opt_column_default_value_list ai_column_def ai_column_option_list ai_column_option opt_ai_column_options
+%type <node> opt_column_attribute_list column_attribute column_attribute_list opt_column_default_value opt_column_default_value_list ai_column_def ai_column_option_list ai_column_option alter_retry_ai_column opt_ai_column_options
 %type <node> show_stmt from_or_in columns_or_fields database_or_schema index_or_indexes_or_keys opt_from_or_in_database_clause opt_show_condition opt_desc_column_option opt_status opt_storage opt_show_engine check_table_options check_table_option
 %type <node> prepare_stmt stmt_name preparable_stmt
 %type <node> variable_set_stmt var_and_val_list var_and_val to_or_eq set_expr_or_default sys_var_and_val
@@ -6253,6 +6253,17 @@ ai_column_def:
 AI COLUMN '(' expr ')' opt_ai_column_options
 {
   malloc_non_terminal_node($$, result->malloc_pool_, T_AI_COLUMN_DEF, 2, $4, $6);
+}
+;
+
+/* ALTER TABLE t RETRY AI COLUMN <col> [WHERE <expr>] */
+alter_retry_ai_column:
+RETRY AI COLUMN column_name opt_where
+{
+  (void)$1;
+  (void)$2;
+  (void)$3;
+  malloc_non_terminal_node($$, result->malloc_pool_, T_RETRY_AI_COLUMN, 2, $4, $5);
 }
 ;
 
@@ -14791,6 +14802,10 @@ opt_set table_option_list_space_seperated
 {
   malloc_non_terminal_node($$, result->malloc_pool_, T_ALTER_CHECK_CONSTRAINT_OPTION, 1, $1);
 }
+| alter_retry_ai_column
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_ALTER_TABLE_OPTION, 1, $1);
+}
 | alter_foreign_key_action
 {
   malloc_non_terminal_node($$, result->malloc_pool_, T_ALTER_FOREIGN_KEY_OPTION, 1, $1);
@@ -18269,6 +18284,7 @@ ACCOUNT
 |       RESTART
 |       RESTORE
 |       RESUME
+| RETRY
 |       RETURNED_SQLSTATE
 |       RETURNING
 |       RETURNS

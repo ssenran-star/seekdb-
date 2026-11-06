@@ -344,6 +344,77 @@ int ObAlterTableResolver::check_alter_column_schemas_valid(ObAlterTableStmt &stm
   return ret;
 }
 
+namespace {
+// Returns true when the expression references the STATUS pseudo column, that
+// is a column reference named "status" that was not written with back
+// quotes. The back quoted `status` addresses the physical column of the
+// same name.
+bool retry_expr_has_status_pseudo_column(const ParseNode *node)
+{
+  bool found = false;
+  if (OB_ISNULL(node)) {
+    // nothing
+  } else if (T_COLUMN_REF == node->type_) {
+    // The column name is the third child of a column reference.
+    if (node->num_child_ > 2 && OB_NOT_NULL(node->children_)) {
+      const ParseNode *col = node->children_[2];
+      if (OB_NOT_NULL(col) && 0 == col->is_input_quoted_ && col->str_len_ == 6
+          && 0 == STRNCMP(col->str_value_, "status", 6)) {
+        found = true;
+      }
+    }
+  } else if (OB_NOT_NULL(node->children_)) {
+    for (int64_t i = 0; !found && i < node->num_child_; ++i) {
+      found = retry_expr_has_status_pseudo_column(node->children_[i]);
+    }
+  }
+  return found;
+}
+} // namespace
+
+// Resolves ALTER TABLE t RETRY AI COLUMN <col> [WHERE <expr>].
+//
+// The retry is not a schema change: it re-queues the regeneration of one AI
+// column for the rows the predicate selects. The executor performs the work,
+// it needs the target column name and the predicate as the user wrote it.
+int ObAlterTableResolver::resolve_retry_ai_column(const ParseNode &node, bool &has_other_action)
+{
+  int ret = OB_SUCCESS;
+  ObAlterTableStmt *alter_table_stmt = get_alter_table_stmt();
+  if (OB_UNLIKELY(node.num_child_ < 2) || OB_ISNULL(node.children_)) {
+    ret = OB_ERR_UNEXPECTED;
+    SQL_RESV_LOG(WARN, "invalid retry ai column parse tree", K(ret));
+  } else if (OB_ISNULL(alter_table_stmt)) {
+    ret = OB_ERR_UNEXPECTED;
+    SQL_RESV_LOG(WARN, "alter table stmt should not be null", K(ret));
+  } else {
+    const ParseNode *col_node = node.children_[0];
+    const ParseNode *where_node = node.children_[1];
+    if (OB_ISNULL(col_node) || OB_ISNULL(col_node->str_value_)) {
+      ret = OB_ERR_UNEXPECTED;
+      SQL_RESV_LOG(WARN, "invalid retry ai column name node", K(ret));
+    } else {
+      ObString col_name(col_node->str_len_, col_node->str_value_);
+      alter_table_stmt->set_has_retry_ai_column(true);
+      alter_table_stmt->set_retry_ai_column_name(col_name);
+      if (OB_NOT_NULL(where_node) && OB_NOT_NULL(where_node->children_)
+          && where_node->num_child_ > 0) {
+        // The predicate of the retry. It is kept as the user wrote it, the
+        // executor evaluates it against the rows of the table.
+        const ParseNode *expr_node = where_node->children_[0];
+        // The STATUS pseudo column stands for the regeneration state of the
+        // retried AI column. It is only a pseudo column when it is not
+        // written with back quotes.
+        if (retry_expr_has_status_pseudo_column(expr_node)) {
+          alter_table_stmt->set_retry_ai_column_predicate_has_status(true);
+        }
+      }
+      SQL_RESV_LOG(INFO, "resolve retry ai column", K(col_name));
+    }
+  }
+  return ret;
+}
+
 int ObAlterTableResolver::resolve_action_list(const ParseNode &node)
 {
   int ret = OB_SUCCESS;
@@ -403,11 +474,27 @@ int ObAlterTableResolver::resolve_action_list(const ParseNode &node)
         switch (action_node->type_) {
         //deal with alter table option
         case T_ALTER_TABLE_OPTION: {
-            alter_table_stmt->set_alter_table_option();
-            if (OB_ISNULL(action_node->children_)) {
+            // ALTER TABLE t RETRY AI COLUMN <col> [WHERE <expr>] is carried
+            // by a table option node, but it is not a table option: it does
+            // not change the schema, it re-queues the regeneration of one AI
+            // column. Handle it before the generic table option resolver.
+            if (OB_ISNULL(action_node->children_)
+                || OB_ISNULL(action_node->children_[0])) {
               ret = OB_ERR_UNEXPECTED;
               SQL_RESV_LOG(WARN, "invalid parse tree", K(ret));
-            } else if (OB_FAIL(resolve_table_option(action_node->children_[0], false))) {
+            } else if (T_RETRY_AI_COLUMN == action_node->children_[0]->type_) {
+              bool has_other_action = (1 < node.num_child_);
+              if (OB_FAIL(resolve_retry_ai_column(
+                      *action_node->children_[0], has_other_action))) {
+              } else if (has_other_action) {
+                ret = OB_NOT_SUPPORTED;
+                LOG_USER_ERROR(OB_NOT_SUPPORTED,
+                               "combining AI COLUMN RETRY with another ALTER action");
+              }
+            } else {
+              alter_table_stmt->set_alter_table_option();
+              if (OB_FAIL(resolve_table_option(action_node->children_[0], false))) {
+              }
             }
             break;
           }

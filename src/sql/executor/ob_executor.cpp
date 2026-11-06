@@ -17,6 +17,9 @@
 #define USING_LOG_PREFIX SQL_EXE
 
 #include "ob_executor.h"
+#include "share/ai_service/ob_ai_column_def.h"
+#include "sql/resolver/dml/ob_dml_stmt.h"
+#include "sql/resolver/dml/ob_select_stmt.h"
 using namespace oceanbase::common;
 using namespace oceanbase::sql;
 
@@ -41,6 +44,44 @@ void ObExecutor::reset()
   execution_id_ = OB_INVALID_ID;
 }
 
+namespace {
+// The strict read check of the AI columns.
+//
+// When the session variable ai_column_strict_read is on, a statement that
+// references an AI column fails when that column is not completely generated
+// yet. The check is column wide, it does not matter which rows the statement
+// selects.
+int ai_check_strict_read(ObExecContext &ctx)
+{
+  int ret = OB_SUCCESS;
+  ObSQLSessionInfo *session = ctx.get_my_session();
+  ObMySQLProxy *proxy = ctx.get_sql_proxy();
+  if (OB_ISNULL(session) || OB_ISNULL(proxy) || OB_ISNULL(ctx.get_sql_ctx())) {
+    // nothing to check
+  } else {
+    bool strict_read = false;
+    if (OB_FAIL(session->get_ai_column_strict_read(strict_read))) {
+      LOG_WARN("get ai column strict read failed", K(ret));
+    } else if (!strict_read) {
+      // the strict read is off, this is the common case
+    } else {
+      // The current query string of the session is the text of the
+      // statement that is being executed, even when the plan was taken
+      // from the plan cache.
+      const ObString sql_text = session->get_current_query_string();
+      if (sql_text.length() == 0) {
+        // nothing to check
+      } else if (OB_FAIL(
+          oceanbase::share::ObAiColumnStrictReadChecker::check_strict_read(
+              session, proxy, sql_text))) {
+        LOG_WARN("ai column strict read check failed", K(ret));
+      }
+    }
+  }
+  return ret;
+}
+} // namespace
+
 int ObExecutor::execute_plan(ObExecContext &ctx)
 {
   NG_TRACE(exec_plan_begin);
@@ -57,6 +98,8 @@ int ObExecutor::execute_plan(ObExecContext &ctx)
   }
   if (OB_UNLIKELY(!inited_)) {
     ret = OB_NOT_INIT;
+  } else if (OB_FAIL(ai_check_strict_read(ctx))) {
+    // the statement references an AI column that is not ready yet
   } else if (OB_ISNULL(session_info)) {
     ret = OB_NOT_INIT;
   } else if (OB_ISNULL(phy_plan_)) {

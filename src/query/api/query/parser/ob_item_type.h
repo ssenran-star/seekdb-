@@ -2278,6 +2278,7 @@ typedef enum ObItemType
   T_FILE_SQL_TABLE = 4921,
   T_DESCRIBE_QUERY = 4922,
   T_AI_COLUMN_DEF = 4923,
+  T_RETRY_AI_COLUMN = 4924,
   T_MAX //Attention: add a new type before T_MAX
 } ObItemType;
 
