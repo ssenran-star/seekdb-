@@ -314,3 +314,27 @@ have the following ceilings and the following problems:
   only the rows that survive the intersection need it. Computing the score
   after the intersection instead of during the scan is the change with the
   largest expected effect.
+
+## 11. Regression verification of the results, not only of the timings
+
+The benchmark only reports the number of matching documents, so it cannot
+prove that the change keeps the semantics of the fulltext index. The
+regression suite of the fulltext index
+(`tools/deploy/mysql_test/test_suite/fts_index`) was therefore executed with
+both binaries and the results of the statements were compared.
+
+The suite has 15 test files with 1693 statements. It was executed with a
+small runner that sends the statements of the `.test` files to the server and
+writes the result of every statement, the return code and the error text to
+a file, one file per test. Both binaries were run on their own instance with
+their own data directory.
+
+| | baseline `1e1ec7bc` | submitted branch |
+| --- | --- | --- |
+| statements executed | 1693 | 1693 |
+| lost connections | 0 | 0 |
+| test files with an identical result | 15 of 15 | 15 of 15 |
+
+Every result file is byte for byte identical, so the submitted branch changes
+neither the tokenisation, nor the matching, nor the contents of the
+inverted index.
