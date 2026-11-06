@@ -42,7 +42,7 @@ def main():
     build_dirs = {}
     # Preserve inherited GNU Make jobserver descriptors when CMake provides them.
     with subprocess.Popen(command, cwd=workspace, stdout=subprocess.PIPE,
-                          text=True, close_fds=False) as cargo:
+                          universal_newlines=True, close_fds=False) as cargo:
         for line in cargo.stdout:
             message = json.loads(line)
             if message["reason"] == "build-script-executed":

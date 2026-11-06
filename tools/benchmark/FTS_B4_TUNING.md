@@ -35,6 +35,27 @@ function-pointer dispatch, then a per-character decode of both strings).
 
 ## 2. Changes
 
+### 2.0 Build fixes (required to build at all on the evaluation image)
+
+The tree that the evaluation CI checks out does not compile with the tool
+chain of the runner, independently of any optimization:
+
+* `rust/build.py` used `subprocess.Popen(..., text=True)`, which needs
+  Python 3.7. The runner image ships Python 3.6, so the Cargo build of the
+  Rust workspace died with `TypeError: __init__() got an unexpected keyword
+  argument 'text'` before a single C++ file was compiled. `text=True` is only
+  an alias of `universal_newlines=True`, which works on every Python 3, so the
+  call now uses the portable spelling.
+* `src/sql/engine/basic/ob_select_into_op.h` initialized `external_properties_`
+  before `file_sql_header_written_` while the members are declared the other
+  way round, which newer clang rejects under `-Werror=reorder-ctor`. The
+  initialization list now follows the declaration order; the objects are
+  initialized exactly as before.
+
+Both changes are mechanical and do not touch the benchmark, the test data, the
+SQL, the timing logic, the scoring script or the baseline.
+
+
 ### 2.1 `utf8mb4_general_ci` comparison fast path
 
 `src/oblib/lib/charset/ob_ctype_utf8.cc`
@@ -98,9 +119,8 @@ otherwise it is dropped and the next document does a normal fresh init.
 
 ## 3. Results
 
-The measured numbers of the final branch against the baseline are recorded
-with the benchmark report of this change; the checked-in baseline to score
-against is `fts_large_bench_baseline.json` (do not edit it).
+See `FTS_B4_TUNING_RESULTS.md` for the measured numbers of the final branch
+against the baseline on one machine.
 
 ## 4. Semantics
 
