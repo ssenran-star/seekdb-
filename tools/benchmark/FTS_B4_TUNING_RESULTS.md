@@ -413,3 +413,48 @@ intersection of the posting lists is the change with the largest expected
 effect, but it is not a small change: the legacy text retrieval path decides
 whether a document matches by looking at the score, so the boolean match
 needs a path of its own that does not go through the bm25 score.
+
+## 7. The hash table of the inverted index never grew
+
+The intersection of the postings of a query is done with a hash table that
+holds the document id and its relevance.  The table is created with
+
+```cpp
+hash_map->create(10, common::ObMemAttr("FTTaatMap")));
+```
+
+`ObHashMap` takes the ratio by which the table grows as a template argument,
+and the default value of that argument is one.  The table only grows when the
+argument is larger than one, so a map that is created with the default never
+grows: the ten buckets of the map are the buckets it has for the rest of its
+life.
+
+A query on twenty thousand documents is split into twenty partitions, so
+every partition of the query holds about four hundred documents.  With eleven
+buckets the chains of the map have an average length of thirty six, and the
+cost of putting a document into the map is the length of the chain.  The
+whole query therefore spends hundreds of thousands of steps walking over the
+chains of the maps.
+
+The map is now created with a number of buckets that matches the number of
+the documents it will hold, the number of the documents of the index is
+already known when the partitions are set up.  The chains get short and the
+lookup of a document becomes a constant time operation again.
+
+The change is made in the two places that create the map of a partition, the
+one of the merge iterator of the das layer and the one of the retrieval
+iterator of the storage layer.
+
+### The query does not use the term at a time iterator
+
+The first version of the change only touched the iterator of the das layer and
+it did not make any query faster at all.  The profile of a query shows why:
+a fulltext query does not use the term at a time iterator at all, it uses the
+document at a time iterator of the storage layer, and the map of the term at
+a time iterator is never filled.  The profile of a query is spread over the
+decoding of the postings, the merge of the block statistics of the words of
+the query, the relevance of the documents and the iteration of the document
+at a time iterator, so there is no single place that dominates it.
+
+The fulltext regression suite gives the same result with both binaries: 1693
+statements, 15 of 15 test files byte for byte identical.
