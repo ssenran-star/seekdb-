@@ -612,3 +612,38 @@ The sort of the build is an ordinary sort whose keys are the columns of the
 auxiliary table of the index.  The sort operator does not know the table
 its columns belong to, so it cannot recognise itself.  The plan that builds
 the auxiliary table has to tell it.
+
+### The work area of the build does not grow
+
+The sort of the build does not get a larger work area, and the reason is in
+the memory manager.  The function that enlarges the work area of a profile
+does nothing when the profile does not have the automatic policy:
+
+    int ObSqlMemMgrProcessor::update_cache_size(ObIAllocator *allocator, int64_t cache_size)
+    {
+      ...
+      if (!profile_.get_auto_policy()) {
+        // nothing happens
+      } else if (cache_size != pre_size) {
+        profile_.init(cache_size, OB_MALLOC_MIDDLE_BLOCK_SIZE);
+        ...
+      }
+
+The policy of the work area of the sort of the build is the manual one, so
+the size of its work area is the size that the tenant gives it and it does
+not grow.  The trace of the sort shows the two states of a work area, the
+sorts that are small enough run in memory and have the same size for the
+work area and for one pass, and the sort of the build has a work area of
+seventy eight megabytes and a size of one pass of two megabytes.
+
+The data of the sort of the build is seventy megabytes and the work area is
+seventy eight megabytes, so the data would fit into the work area, but the
+memory that the sort needs for the data and for the rows is a little more
+than the size of the work area, and the sort has to write its data to the
+disk.
+
+So the work area of the build has to be larger, and the size of the work
+area of a tenant is a property of the tenant.  A build of a fulltext index
+sorts one row for every word of every document, so it needs a work area of
+its own, and the place that gives the work area to the operation is the
+memory manager of the server.
