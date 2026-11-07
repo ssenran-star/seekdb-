@@ -576,3 +576,39 @@ is built, and the sort of the build has to be told there that it may use
 the whole work area as one pass.  The trace of the sort is the way to check
 the result: the number of the lines that say that the sort writes its data
 to the disk has to be zero.
+
+### Three attempts to recognise the sort of the build
+
+The sort of the build was looked for in three ways, and none of them
+matched:
+
+  * the expressions of its keys were checked for the operator of the word
+    segment.  The build writes the rows of the auxiliary table with a
+    parallel insert and the sort sorts the rows of the auxiliary table, so
+    the expressions of the keys are the columns of the auxiliary table and
+    not the expression of the word segment.
+  * the flag of the local merge sort was used, because the sort of a parallel
+    insert merges its runs locally.  The sort of the build does not have it.
+  * the sort of an index build removes the rows with the same key, so the
+    implementation that does that was used.  The sort of the build is not
+    that one either, it is an ordinary sort.
+
+How the attempts were measured is worth a note, because the first two were
+measured wrongly.  A line of the log was written to see whether the code
+ran, and the line never appeared.  The reason is that only the messages of
+the level info are written to the log of the server in this build, a message
+of the level warn is not.  The trace of the sort itself is a message of the
+level info and it is there, so the two kinds of messages have to be
+compared with each other before the code is called working.
+
+The measurement that is reliable is the size of the work area in the trace
+of the sort.  The function that enlarges the work area sets the size of
+the work area before it asks the memory manager for the memory, so the size
+of the work area in the trace tells whether the function was called at all.
+It did not change, so the code was never reached, and none of the three
+ways of recognising the sort of the build is right.
+
+The sort of the build is an ordinary sort whose keys are the columns of the
+auxiliary table of the index.  The sort operator does not know the table
+its columns belong to, so it cannot recognise itself.  The plan that builds
+the auxiliary table has to tell it.
