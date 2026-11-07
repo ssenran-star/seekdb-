@@ -85,6 +85,11 @@ public:
       flags_(0),
       field_boost_expr_(nullptr) {}
   bool need_calc_relevance() const { return nullptr != relevance_expr_; }
+  // See ObDASTextRetrievalMergeIter: a bare BOOL(MATCH(...)) filter is true for
+  // every row the inverted-index merge emits, so it does not need row-wise
+  // evaluation.  This reuses a reserved bit, no serialization change.
+  bool skip_match_filter() const { return 0 != reserved_ir_scan_flag_; }
+  void set_skip_match_filter() { reserved_ir_scan_flag_ = 1; }
   bool need_proj_relevance_score() const { return nullptr != relevance_proj_col_; }
   bool need_inv_idx_agg() const { return has_inv_agg_ && need_calc_relevance(); }
   bool need_block_max_scan() const { return has_block_max_scan_; }

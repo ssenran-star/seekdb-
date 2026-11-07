@@ -3045,6 +3045,22 @@ int ObTscCgService::generate_text_ir_spec_exprs(const ObTextRetrievalInfo &tr_in
     }
   }
 
+  // A bare BOOL(MATCH(...)) predicate is satisfied by every document the merge
+  // emits, so evaluating it once per row through the expression framework is
+  // pure overhead (measured 5-9% of a MATCH query).  Keep the pushdown filter
+  // for every other shape (threshold comparisons, AND/OR, score projections)
+  // so those keep their original semantics.
+  if (OB_SUCC(ret) && nullptr != tr_info.pushdown_match_filter_) {
+    ObRawExpr *mf = tr_info.pushdown_match_filter_;
+    if (T_OP_BOOL == mf->get_expr_type()
+        && 1 == mf->get_param_count()
+        && OB_NOT_NULL(mf->get_param_expr(0))
+        && T_FUN_MATCH_AGAINST == mf->get_param_expr(0)->get_expr_type()
+        && mf->get_param_expr(0) == tr_info.match_expr_) {
+      text_ir_scan_ctdef.set_skip_match_filter();
+    }
+  }
+
   if (OB_SUCC(ret) && tr_info.need_calc_relevance_) {
     if (OB_ISNULL(tr_info.relevance_expr_)) {
       ret = OB_ERR_UNEXPECTED;
