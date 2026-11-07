@@ -458,3 +458,44 @@ at a time iterator, so there is no single place that dominates it.
 
 The fulltext regression suite gives the same result with both binaries: 1693
 statements, 15 of 15 test files byte for byte identical.
+
+## 8. Why the build of the index spills to disk
+
+The profile of the build of an index shows that the sort of the words is the
+expensive part of it, and that the dump of the sort is the expensive part of
+the sort:
+
+    ObPxTaskProcess::execute
+     `- ObPxMultiPartSSTableInsertOp::inner_get_next_row
+        `- ObSortOp::inner_get_next_batch
+           `- ObSortOpImpl::do_dump
+              `- ObSortOpImpl::sort_inmem_data
+
+A fifth of the time of the build goes into the dump.  The trace of the sort
+says why:
+
+    trace sort need dump(dumped=true, mem_context_->used()=78447048,
+        get_memory_limit()=2373351, profile_.get_cache_size()=78442412,
+        profile_.get_expect_size()=2373351,
+        sql_mem_processor_.get_data_size()=70320128)
+
+The data of the sort is seventy megabytes, the memory that one pass of the
+sort may use is two megabytes, and the memory that the whole operation may
+use is seventy eight megabytes.  The sort therefore writes its data to disk,
+and the sorted runs are read back and merged again afterwards.
+
+The size of the work area is a percentage of the memory of the tenant, and
+the default percentage of five gives the seventy eight megabytes that the
+operation may use.  The data of the sort needs seventy megabytes, so the
+operation is right at the limit and the sort has to spill.
+
+Changing the percentage of the work area of the tenant to twenty makes the
+build of the index about eight percent faster on a machine with a local
+disk.  The evaluation machine stores its data on a network, so the write of
+the sorted runs and the read of them again cost more there.
+
+The change was not made, because the percentage of the work area is a
+property of the tenant and not of the operation, and the build of the index
+of a text column is only one of the many operations of a server.  Raising it
+for the build of a fulltext index needs a place that belongs to the
+operation, and the build of the index has no session of its own yet.
