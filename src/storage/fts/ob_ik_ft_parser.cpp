@@ -256,23 +256,17 @@ int ObIKFTParser::init_dict(const ObFTParserParam &param)
   if (should_read_newest_table()) {
     // clear dict cache, always false now
   } else {
-    // The dictionaries do not change, they are built once and then shared by
-    // all the parsers.  The parser only borrows them, so it must not free
-    // them in reset().
-    dicts_are_shared_ = true;
-    if (OB_FAIL(hub_->get_shared_dict(main_dict_desc, dict_main_))) {
-    } else if (OB_FAIL(hub_->get_shared_dict(quan_dict_desc, dict_quan_))) {
-    } else if (OB_FAIL(hub_->get_shared_dict(stopword_dict_desc, dict_stop_))) {
+    if (OB_FAIL(init_single_dict(main_dict_desc, cache_main_))) {
+    } else if (OB_FAIL(init_single_dict(quan_dict_desc, cache_quan_))) {
+    } else if (OB_FAIL(init_single_dict(stopword_dict_desc, cache_stop_))) {
     }
   }
 
   if (OB_FAIL(ret)) {
     // already logged.
-  } else if (!dicts_are_shared_) {
-    if (OB_FAIL(build_dict_from_cache(main_dict_desc, cache_main_, dict_main_))) {
-    } else if (OB_FAIL(build_dict_from_cache(quan_dict_desc, cache_quan_, dict_quan_))) {
-    } else if (OB_FAIL(build_dict_from_cache(stopword_dict_desc, cache_stop_, dict_stop_))) {
-    }
+  } else if (OB_FAIL(build_dict_from_cache(main_dict_desc, cache_main_, dict_main_))) {
+  } else if (OB_FAIL(build_dict_from_cache(quan_dict_desc, cache_quan_, dict_quan_))) {
+  } else if (OB_FAIL(build_dict_from_cache(stopword_dict_desc, cache_stop_, dict_stop_))) {
   }
 
   return ret;
@@ -372,20 +366,17 @@ void ObIKFTParser::reset()
   cache_quan_.reset();
   cache_stop_.reset();
 
-  if (!dicts_are_shared_) {
-    // The shared dictionaries are owned by the hub, they must not be freed.
-    if (!OB_ISNULL(dict_main_)) {
-      dict_main_->~ObIFTDict();
-      allocator_.free(dict_main_);
-    }
-    if (!OB_ISNULL(dict_quan_)) {
-      dict_quan_->~ObIFTDict();
-      allocator_.free(dict_quan_);
-    }
-    if (!OB_ISNULL(dict_stop_)) {
-      dict_stop_->~ObIFTDict();
-      allocator_.free(dict_stop_);
-    }
+  if (!OB_ISNULL(dict_main_)) {
+    dict_main_->~ObIFTDict();
+    allocator_.free(dict_main_);
+  }
+  if (!OB_ISNULL(dict_quan_)) {
+    dict_quan_->~ObIFTDict();
+    allocator_.free(dict_quan_);
+  }
+  if (!OB_ISNULL(dict_stop_)) {
+    dict_stop_->~ObIFTDict();
+    allocator_.free(dict_stop_);
   }
 
   is_inited_ = false;

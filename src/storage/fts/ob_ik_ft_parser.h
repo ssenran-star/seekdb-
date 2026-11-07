@@ -46,8 +46,7 @@ public:
         cache_stop_(allocator),
         dict_main_(nullptr),
         dict_quan_(nullptr),
-        dict_stop_(nullptr),
-        dicts_are_shared_(false)
+        dict_stop_(nullptr)
   {
   }
 
@@ -107,8 +106,6 @@ private:
   ObIFTDict *dict_main_;
   ObIFTDict *dict_quan_;
   ObIFTDict *dict_stop_;
-  // true when the dictionaries above are owned by the hub and only borrowed
-  bool dicts_are_shared_;
 
   DISABLE_COPY_ASSIGN(ObIKFTParser);
 };

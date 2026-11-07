@@ -386,9 +386,8 @@ int ObFTRangeDict::find_first_char_range(const ObString &single_word, ObIFTDict 
   const bool bin_cmp = (ObCollationType::CS_TYPE_UTF8MB4_BIN == desc_.coll_type_);
 
   // 先探测上次命中的 range：分词按字符顺序推进，相邻字符大概率仍在同一 range
-  const int64_t last_range_idx = last_range_idx_.load(std::memory_order_relaxed);
-  if (last_range_idx >= 0 && last_range_idx < range_cnt) {
-    const ObFTRange &last = range_dicts_[last_range_idx];
+  if (last_range_idx_ >= 0 && last_range_idx_ < range_cnt) {
+    const ObFTRange &last = range_dicts_[last_range_idx_];
     if (range_contains(last, single_word, bin_cmp)) {
       dict = last.dict_;
       found = true;
@@ -419,7 +418,7 @@ int ObFTRangeDict::find_first_char_range(const ObString &single_word, ObIFTDict 
       if (range_contains(range_dicts_[candidate], single_word, bin_cmp)) {
         dict = range_dicts_[candidate].dict_;
         found = true;
-        last_range_idx_.store(candidate, std::memory_order_relaxed);
+        last_range_idx_ = candidate;
       }
     }
   }
@@ -429,7 +428,7 @@ int ObFTRangeDict::find_first_char_range(const ObString &single_word, ObIFTDict 
     if (range_contains(range, single_word, bin_cmp)) {
       dict = range.dict_;
       found = true;
-      last_range_idx_.store(i, std::memory_order_relaxed);
+      last_range_idx_ = i;
     }
   }
   if (!found) {

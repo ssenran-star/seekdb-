@@ -26,8 +26,6 @@
 #include "share/rc/ob_server_runtime.h"
 #include "storage/fts/dict/ob_ft_cache_container.h"
 #include "storage/fts/dict/ob_ft_dict.h"
-#include <atomic>
-
 #include "storage/fts/dict/ob_ft_dict_def.h"
 #include "storage/fts/dict/ob_ft_dict_iterator.h"
 
@@ -145,10 +143,7 @@ private:
   // 分词是顺序扫描文本，连续字符通常落在同一个 range 上，
   // 记住上次命中的 range 可以省掉大部分线性比较。
   // 该字段只是查找提示，即使并发写坏也只会退化成一次全扫描，不影响正确性。
-  // The dictionary is shared by all the parsers, so the hint that remembers
-  // the range that was matched last has to be accessed atomically.  A wrong
-  // value only costs a binary search, it cannot change the result.
-  mutable std::atomic<int64_t> last_range_idx_;
+  mutable int64_t last_range_idx_;
 
 private:
   DISALLOW_COPY_AND_ASSIGN(ObFTRangeDict);
