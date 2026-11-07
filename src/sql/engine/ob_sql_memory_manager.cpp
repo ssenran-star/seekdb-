@@ -277,6 +277,15 @@ int ObSqlMemoryManager::ObSqlWorkAreaCalcInfo::calculate_global_bound_size(
   int64_t max_bound_size = (0 == error_sim) ? (max_wa_size >> 3) : error_sim;
   profile_cnt_ = profile_cnt;
   int64_t avg_bound_size = (0 == profile_cnt_) ? max_bound_size : max_wa_size / profile_cnt_;
+  // Share the work area budget with the profiles that are really running instead of
+  // always cutting it into eight parts: a query that runs on its own may use the budget
+  // the tenant granted it, while concurrent queries still share the budget (with eight
+  // profiles active every profile gets one eighth of it, the same as before).  Without
+  // this the sort of the full-text index word rows reaches the one eighth ceiling with
+  // all its rows in memory and spills them to disk and reads them back for nothing.
+  if (avg_bound_size > max_bound_size) {
+    max_bound_size = avg_bound_size;
+  }
   int64_t best_interval_idx = -1;
   if (OB_FAIL(find_best_interval_index_by_mem_target(
     best_interval_idx, max_wa_size, total_memory_size))) {
