@@ -668,3 +668,27 @@ the properties is a fifth of the work of the call for the parser that does
 not use a dictionary.  The evaluation machine spends almost nothing in the
 framework round trip, so the same saving is worth much more there than on a
 machine whose round trip takes longer than the work itself.
+
+## 10. The dictionaries of the ik parser must not be shared between the threads
+
+The dictionaries of the ik parser were shared between the parsers, so that
+every parser of every thread used the same range lists.  The measurement of
+the evaluation machine showed that this made the build of the index much
+slower: the build of the index of all the columns took seventeen seconds
+instead of six, and the build of the index of the content took six seconds
+instead of five, while the build of the index with the parser of the english
+language, which does not use a dictionary, was not slower at all.
+
+The reason is the hint of the range list that remembers the range that was
+matched last.  It is written for every word that is looked up.  When the
+range list is shared by the threads of a parallel insert, every one of them
+writes to the same place in the memory, and the line of the cache that holds
+it has to be fetched again by every core.  A single session, like the
+tokenize function of a statement, does not notice it, but the parallel
+insert of the build of an index has many threads and does.
+
+So the dictionaries are not shared any more, every parser has its own, and
+the hint is a plain field again.  The lookup of a word keeps the binary
+search of the range list and the hint of the range that was matched last,
+they were the reason why the build of the index got faster in the first
+place.
