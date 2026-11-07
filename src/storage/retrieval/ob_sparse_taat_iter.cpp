@@ -29,7 +29,6 @@ ObSRTaaTIterImpl::ObSRTaaTIterImpl()
     iter_param_(nullptr),
     dim_iter_(nullptr),
     partition_cnt_(0),
-    total_doc_cnt_(0),
     datum_stores_(nullptr),
     datum_store_iters_(nullptr),
     skips_(nullptr),
@@ -74,7 +73,6 @@ void ObSRTaaTIterImpl::reset()
 {
   ObSRTaaTIterImpl::reuse();
   partition_cnt_ = 0;
-  total_doc_cnt_ = 0;
   is_inited_ = false;
 }
 
@@ -214,21 +212,13 @@ int ObSRTaaTIterImpl::init_chunk_stores()
     } else {
       skips_ = static_cast<sql::ObBitVector **>(buf);
     }
-    // The hash map of a partition never grows, the number of its buckets is
-    // fixed when the map is created.  With the ten buckets of the default a
-    // partition that holds thousands of documents ends up with very long
-    // chains, and every document that is put into the map or looked up in it
-    // walks over the whole chain.  The map has to be created with a number of
-    // buckets that matches the number of the documents it will hold.
-    const int64_t expected_doc_cnt = (total_doc_cnt_ + partition_cnt_ - 1) / partition_cnt_;
-    const int64_t bucket_cnt = OB_MIN(OB_MAX(expected_doc_cnt, 64), 8192);
     for (int64_t i = 0; OB_SUCC(ret) && i < partition_cnt_; ++i) {
       if (OB_FAIL(ret)) {
       } else if (OB_ISNULL(buf = iter_allocator_->alloc(sizeof(ObSRTaaTHashMap)))) {
         ret = OB_ALLOCATE_MEMORY_FAILED;
       } else {
         ObSRTaaTHashMap *hash_map = new (buf) ObSRTaaTHashMap();
-        if (OB_FAIL(hash_map->create(bucket_cnt, common::ObMemAttr("FTTaatMap")))) {
+        if (OB_FAIL(hash_map->create(10, common::ObMemAttr("FTTaatMap")))) {
         } else {
           hash_maps_[i] = hash_map;
         }

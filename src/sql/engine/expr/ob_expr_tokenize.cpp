@@ -15,9 +15,6 @@
  */
 
 #include "sql/engine/expr/ob_expr_tokenize.h"
-#include "lib/allocator/page_arena.h"
-#include "lib/hash/ob_hashmap.h"
-#include "lib/lock/ob_mutex.h"
 
 #include "lib/alloc/alloc_struct.h"
 #include "lib/allocator/page_arena.h"
@@ -52,97 +49,6 @@ ObExprTokenize::ObExprTokenize(common::ObIAllocator &alloc)
 }
 
 ObExprTokenize::~ObExprTokenize() {}
-
-
-namespace {
-/**
- * The properties of a parser and the name of the parser are the same for
- * every call of a statement, so the result of the formatting of the
- * properties is kept and reused.  The formatting parses the properties of
- * the statement, rebuilds them and writes them out again, and the result is
- * parsed once more by the parser, so every call of a statement does that
- * work again without getting anything new from it.
- */
-class ObTokenizePropsCache
-{
-public:
-  static constexpr int64_t MAX_CACHE_SIZE = 64;
-  static constexpr int64_t MAX_KEY_LENGTH = 512;
-
-  static ObTokenizePropsCache &instance()
-  {
-    static ObTokenizePropsCache instance;
-    return instance;
-  }
-
-  int get(const ObString &parser_name, const ObString &properties, ObString &formatted)
-  {
-    int ret = OB_SUCCESS;
-    ObString key;
-    char buf[MAX_KEY_LENGTH];
-    if (OB_FAIL(make_key(parser_name, properties, key, buf))) {
-      ret = OB_ENTRY_NOT_EXIST;
-    } else {
-      lib::ObMutexGuard guard(lock_);
-      if (OB_FAIL(cache_.get_refactored(key, formatted))) {
-        ret = OB_ENTRY_NOT_EXIST;
-      }
-    }
-    return ret;
-  }
-
-  int put(const ObString &parser_name, const ObString &properties, const ObString &formatted)
-  {
-    int ret = OB_SUCCESS;
-    ObString key;
-    char buf[MAX_KEY_LENGTH];
-    if (OB_FAIL(make_key(parser_name, properties, key, buf))) {
-      ret = OB_ENTRY_NOT_EXIST;
-    } else {
-      lib::ObMutexGuard guard(lock_);
-      if (cache_.size() >= MAX_CACHE_SIZE) {
-        // the cache is full, the caller uses the result it has
-        ret = OB_ENTRY_NOT_EXIST;
-      } else if (OB_FAIL(ret = cache_.set_refactored(key, formatted, 1))) {
-      }
-    }
-    return ret;
-  }
-
-private:
-  ObTokenizePropsCache() : cache_(), lock_()
-  {
-    // the name of the label has to be short
-    cache_.create(64, "tok props");
-  }
-
-  int make_key(const ObString &parser_name, const ObString &properties,
-               ObString &key, char *buf)
-  {
-    int ret = OB_SUCCESS;
-    const int64_t name_len = parser_name.length();
-    const int64_t props_len = properties.length();
-    const int64_t len = name_len + 1 + props_len;
-    if (len > MAX_KEY_LENGTH) {
-      ret = OB_ENTRY_NOT_EXIST;
-    } else {
-      if (name_len > 0) {
-        MEMCPY(buf, parser_name.ptr(), name_len);
-      }
-      buf[name_len] = '\0';
-      if (props_len > 0) {
-        MEMCPY(buf + name_len + 1, properties.ptr(), props_len);
-      }
-      key = ObString(len, buf);
-    }
-    return ret;
-  }
-
-private:
-  hash::ObHashMap<ObString, ObString> cache_;
-  lib::ObMutex lock_;
-};
-} // namespace
 
 int ObExprTokenize::eval_tokenize(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &expr_datum)
 {
@@ -469,24 +375,17 @@ int ObExprTokenize::parse_parser_properties(const ObExpr &expr,
 int ObExprTokenize::TokenizeParam::reform_parser_properties(const ObString &properties)
 {
   int ret = OB_SUCCESS;
-  ObString formatted;
-  if (OB_FAIL(ObTokenizePropsCache::instance().get(parser_name_, properties, formatted))) {
-    storage::ObFTParserJsonProps parser_properties;
-    if (OB_FAIL(parser_properties.init())) {
-    } else if (OB_FAIL(parser_properties.parse_from_valid_str(properties))) {
-      LOG_USER_ERROR(OB_INVALID_ARGUMENT, "parser properties invalid.");
-    } else if (OB_FAIL(parser_properties.rebuild_props_for_ddl(parser_name_, CS_TYPE_UTF8MB4_BIN, true))) {
-    } else if (OB_FAIL(parser_properties.to_format_json(allocator_, formatted))) {
-    } else {
-      // keep the result for the next call, the caller falls back to the
-      // result of this call when it cannot be kept
-      if (OB_FAIL(ObTokenizePropsCache::instance().put(parser_name_, properties, formatted))) {
-      }
-      properties_ = formatted;
-    }
-  } else {
-    properties_ = formatted;
+  storage::ObFTParserJsonProps parser_properties;
+
+  if (OB_FAIL(parser_properties.init())) {
+  } else if (OB_FAIL(parser_properties.parse_from_valid_str(properties))) {
+    LOG_USER_ERROR(OB_INVALID_ARGUMENT, "parser properties invalid.");
+  } else if (OB_FAIL(parser_properties.rebuild_props_for_ddl(parser_name_,
+                                                             ObCollationType::CS_TYPE_UTF8MB4_BIN,
+                                                             true))) {
+  } else if (OB_FAIL(parser_properties.to_format_json(allocator_, properties_))) {
   }
+
   return ret;
 }
 

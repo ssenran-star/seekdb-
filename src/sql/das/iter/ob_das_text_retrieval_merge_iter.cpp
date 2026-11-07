@@ -1094,21 +1094,13 @@ int ObDASTRTaatIter::init_stores_by_partition()
       }
     }
 
-    // The hash map of a partition never grows, the number of its buckets is
-    // fixed when the map is created.  With the ten buckets of the default a
-    // partition that holds thousands of documents ends up with very long
-    // chains, and every document that is put into the map or looked up in it
-    // walks over the whole chain.  The map has to be created with a number of
-    // buckets that matches the number of the documents it will hold.
-    const int64_t expected_doc_cnt = (total_doc_cnt_ + partition_cnt - 1) / partition_cnt;
-    const int64_t bucket_cnt = OB_MIN(OB_MAX(expected_doc_cnt, 64), 8192);
     for (int64_t i = 0; OB_SUCC(ret) && i < partition_cnt; ++i) {
       if (OB_FAIL(ret)) {
       } else if (OB_ISNULL(buf = mem_context_->get_arena_allocator().alloc(sizeof(ObDASTRTaatHashMap)))) {
         ret = OB_ALLOCATE_MEMORY_FAILED;
       } else {
         ObDASTRTaatHashMap *hash_map = new(buf) ObDASTRTaatHashMap();
-        if (OB_FAIL(hash_map->create(bucket_cnt, common::ObMemAttr("FTTaatMap")))) {
+        if (OB_FAIL(hash_map->create(10, common::ObMemAttr("FTTaatMap")))) {
         } else {
           hash_maps_[i] = hash_map;
         }
