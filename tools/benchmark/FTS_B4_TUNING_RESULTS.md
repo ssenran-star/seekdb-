@@ -499,3 +499,80 @@ property of the tenant and not of the operation, and the build of the index
 of a text column is only one of the many operations of a server.  Raising it
 for the build of a fulltext index needs a place that belongs to the
 operation, and the build of the index has no session of its own yet.
+
+### Where the size of one pass comes from
+
+The size of one pass of a sort is not the size of the work area, it is the
+square root of the size of the work area times the size of a block:
+
+    // one_pass_size = sqrt(cache_size * chunk_size)
+    OB_INLINE void init(int64_t cache_size, int64_t chunk_size)
+    {
+      chunk_size_ = chunk_size;
+      one_pass_size_ = calc_one_pass_size(cache_size);
+      cache_size_ = cache_size;
+      min_size_ = MIN_BOUND_SIZE[type_];
+    }
+
+and the memory manager uses it to decide whether the sort runs in memory:
+
+    } else if (profile.is_sort_wa()) {
+      if (global_bound_size > profile.get_cache_size()) {
+        // in-memory
+        profile.set_expect_size(profile.get_cache_size());
+      } else if (global_bound_size > profile.get_one_pass_size()) {
+        // sort in one-pass case, increasing memory has no impact on performance
+        profile.set_expect_size(profile.get_one_pass_size());
+      } ...
+
+The work area of the sort of the build is seventy eight megabytes and the
+data is seventy megabytes, so the data would fit into the work area, but the
+size of one pass is only two megabytes, and a sort that has more data than
+one pass writes it to the disk.  The square root is the reason: to get a
+size of one pass of seventy megabytes the work area would have to be tens of
+gigabytes.
+
+The branch that runs the sort in memory needs the global bound of the memory
+of the server to be larger than the work area of the operation, and the
+global bound is the work area of the tenant, so the branch is not taken.
+
+### Where the change belongs
+
+The change does not belong into the sort operator.  The sort of the build
+does not know that it sorts the words of a fulltext index: the build writes
+the rows of the auxiliary table with a parallel insert, and the sort of that
+insert sorts the rows of the auxiliary table, so its expressions are the
+columns of the auxiliary table and not the generated column of the word
+segment.  A sort cannot be told apart from the expressions of its keys.
+
+The operator that knows that it writes the auxiliary table of a fulltext
+index is the parallel insert of the domain of the data access service, and
+the change belongs there: it has to tell the sort of the build to use the
+whole work area as one pass, and to ask the memory manager for a work area
+that is large enough for it.
+
+### The sort of the build does not go through the ordinary initialization
+
+The change was written and measured, and it did nothing.  Two attempts to
+tell the sort of the build from the sort of a query were made:
+
+  * the sort of the build sorts the word segment of the index, so the
+    expressions of its keys were checked for the operator of the word
+    segment.  The check never matched, because the build writes the rows of
+    the auxiliary table with a parallel insert and the sort of that insert
+    sorts the rows of the auxiliary table, whose columns are references and
+    not the expression of the word segment.
+  * the sort of the build is the sort of a parallel insert, so the flag of
+    the local merge sort was used.  The check never matched either.
+
+The reason is that the sort of the build does not get the ordinary
+initialization.  The function that sets the expressions of the keys and the
+flags of the operator is not called for it, so neither the expressions nor
+the flags are available there, and the trace of the sort proves that it is
+the same class that decides whether it writes its data to the disk.
+
+The change therefore has to be made where the plan of the parallel insert
+is built, and the sort of the build has to be told there that it may use
+the whole work area as one pass.  The trace of the sort is the way to check
+the result: the number of the lines that say that the sort writes its data
+to the disk has to be zero.
