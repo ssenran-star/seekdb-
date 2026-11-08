@@ -19,6 +19,7 @@
 
 #include "lib/allocator/ob_allocator.h"
 #include "lib/allocator/page_arena.h"
+#include "lib/stat/ob_di_tls.h"
 #include "lib/string/ob_string.h"
 #include "sql/engine/expr/ob_expr_operator.h"
 #include "data_plane/fts/ob_fts_parser_property.h"
@@ -65,6 +66,58 @@ private:
     // check and reform parser properties to standard format
     int reform_parser_properties(const ObString &properties);
     int try_load_dictionary_for_ik();
+
+  public:
+    // Cache of reformatted parser properties.
+    //
+    // reform_parser_properties() parses the properties JSON, normalizes it
+    // and renders it back to JSON on every evaluation, but the result only
+    // depends on the parser name and the properties string - both are
+    // constants of the expression. The cache keeps the last reformatted
+    // string per thread and returns it when the key matches.
+    //
+    // The transformation is a pure function of its inputs (the built-in
+    // parser table is compile-time constant and the normalization reads no
+    // runtime state), so the cached bytes are exactly what a fresh call
+    // would have produced.
+    class PropertiesCache
+    {
+    public:
+      PropertiesCache();
+      ~PropertiesCache();
+      // Returns the reformatted properties for (parser_name, properties),
+      // or OB_ENTRY_NOT_EXIST when there is no cache hit.
+      int get(const ObString &parser_name,
+              const ObString &properties,
+              ObString &result);
+      void put(const ObString &parser_name,
+               const ObString &properties,
+               const ObString &reformatted);
+      void clear();
+
+      // Hit/miss counters (diagnostics only).
+      int64_t hit_count() const { return hit_count_; }
+      int64_t miss_count() const { return miss_count_; }
+
+    private:
+      ObString parser_name_;
+      ObString properties_;
+      ObString reformatted_;
+      ObArenaAllocator allocator_;
+      bool valid_;
+      int64_t hit_count_;
+      int64_t miss_count_;
+    };
+
+    static PropertiesCache &properties_cache();
+
+    // Hit/miss counters of the thread local cache (diagnostics only).
+    static void properties_cache_stats(int64_t &hits, int64_t &misses)
+    {
+      PropertiesCache &cache = properties_cache();
+      hits = cache.hit_count();
+      misses = cache.miss_count();
+    }
 
   public:
     // for property and tmp json string

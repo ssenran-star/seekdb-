@@ -372,18 +372,162 @@ int ObExprTokenize::parse_parser_properties(const ObExpr &expr,
   return ret;
 }
 
+namespace
+{
+// Length aware comparison: an empty ObString has a null pointer, so the byte
+// compare must be skipped for it. The benchmark calls tokenize(text, 'ik')
+// with no properties at all, so the empty key is the common case.
+inline bool ft_str_equal(const ObString &a, const ObString &b)
+{
+  return a.length() == b.length() && (0 == a.length() || 0 == MEMCMP(a.ptr(), b.ptr(), a.length()));
+}
+} // namespace
+
+ObExprTokenize::TokenizeParam::PropertiesCache::PropertiesCache()
+    : parser_name_(),
+      properties_(),
+      reformatted_(),
+      allocator_(ObMemAttr("FTPropCache")),
+      valid_(false),
+      hit_count_(0),
+      miss_count_(0)
+{
+}
+
+ObExprTokenize::TokenizeParam::PropertiesCache::~PropertiesCache()
+{
+  clear();
+}
+
+void ObExprTokenize::TokenizeParam::PropertiesCache::clear()
+{
+  parser_name_ = ObString();
+  properties_ = ObString();
+  reformatted_ = ObString();
+  allocator_.reset();
+  valid_ = false;
+}
+
+int ObExprTokenize::TokenizeParam::PropertiesCache::get(const ObString &parser_name,
+                                                         const ObString &properties,
+                                                         ObString &result)
+{
+  int ret = OB_SUCCESS;
+  if (!valid_) {
+    // Nothing cached yet.
+    ret = OB_ENTRY_NOT_EXIST;
+  } else if (ft_str_equal(parser_name_, parser_name) && ft_str_equal(properties_, properties)) {
+    result = reformatted_;
+    ++hit_count_;
+  } else {
+    ret = OB_ENTRY_NOT_EXIST;
+    ++miss_count_;
+  }
+  return ret;
+}
+
+void ObExprTokenize::TokenizeParam::PropertiesCache::put(const ObString &parser_name,
+                                                          const ObString &properties,
+                                                          const ObString &reformatted)
+{
+  clear();
+  // An empty ObString has a null pointer but is still a valid key, so the
+  // null check must not reject it.
+  if ((OB_ISNULL(parser_name.ptr()) && parser_name.length() > 0)
+      || (OB_ISNULL(properties.ptr()) && properties.length() > 0)) {
+    return;
+  }
+  // The keys and the value are copied into the cache's own allocator so that
+  // the entry stays valid after the caller's arena is released.
+  int64_t name_len = parser_name.length();
+  int64_t props_len = properties.length();
+  int64_t value_len = reformatted.length();
+  char *name_buf = nullptr;
+  char *props_buf = nullptr;
+  char *value_buf = nullptr;
+  if (name_len > 0) {
+    name_buf = reinterpret_cast<char *>(allocator_.alloc(name_len));
+  }
+  if (props_len > 0) {
+    props_buf = reinterpret_cast<char *>(allocator_.alloc(props_len));
+  }
+  if (value_len > 0) {
+    value_buf = reinterpret_cast<char *>(allocator_.alloc(value_len));
+  }
+  if ((name_len > 0 && OB_ISNULL(name_buf))
+      || (props_len > 0 && OB_ISNULL(props_buf))
+      || (value_len > 0 && OB_ISNULL(value_buf))) {
+    clear();
+    return;
+  }
+  if (name_len > 0) {
+    MEMCPY(name_buf, parser_name.ptr(), name_len);
+  }
+  if (props_len > 0) {
+    MEMCPY(props_buf, properties.ptr(), props_len);
+  }
+  if (value_len > 0) {
+    MEMCPY(value_buf, reformatted.ptr(), value_len);
+  }
+  parser_name_ = ObString(name_len, name_buf);
+  properties_ = ObString(props_len, props_buf);
+  reformatted_ = ObString(value_len, value_buf);
+  valid_ = true;
+}
+
+ObExprTokenize::TokenizeParam::PropertiesCache &
+ObExprTokenize::TokenizeParam::properties_cache()
+{
+  // ObDITls destroys the entry at thread exit instead of from a later
+  // thread's static destructor.
+  typedef common::ObDITls<PropertiesCache, 0x46545043> PropertiesCacheTls;
+  PropertiesCache *cache = PropertiesCacheTls::get_instance();
+  // get_instance() returns null while the thread is leaving; the caller
+  // then falls back to the uncached path.
+  static PropertiesCache fallback;
+  return OB_NOT_NULL(cache) ? *cache : fallback;
+}
+
+// Hit/miss counters of the thread local properties cache.  Only used by the
+// temporary instrumentation; kept here so the probe can read them without
+// touching the private TokenizeParam type.
 int ObExprTokenize::TokenizeParam::reform_parser_properties(const ObString &properties)
 {
   int ret = OB_SUCCESS;
   storage::ObFTParserJsonProps parser_properties;
 
+  // The caller passes properties_ itself, and the reformatted result is
+  // written back into properties_ - so the argument aliases the output.
+  // Snapshot the input now, before anything overwrites it, otherwise the
+  // cache key would be the previous call's output and never match.
+  const ObString input = properties;
+
+  // Fast path: the reformatted properties only depend on the parser name and
+  // the properties string, both constant for a given expression, so the
+  // result can be reused instead of re-parsing the JSON every time.
+  ObString cached;
+  if (OB_SUCC(properties_cache().get(parser_name_, input, cached))) {
+    char *buf = reinterpret_cast<char *>(allocator_.alloc(cached.length()));
+    if (OB_ISNULL(buf) && cached.length() > 0) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else {
+      if (cached.length() > 0) {
+        MEMCPY(buf, cached.ptr(), cached.length());
+      }
+      properties_ = ObString(cached.length(), buf);
+    }
+    return ret;
+  }
+
   if (OB_FAIL(parser_properties.init())) {
-  } else if (OB_FAIL(parser_properties.parse_from_valid_str(properties))) {
+  } else if (OB_FAIL(parser_properties.parse_from_valid_str(input))) {
     LOG_USER_ERROR(OB_INVALID_ARGUMENT, "parser properties invalid.");
   } else if (OB_FAIL(parser_properties.rebuild_props_for_ddl(parser_name_,
                                                              ObCollationType::CS_TYPE_UTF8MB4_BIN,
                                                              true))) {
   } else if (OB_FAIL(parser_properties.to_format_json(allocator_, properties_))) {
+  } else {
+    properties_cache().put(parser_name_, input, properties_);
   }
 
   return ret;
