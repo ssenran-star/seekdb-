@@ -57,7 +57,7 @@ private:
 
   int remove_conflict(const ObIKToken &token, ObIKTokenChain *option);
 
-  bool keep_single() const { return true; }
+  bool keep_single() const { return false; }
 
 private:
   ObArenaAllocator alloc_;
