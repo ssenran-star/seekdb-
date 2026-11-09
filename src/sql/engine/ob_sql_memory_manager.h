@@ -93,7 +93,7 @@ public:
     max_mem_used_(0), mem_used_(0), profile_data_used_(0), profile_total_used_(0),
     pre_mem_used_(0), dumped_size_(0), max_dumped_size_(0), data_ratio_(0.5),
     active_time_(0), number_pass_(0),
-    calc_count_(0), disable_auto_mem_mgr_(false)
+    calc_count_(0), disable_auto_mem_mgr_(false), force_in_memory_(false)
   {
     random_id_ = (int64_t)rdtsc();
   }
@@ -150,6 +150,8 @@ public:
   OB_INLINE void set_cache_size(int64_t cache_size) { cache_size_ = cache_size; }
   OB_INLINE int64_t get_one_pass_size() const { return one_pass_size_; }
   OB_INLINE void set_one_pass_size(int64_t one_pass_size) { one_pass_size_ = one_pass_size; }
+  OB_INLINE bool force_in_memory() const { return force_in_memory_; }
+  OB_INLINE void set_force_in_memory(bool force_in_memory) { force_in_memory_ = force_in_memory; }
   OB_INLINE int64_t get_global_bound_size() const { return global_bound_size_; }
   OB_INLINE void set_global_bound_size(int64_t global_bound_size)
             { global_bound_size_ = global_bound_size; }
@@ -250,6 +252,7 @@ public:
   int64_t number_pass_;
   int64_t calc_count_;    // the times of calculate global bound
   bool disable_auto_mem_mgr_;
+  bool force_in_memory_;
 };
 
 static constexpr const char *EXECUTION_OPTIMAL = "OPTIMAL";

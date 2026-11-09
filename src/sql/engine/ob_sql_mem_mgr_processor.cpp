@@ -236,6 +236,7 @@ int ObSqlMemMgrProcessor::extend_max_memory_size(
         //      otherwise, continue to determine whether to dump, proceed with the true memory expansion logic
         if (OB_FAIL(get_max_available_mem_size(allocator))) {
         } else if (profile_.get_cache_size() > profile_.get_expect_size()) {
+          need_dump = dump_fun(profile_.get_expect_size());
           break;
         }
       } else {
@@ -247,6 +248,7 @@ int ObSqlMemMgrProcessor::extend_max_memory_size(
           }
           LOG_TRACE("trace extend max memory size", K(pre_cache_size), K(pre_expect_size),
             K(profile_.get_cache_size()), K(profile_.get_expect_size()));
+          need_dump = dump_fun(profile_.get_expect_size());
           break;
         }
       }

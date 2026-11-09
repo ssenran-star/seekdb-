@@ -41,6 +41,7 @@ ObSortSpec::ObSortSpec(common::ObIAllocator &alloc, const ObPhyOperatorType type
   is_fetch_with_ties_(false),
   prescan_enabled_(false),
   enable_encode_sortkey_opt_(false),
+  is_fts_build_sort_(false),
   part_cnt_(0),
   pd_topn_filter_info_(alloc)
 {}
@@ -59,6 +60,7 @@ OB_SERIALIZE_MEMBER((ObSortSpec, ObOpSpec),
                     is_fetch_with_ties_,
                     prescan_enabled_,
                     enable_encode_sortkey_opt_,
+                    is_fts_build_sort_,
                     part_cnt_,
                     compress_type_,
                     pd_topn_filter_info_);
@@ -433,6 +435,7 @@ int ObSortOp::init_sort(int64_t row_count,
   sort_impl_.set_input_width(MY_SPEC.width_ + aqs_head);
   sort_impl_.set_operator_type(MY_SPEC.type_);
   sort_impl_.set_operator_id(MY_SPEC.id_);
+  sort_impl_.set_is_fts_build_sort(MY_SPEC.is_fts_build_sort_);
   sort_impl_.set_io_event_observer(&io_event_observer_);
   return ret;
 }

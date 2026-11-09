@@ -626,6 +626,7 @@ bool ObOptParamHint::is_param_val_valid(const OptParamType param_type, const ObO
   switch (param_type) {
     case HIDDEN_COLUMN_VISIBLE:
     case ENABLE_NEWSORT:
+    case _FTS_BUILD_SORT_IN_MEMORY:
     case USE_PART_SORT_MGB:
     case USE_DEFAULT_OPT_STAT:
     case ENABLE_IN_RANGE_OPTIMIZATION:

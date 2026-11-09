@@ -151,6 +151,7 @@ struct ObOptParamHint
     DEF(ENABLE_RUNTIME_FILTER_ADAPTIVE_APPLY, )     \
     DEF(ENABLE_GROUPING_SETS_EXPANSION,)            \
     DEF(APPROX_COUNT_DISTINCT_PRECISION,)           \
+    DEF(_FTS_BUILD_SORT_IN_MEMORY,)                 \
 
 
   DECLARE_ENUM(OptParamType, opt_param, OPT_PARAM_TYPE_DEF, static);

@@ -64,6 +64,7 @@ public:
   bool is_fetch_with_ties_;
   bool prescan_enabled_;
   bool enable_encode_sortkey_opt_;
+  bool is_fts_build_sort_;
   // if use, all_exprs_ is : hash(part_by) + part_by + order_by.
   int64_t part_cnt_;
   ObPushDownTopNFilterInfo pd_topn_filter_info_;

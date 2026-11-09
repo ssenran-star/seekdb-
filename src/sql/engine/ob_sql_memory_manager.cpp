@@ -472,7 +472,9 @@ int ObSqlMemoryManager::calc_work_area_size_by_profile(
       profile.set_expect_size(global_bound_size);
     }
   } else if (profile.is_sort_wa()) {
-    if (global_bound_size > profile.get_cache_size()) {
+    if (profile.force_in_memory()) {
+      profile.set_expect_size(global_bound_size);
+    } else if (global_bound_size > profile.get_cache_size()) {
       // in-memory
       profile.set_expect_size(profile.get_cache_size());
     } else if (global_bound_size > profile.get_one_pass_size()) {

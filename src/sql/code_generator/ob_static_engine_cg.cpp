@@ -1464,6 +1464,20 @@ int ObStaticEngineCG::generate_spec(ObLogSort &op, ObSortSpec &spec, const bool 
         }
         spec.enable_encode_sortkey_opt_ = op.enable_encode_sortkey_opt();
         spec.part_cnt_ = op.get_part_cnt();
+        bool is_fts_build_sort = false;
+        ObLogPlan *sort_log_plan = op.get_plan();
+        if (OB_SUCC(ret) && OB_NOT_NULL(sort_log_plan)
+            && OB_NOT_NULL(sort_log_plan->get_stmt())
+            && OB_NOT_NULL(sort_log_plan->get_stmt()->get_query_ctx())) {
+          const ObOptParamHint &opt_params =
+              sort_log_plan->get_stmt()->get_query_ctx()->get_global_hint().opt_params_;
+          if (OB_FAIL(opt_params.get_bool_opt_param(
+                  ObOptParamHint::_FTS_BUILD_SORT_IN_MEMORY, is_fts_build_sort))) {
+            ret = OB_SUCCESS;
+          }
+        }
+        spec.is_fts_build_sort_ = is_fts_build_sort;
+        LOG_INFO("FTS_BUILD_SORT_FLAG_CG", K(is_fts_build_sort), K(spec.id_), K(op.get_op_id()));
         LOG_TRACE("trace order by", K(spec.all_exprs_.count()), K(spec.all_exprs_));
 
       }

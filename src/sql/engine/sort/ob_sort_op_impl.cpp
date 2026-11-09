@@ -558,7 +558,7 @@ bool ObSortOpImpl::Compare::operator()(
 
 ObSortOpImpl::ObSortOpImpl() :
   inited_(false), local_merge_sort_(false), need_rewind_(false), got_first_row_(false),
-  sorted_(false), enable_encode_sortkey_(false),
+  sorted_(false), enable_encode_sortkey_(false), is_fts_build_sort_(false),
   page_allocator_("PartSortBucket", ObCtxIds::WORK_AREA), mem_context_(NULL),
   mem_entify_guard_(mem_context_), sort_collations_(nullptr),
   sort_cmp_funs_(nullptr), eval_ctx_(nullptr), datum_access_ctx_(nullptr),
@@ -578,7 +578,7 @@ ObSortOpImpl::ObSortOpImpl() :
 
 ObSortOpImpl::ObSortOpImpl(ObMonitorNode &op_monitor_info)
   : inited_(false), local_merge_sort_(false), need_rewind_(false),
-    got_first_row_(false), sorted_(false), enable_encode_sortkey_(false),
+    got_first_row_(false), sorted_(false), enable_encode_sortkey_(false), is_fts_build_sort_(false),
     page_allocator_("PartSortBucket", ObCtxIds::WORK_AREA), mem_context_(NULL),
     mem_entify_guard_(mem_context_), sort_collations_(nullptr),
     sort_cmp_funs_(nullptr), eval_ctx_(nullptr), datum_access_ctx_(nullptr),
@@ -1087,6 +1087,14 @@ int ObSortOpImpl::before_add_row()
                   &mem_context_->get_malloc_allocator(),
                   size, op_monitor_info_->op_type_, op_monitor_info_->op_id_, exec_ctx_))) {
       } else {
+        if (is_fts_build_sort_) {
+          sql_mem_processor_.get_profile().set_force_in_memory(true);
+        }
+        LOG_INFO("FTS_BUILD_SORT_FLAG_IMPL", K(is_fts_build_sort_),
+            K(sql_mem_processor_.get_profile().get_cache_size()),
+            K(sql_mem_processor_.get_profile().get_one_pass_size()),
+            K(sql_mem_processor_.get_profile().get_expect_size()),
+            K(sql_mem_processor_.get_profile().force_in_memory()));
         datum_store_.set_dir_id(sql_mem_processor_.get_dir_id());
         datum_store_.set_callback(&sql_mem_processor_);
         datum_store_.set_io_event_observer(io_event_observer_);

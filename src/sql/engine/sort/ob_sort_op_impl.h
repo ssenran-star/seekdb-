@@ -404,6 +404,7 @@ public:
   void set_input_width(int64_t input_width) { input_width_ = input_width; }
   void set_operator_type(ObPhyOperatorType op_type) { op_type_ = op_type; }
   void set_operator_id(uint64_t op_id) { op_id_ = op_id; }
+  void set_is_fts_build_sort(bool is_fts_build_sort) { is_fts_build_sort_ = is_fts_build_sort; }
   void collect_memory_dump_info(ObMonitorNode &info)
   {
     info.otherstat_1_id_ = op_monitor_info_->otherstat_1_id_;
@@ -821,6 +822,7 @@ protected:
   bool got_first_row_;
   bool sorted_;
   bool enable_encode_sortkey_;
+  bool is_fts_build_sort_;
   ModulePageAllocator page_allocator_;
   lib::MemoryContext mem_context_;
   MemEntifyFreeGuard mem_entify_guard_;
