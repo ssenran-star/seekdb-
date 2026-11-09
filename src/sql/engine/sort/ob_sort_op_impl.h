@@ -713,6 +713,9 @@ protected:
   // Based on this, see if we should consider adopting this approach uniformly, which is to use two parts: data size and total mem used size to determine whether to dump
   bool need_dump()
   {
+    if (profile_.force_in_memory()) {
+      return false;
+    }
     return sql_mem_processor_.get_data_size() > sql_mem_processor_.get_mem_bound()
         || mem_context_->used() >= profile_.get_max_bound();
   }
