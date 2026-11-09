@@ -22,6 +22,9 @@
 #include "data_plane/fts/dict/ob_gen_dic_loader.h"
 #include "data_plane/fts/dict/ob_dic_lock_service.h"
 #include "share/ob_server_struct.h"
+#include "share/ob_cpu_share_calculator.h"
+#include "share/config/ob_server_config.h"
+#include "config_bridge.h"
 #include "data_plane/fts/ob_fts_parser_helper.h"
 #include "share/schema/ob_multi_version_schema_service.h"
 #include "share/schema/ob_schema_utils.h"
@@ -1045,9 +1048,28 @@ int ObFtsIndexBuilderUtil::decide_parallelism(
         decided_parallelism = MAX(original_parallelism, 1L);
         break;
       case share::schema::ObIndexType::INDEX_TYPE_DOC_ID_ROWKEY_LOCAL:
+        decided_parallelism = MAX(original_parallelism / 3, 1L);
+        break;
       case share::schema::ObIndexType::INDEX_TYPE_FTS_INDEX_LOCAL:
       case share::schema::ObIndexType::INDEX_TYPE_FTS_DOC_WORD_LOCAL:
         decided_parallelism = MAX(original_parallelism / 3, 1L);
+        // A fulltext index build fans out into four concurrent aux-table
+        // INSERT /*+ parallel(N) */ ... SELECT jobs (rowkey_doc, doc_rowkey,
+        // fts_index_aux, fts_doc_word), each deep-copying the parallelism
+        // decided here. The aggregate px worker request is therefore
+        // 4 * (original / 3), which can oversubscribe parallel_servers_target
+        // when the tenant/server min_cpu is small, driving the inner SQL into
+        // px admission failure (OB_ERR_INSUFFICIENT_PX_WORKER) and triggering
+        // whole-segment re-run cliffs. Cap each aux job to target/4 so the
+        // aggregate stays within the px pool quota.
+        {
+          const int64_t px_pool_target = ObCpuShareCalculator::resolve_parallel_servers_target(
+              0 /* AUTO */,
+              static_cast<int64_t>(get_server_default_min_cpu()),
+              config::px_workers_per_cpu_quota());
+          decided_parallelism = MIN(decided_parallelism,
+                                    MAX(px_pool_target / 4, 1L));
+        }
         break;
       case share::schema::ObIndexType::INDEX_TYPE_NORMAL_MULTIVALUE_LOCAL:
       case share::schema::ObIndexType::INDEX_TYPE_UNIQUE_MULTIVALUE_LOCAL:
