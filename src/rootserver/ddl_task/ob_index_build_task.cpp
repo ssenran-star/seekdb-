@@ -806,6 +806,11 @@ int ObIndexBuildTask::check_local_build(bool &is_end)
     LOG_WARN("sstable complete job has failed", K(ret_code_), K(object_id_), K(index_table_id_));
     if (is_local_build_need_retry(ret_code_) && is_retryable_ddl_) {
       // retry sql job by re-submit
+      if (OB_ERR_INSUFFICIENT_PX_WORKER == ret_code_ && parallelism_ > 1) {
+        parallelism_ /= 2;
+        LOG_INFO("degrade build parallelism on px worker insufficient",
+            K(parallelism_), K(object_id_), K(index_table_id_));
+      }
       is_sstable_complete_task_submitted_ = false;
       complete_sstable_job_ret_code_ = INT64_MAX;
       ret_code_ = OB_SUCCESS;
@@ -837,6 +842,11 @@ int ObIndexBuildTask::check_local_index_build(bool &is_end)
     LOG_WARN("sstable complete job has failed", K(ret_code_), K(object_id_), K(index_table_id_));
     if (is_local_build_need_retry(ret_code_) && is_retryable_ddl_) {
       // retry sql job by re-submit
+      if (OB_ERR_INSUFFICIENT_PX_WORKER == ret_code_ && parallelism_ > 1) {
+        parallelism_ /= 2;
+        LOG_INFO("degrade build parallelism on px worker insufficient",
+            K(parallelism_), K(object_id_), K(index_table_id_));
+      }
       complete_sstable_job_ret_code_ = INT64_MAX;
       ret_code_ = OB_SUCCESS;
       LOG_INFO("retry complete sstable job", K(ret_code_), K(object_id_), K(index_table_id_));
