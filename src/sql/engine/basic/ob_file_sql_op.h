@@ -106,12 +106,13 @@ public:
   virtual int inner_close() override;
   virtual void destroy() override;
 
+  struct Reader;
+
 private:
   int open_reader();
   void close_reader();
   int fill_row(const common::ObIArray<common::ObObj> &cells);
 
-  struct Reader;
   Reader *reader_;
   common::ObArenaAllocator row_alloc_;
 };
