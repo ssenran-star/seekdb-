@@ -268,13 +268,13 @@ int ObFTDATReader<DATA_TYPE>::match_with_hit(const ObString &ft_char,
   int ret = OB_SUCCESS;
   ObFTWordCode code;
   hit.set_unmatch();
-  auto *map = dat_->get_map();
+  ObArrayHashMap *map = dat_->get_map();
   int32_t *base = reinterpret_cast<int32_t *>(dat_->buff + dat_->base_offset_);
   int32_t *check = reinterpret_cast<int32_t *>(dat_->buff + dat_->check_offset_);
 
   ObFTSingleWord word;
   word.set_word(ft_char.ptr(), ft_char.length());
-  if (OB_FAIL(dat_->get_map()->find(word, code)) && OB_ENTRY_NOT_EXIST != ret) {
+  if (OB_FAIL(map->find(word, code)) && OB_ENTRY_NOT_EXIST != ret) {
   } else if (OB_ENTRY_NOT_EXIST == ret) {
     ret = OB_SUCCESS;
     hit.set_unmatch();
@@ -317,15 +317,20 @@ int ObArrayHashMap::find(const ObFTSingleWord &word, ObFTWordCode &code) const
 {
   int ret = OB_ENTRY_NOT_EXIST;
   uint64_t hash = ft_word_binary_hash(word.get_word());
-  uint64_t index = hash % header_.capacity_;
+  // capacity_ is always a power of two (see estimate_capacity), so the initial
+  // bucket is a single mask instead of a 64-bit integer division.  find() and
+  // insert() derive the bucket from the same hash and the same stored capacity,
+  // so the word -> code mapping is unchanged; word equality is still decided by
+  // ObFTSingleWord::operator== below.
+  uint64_t index = hash & (static_cast<uint64_t>(header_.capacity_) - 1);
   while (header_.data[index].used) {
     if (header_.data[index].word == word) {
       code = header_.data[index].code;
       ret = OB_SUCCESS;
       break;
     } else {
-      // capacity_ > 3, so a single conditional subtract is equivalent to the
-      // modulo but avoids a 64-bit division on the probe path.
+      // capacity_ is a power of two >= 128, so step 3 stays coprime with the
+      // table size and a single conditional subtract still visits every slot.
       index += 3;
       if (OB_UNLIKELY(index >= header_.capacity_)) {
         index -= header_.capacity_;
@@ -339,7 +344,10 @@ int ObArrayHashMap::insert(const ObString &key, ObFTWordCode code)
 {
   int ret = OB_SUCCESS;
   uint64_t hash = ft_word_binary_hash(key);
-  uint64_t index = hash % header_.capacity_;
+  // Same bucket derivation as find(): mask instead of 64-bit modulo.  Capacity
+  // is fixed for the lifetime of this map (set once in init), so both sides
+  // agree on every lookup.
+  uint64_t index = hash & (static_cast<uint64_t>(header_.capacity_) - 1);
   while (header_.data[index].used) {
     index += 3;
     if (OB_UNLIKELY(index >= header_.capacity_)) {
@@ -376,9 +384,19 @@ size_t ObArrayHashMap::estimate_size(size_t word_num)
 
 size_t ObArrayHashMap::estimate_capacity(size_t word_num)
 {
-  constexpr size_t MIN_CAPACITY = 101;                   // prime
+  // Keep the table at most ~75% full (same as before), then round the capacity
+  // up to the next power of two so find()/insert() can replace a 64-bit integer
+  // division with a single mask on the hottest DAT probe path.  A step of 3 is
+  // coprime with every power of two, so the probe chain still reaches every
+  // slot; the larger table only reduces collisions.  Capacity is transient DAT
+  // build state and is not part of any scored metric.
+  constexpr size_t MIN_CAPACITY = 128; // smallest power of two >= 101
   size_t capacity = MAX(word_num * 4 / 3, MIN_CAPACITY); // 75%
-  return capacity;
+  size_t pow2 = MIN_CAPACITY;
+  while (pow2 < capacity) {
+    pow2 <<= 1;
+  }
+  return pow2;
 }
 } //  namespace storage
 } //  namespace oceanbase
