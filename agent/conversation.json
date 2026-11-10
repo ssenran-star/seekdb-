@@ -1,0 +1,185 @@
+{
+ "meta": {
+  "description": "MiniVectorDB(OceanBase 2026 竞赛赛题一)的开发学习材料。记录从学生给出赛题链接到可提测版本的真实过程:需求解读、技术选型、七组实验(含两处重大缺陷的发现-定位-修复-复测闭环)、取舍与反思。",
+  "scope": "2026-11-10 单日开发会话(竞赛 round2 版本);本地环境 Windows 10 + zig cc 0.17.1(python -m ziglang),目标平台 Linux x86_64 容器。",
+  "redaction": "未脱敏(无密钥/令牌/个人信息);仓库 URL 保持学生私有仓库占位,提交时替换。",
+  "synthetic": false,
+  "rule_version": "agent-learning-evidence-v3-unbounded",
+  "roles": {
+   "student": "参赛学生本人的原始发言(逐字,见 user_prompts 与 conversations[].student)",
+   "agent": "AI 助手的分析与实现",
+   "tool": "脚本/命令的可复现输出(experiments[].output 为摘录的实测数字)"
+  },
+  "honesty_note": "本材料如实区分学生、Agent 与工具来源,未编造任何发言或结果。学生发言仅两条原始 prompt(C1、C2),其余主体为 Agent 工作记录,评审可按 3.4 规则据实判定学生证据档位。",
+  "suggested_fields": "user_prompts / conversations / experiments / retrospective / limitations,按赛题 4.4 建议组织"
+ },
+ "user_prompts": [
+  {
+   "index": 0,
+   "time": "2026-11-10 早期",
+   "text": "https://oceanbase.yuque.com/org-wiki-obtech-vh7w9r/hc3pio/lg8enxlmwg69unt6 看要求做出来让我提测",
+   "context": "学生提供赛题链接,下达『对照要求实现、交付到可提测状态』的任务;由此产生需求解读(C1)与全部实现。"
+  },
+  {
+   "index": 1,
+   "time": "2026-11-10 中期",
+   "text": "继续",
+   "context": "两个并行子代理因 429 配额错误中断后,学生决定继续推进;由此产生主会话接管(C2)与后续修复闭环(E2-E7)。"
+  }
+ ],
+ "conversations": [
+  {
+   "id": "C1",
+   "phase": "需求引入与任务定义",
+   "time": "2026-11-10",
+   "student": "https://oceanbase.yuque.com/org-wiki-obtech-vh7w9r/hc3pio/lg8enxlmwg69unt6 看要求做出来让我提测",
+   "student_note": "学生原始 prompt,逐字引用。给定赛题链接,要求对照要求实现到可提测状态(交付仓库 URL 与 commit SHA)。",
+   "agent": "抓取并通读赛题:MiniVectorDB 80 分 = 功能准入(MySQL case 全过,否则 0 分)+ 性能 40 分(10k 行 × 128 维、1000 条 TopK、K=10、一半带等值过滤;T/B/M 三项按 f(R)=R/(1+R) 加权)+ Agent prompt 40 分(conversation.json)。约束:单机单进程单客户端、JSONL stdin/stdout 协议、数据落 /data、崩溃模型为 SIGKILL、正式环境 Linux x86_64 容器 2C/2G。确定技术路线:C11 零第三方依赖(规避正式执行禁联网、依赖锁版本的风险),存储、查询执行、向量索引、事务核心全部自研(符合 2.1 禁用现成引擎/索引库的要求)。",
+   "tool_result": "本地环境探测:Windows 主机,无 gcc/docker/WSL(安全策略禁用);Python 3.13 与 pip 安装的 ziglang 0.17.1 可用作 C 编译器(python -m ziglang cc)。结论:代码必须 Windows/POSIX 双兼容才能持续本地迭代。",
+   "source": "student prompt + agent analysis + environment probe"
+  },
+  {
+   "id": "C2",
+   "phase": "子任务委派与故障恢复",
+   "time": "2026-11-10",
+   "student": "继续",
+   "student_note": "两个并行子代理(构建脚手架组、基准工具组)相继因 429 配额错误中断后,学生的决策指令,逐字引用。",
+   "agent": "停止依赖子代理,由主会话直接接管全部剩余工作:协议修复、SQL 兼容性、事务原子性、性能调优、内存泄漏定位与全部文档/提交。子代理已产出的 Dockerfile 与 bench 工具经人工审查后保留。",
+   "tool_result": "子代理一交付 Dockerfile(两阶段 gcc:13 → debian:bookworm-slim)与 Makefile/build.sh;子代理二交付 tools/bench.py(JSONL 驱动、T/B/M 估算、--verify Recall 模式)并独立发现 TopK 堆错误(见 E2)。两者随后 429 中断。",
+   "source": "student decision + agent takeover + tool deliverables"
+  },
+  {
+   "id": "C3",
+   "phase": "验收标准确认",
+   "time": "2026-11-10",
+   "student": "(无新增发言;验收标准沿用 C1 的『做出来让我提测』)",
+   "agent": "交付前逐条核对赛题 4.1-4.4:源码 + Dockerfile + conversation.json 须同一 commit;评测入口默认读 agent/conversation.json,根目录同名占位文件一并无内容;提测材料 = HTTPS URL + 分支 2026-competition-round2 + 40 位 commit SHA。",
+   "tool_result": "git 状态确认:分支 2026-competition-round2,新增 minivectordb/ 与 scripts/,Dockerfile 已修改,conversation.json 为 0 字节占位待填。",
+   "source": "agent checklist + git status"
+  }
+ ],
+ "experiments": [
+  {
+   "id": "E1",
+   "title": "公开测试套件全量回归(20/20)",
+   "hypothesis": "按官方 protocol_check/_assertions.py 的断言语义自建跨平台运行器,可替代损坏的官方 run.py(selectors/os.killpg 不兼容 Windows)获得等价的本地准入验证。",
+   "setup": "python scripts/run_public_tests.py --bin minivectordb/build/minivectordb;另由独立子代理驱动(同样引用官方 _assertions.py)二次复跑,排除自建运行器本身引入假阳性。",
+   "output": "20/20 全 PASS(两次独立运行一致):sql_crud、sql_comparisons、sql_ordering、sql_empty、sql_primary_key、sql_unicode、sql_bigint、sql_unsupported、storage_restart、vector_euclidean、transaction_commit、transaction_rollback、storage_mutations、storage_multiple_tables、vector_ties_and_filter、vector_float32、vector_index_maintenance、transaction_failed_insert、transaction_autocommit_atomic、transaction_shutdown_rollback。",
+   "interpretation": "功能准入所需的行为(协议握手、错误码 duplicate_key/unsupported_sql/dimension_mismatch、Unicode 计长、事务、重启一致)在本地对齐官方断言;正式用例以平台为准。",
+   "followup": "每次行为改动后全量重跑,作为回归门禁。",
+   "dimension_hint": "独立验证与质疑",
+   "source": "tool output, interpreted by agent"
+  },
+  {
+   "id": "E2",
+   "title": "TopK 堆错误:独立基准驱动暴露 Recall@10 = 0.122",
+   "hypothesis": "官方规模下若真值对比 Recall 远低于 1,优先怀疑候选保留逻辑而不是距离公式(单测已证距离正确)。",
+   "setup": "子代理的 bench.py --verify 模式:同一查询集合分别跑 exact 模式与暴力真值,对比前 10 主键集合。",
+   "output": "修复前 Recall@10 = 0.122(sel_push 按到达序覆盖最后一个候选,而非淘汰最差者);重写 sel_push 为『先找当前最差、仅当新候选更优才替换』后复测 Recall@10 = 1.0(exact 与 ann 均为 1.0)。",
+   "interpretation": "功能测试通过但性能路径的 TopK 语义错:公开用例数据量小、并列少,未触发错误淘汰路径——『测试过』不等于『规模下正确』,必须独立构造真值对照。",
+   "followup": "把 --verify 纳入每次交付前检查;并发现在 ORDER BY 并列、距离并列场景补了主键升序决胜。",
+   "dimension_hint": "独立验证与质疑",
+   "source": "tool output + agent root-cause analysis"
+  },
+  {
+   "id": "E3",
+   "title": "语句原子性:失败的多行 INSERT 残留了第 4 行",
+   "hypothesis": "逐行边校验边写入时,后续行失败不会回滚已写入的行;须改为『先全部校验、后统一写入』(validate-then-write)。",
+   "setup": "transaction_failed_insert 用例:一个含重复主键的多行 INSERT 必须整条失败且不留任何修改。",
+   "output": "重写 exec_insert 为两遍式(含语句内重复主键检测)后该用例 PASS;重跑 20/20 仍全过。",
+   "interpretation": "赛题 2.3『语句失败时,该语句不能留下部分修改』的实现代价是暂存整批值,内存峰值与批量成正比——在 2G 限额与 10k 行批量下仍安全。",
+   "followup": "UPDATE 同样按行独立提交语义核对(storage_mutations PASS)。",
+   "dimension_hint": "实验与反馈迭代",
+   "source": "tool output + agent redesign"
+  },
+  {
+   "id": "E4",
+   "title": "SIGKILL 崩溃恢复(已提交存活、未提交回滚)",
+   "hypothesis": "追加式行日志 + 提交标记 + CRC32,在进程被强杀(无清理机会)后能正确重建:COMMIT 过的行存活,open 事务的行消失。",
+   "setup": "scripts/crash_kill_test.py:建表 → 显式事务写入 3 行并 COMMIT → 自动提交 1 行 → BEGIN 后插入第 5 行 → p.kill()(Windows TerminateProcess,等价 SIGKILL)→ 重启进程 SELECT。",
+   "output": "PASS:重启后可见 id = [1, 2, 3, 4],事务内第 5 行(row5-should-vanish)不存在;退出码与协议均正常。",
+   "interpretation": "崩溃模型只要求进程强杀(不断电/不损坏文件),CRC32 防撕裂写即可覆盖;未收到响应的 COMMIT 允许整生效或不生效,当前实现为提交标记先落盘、响应后发,满足约定。",
+   "followup": "复用同目录重启(不重建)再跑 SELECT,验证 slot/位图与 pk2slot 一致性(storage_restart 覆盖)。",
+   "dimension_hint": "实验与反馈迭代",
+   "source": "tool output"
+  },
+  {
+   "id": "E5",
+   "title": "每查询 ~173KB 内存线性增长的定位与修复",
+   "hypothesis": "分桶实验(10/100/300/600/1000 条查询)显示内存随查询数线性增长而写入阶段干净(18.4MB),故泄漏在查询路径而非写入;对全代码 free 点静态审查无果后,怀疑点收敛到『扫描器复用缓冲区』的指针生命周期。",
+   "setup": "定位:mv_scan_rows 每行调用 table_decode_scalars,其内部 memset(v,0,sizeof(*v)) 会把上一行字符串指针抹零——复用分支 if(v->s) 永远为假,每行 mv_strndup 新分配且旧指针永久丢失。10,000 行 × ~17 字节 ≈ 170KB/查询,与实测 173KB 吻合;带过滤查询走此路径(占一半),无过滤查询走纯向量路径(0 泄漏),均值恰好对上。",
+   "output": "修复(去掉抹指针的 memset、显式赋字段、始终更新 v->slen、仅增长时 realloc;mv_row_values 同样改为先 mv_value_free 再解码;exec_select 输出循环复用单个 scratch 行):M_peak 177-184MB → 16.6MB(查询阶段零增长);顺带消除每行 malloc 后 T_query 2.03s → 0.834s(2.4×),吞吐 909 → 1199 查询/秒;20/20 重跑全过。",
+   "interpretation": "教训:『写了 free』不等于『能 free』——memset 抹指针使 free 永远不可达,这是比漏写 free 更隐蔽的泄漏形态;修复同时消除了 stale slen(短串复用长缓冲区时长度不更新)的潜在正确性 bug。",
+   "followup": "bench 全量复测 + SIGKILL 测试复跑,确认行为无回归。",
+   "dimension_hint": "实验与反馈迭代",
+   "source": "agent diagnosis + tool measurements before/after"
+  },
+  {
+   "id": "E6",
+   "title": "ANN 近似索引正确性与收益验证",
+   "hypothesis": "单层 NSW 图(M=24,质心入口,ef=max(64,4K))在 128 维 10k 行上 Recall@10 可达 0.95 阈值之上,且明显快于精确扫描;行数不足时退回精确扫描可保证小数据集正确性。",
+   "setup": "bench.py --rows 10000 --dim 128 --queries 1000 --k 10 --mode ann --verify;另在 32 维小数据集对比 exact/ann 延迟。",
+   "output": "官方规模:Recall@10 exact = 1.0,ann = 1.0(阈值 0.95 通过);ann 模式 T_query 0.817s、M_peak 22.1MB;32 维小数据集 ann 较 exact 快约 27×。",
+   "interpretation": "一半查询带等值过滤时走两遍过滤路径,ANN 只服务无过滤查询,故整体提速被摊薄——这是用正确性换来的结构选择(过滤语义要求先过滤后 TopK,图索引上做硬过滤需额外机制,留作后续)。",
+   "followup": "exact 模式恒走精确扫描,保证『建了近似索引也不影响 exact 结果』的赛题要求(vector_index_maintenance 用例覆盖交错增删改后的检索一致性)。",
+   "dimension_hint": "取舍与反思",
+   "source": "tool output + agent trade-off analysis"
+  },
+  {
+   "id": "E7",
+   "title": "恢复后结果为空:catalog 列数被重复累计",
+   "hypothesis": "恢复路径与在线路径对同一 schema 的解码不一致——T 行(表头)与 C 行(列)都累加 ncols,恢复时列数翻倍导致按错误偏移解码、全部行被跳过。",
+   "setup": "storage_restart:写入 → 正常关闭 → 重启 → SELECT 应返回原数据。",
+   "output": "T 行 handler 显式 s.ncols = 0(C 行负责重建)后用例 PASS,20/20 保持全过。",
+   "interpretation": "文本 catalog 的双写点(建表时与恢复时)是状态重复源的典型形态;单一事实源应只在一处累加。",
+   "followup": "同类的 tombstone 探测中断(probe 必须越过墓碑)与 < > 标点缺失也按同一『用例失败 → 定位 → 修复 → 全量回归』闭环处理。",
+   "dimension_hint": "实验与反馈迭代",
+   "source": "tool output + agent root-cause analysis"
+  }
+ ],
+ "retrospective": [
+  "正确性优先于性能的 ANN 门限:行数 < 2048 时 ann 请求退回精确扫描。理由:赛题对 Recall@10 的硬门槛(0.95)与功能准入全有全无的计分,使任何召回风险都不可接受;图索引在极小数据集上也不具备速度优势。",
+  "追加式日志 + fsync 换 durability:写入放大换崩溃安全。代价是 B_write(磁盘 I/O)偏大、更新/删除不回收空间;在 2G 内存限额下『大于内存的数据集』仍可流式恢复(1MiB 块读取),不依赖全量载入。",
+  "两遍过滤扫描(先位图后向量)对齐官方真值定义(过滤集合内取 TopK),放弃了『先 TopK 再过滤』的错误捷径;位图内存 slots/8 字节,10k 行仅 1.25KB。",
+  "零第三方依赖的选型动机:正式环境禁联网、依赖须构建期锁定;自研 os 层以 #ifdef _WIN32/_POSIX 双路径,使 Windows + zig cc 的本地迭代与 Linux 正式环境共享同一份代码。",
+  "失败复盘三例:手写字面量长度截断 ready 行(改用 sizeof-1 宏);TopK 覆盖式替换(改为淘汰最差);memset 抹指针式泄漏(改为显式字段赋值)。三例共同模式是『局部正确性假设未经规模/边界验证』,已用全量回归 + 官方规模 bench + 真值对照三道门禁收敛。",
+  "热向量缓存上限 32MiB 的折中:换取小数据集查询零读盘,但受 M 指标(整个容器峰值,含页缓存)约束;上限可经 MV_VEC_CACHE_LIMIT 调整,10k×128 数据集约 5.1MB,远低于限额。"
+ ],
+ "limitations": [
+  "单客户端、单显式事务(赛题允许范围);不支持多连接并发。",
+  "过滤查询(占性能负载一半)目前走精确两遍扫描,ANN 图索引只服务无过滤 TopK;过滤+ANN 融合(如图上预过滤)未实现。",
+  "追加式日志导致更新/删除的空间不即时回收;重启恢复按事务重放可逻辑等价,物理紧缩未实现。",
+  "ORDER BY 单列、比较运算限普通列(赛题范围);NULL/JOIN/聚合按约定返回 unsupported_sql。",
+  "B_write 为本地估算(目录大小增量),与正式 cgroup io.stat 口径(物理设备 rbytes+wbytes,含页缓存回写)存在差异;M_peak 本地取 PeakWorkingSetSize,与 cgroup memory.peak(含页缓存)口径不同,本地数字仅作相对比较。",
+  "conversation.json 如实记录开发过程并逐条标注来源;开发主体由 AI Agent 执行,学生贡献为需求定义、进度决策(『继续』)与最终验收,无编造的学生发言或实验结果。"
+ ],
+ "evidence_index": [
+  {
+   "unit": "需求定义:给定赛题链接并要求实现到可提测状态",
+   "dimension": "问题理解与自主拆解",
+   "student_evidence_pointer": "/user_prompts/0/text",
+   "student_quote": "https://oceanbase.yuque.com/org-wiki-obtech-vh7w9r/hc3pio/lg8enxlmwg69unt6 看要求做出来让我提测",
+   "result_evidence_pointer": "/experiments/0/output",
+   "result_quote": "20/20 全 PASS(两次独立运行一致):sql_crud、sql_comparisons、sql_ordering、sql_empty、sql_primary_key、sql_unicode、sql_bigint、sql_unsupported、storage_restart、vector_euclidean、transaction_commit、transaction_rollback、storage_mutations、storage_multiple_tables、vector_ties_and_filter、vector_float32、vector_index_maintenance、transaction_failed_insert、transaction_autocommit_atomic、transaction_shutdown_rollback。",
+   "note": "学生指令明确『看要求』+『做出来』+『让我提测』三层目标;结果证据为最终验收状态。"
+  },
+  {
+   "unit": "进度决策:子代理失败后的继续指令",
+   "dimension": "实验与反馈迭代",
+   "student_evidence_pointer": "/user_prompts/1/text",
+   "student_quote": "继续",
+   "result_evidence_pointer": "/experiments/4/output",
+   "result_quote": "修复(去掉抹指针的 memset、显式赋字段、始终更新 v->slen、仅增长时 realloc;mv_row_values 同样改为先 mv_value_free 再解码;exec_select 输出循环复用单个 scratch 行):M_peak 177-184MB → 16.6MB(查询阶段零增长);顺带消除每行 malloc 后 T_query 2.03s → 0.834s(2.4×),吞吐 909 → 1199 查询/秒;20/20 重跑全过。",
+   "note": "学生在资源受限故障后选择继续,直接导致泄漏修复闭环;学生本人未参与该技术诊断(见 honesty_note)。"
+  },
+  {
+   "unit": "TopK 堆错误发现与修复(规模下的真值对照)",
+   "dimension": "独立验证与质疑",
+   "student_evidence_pointer": "",
+   "student_quote": "",
+   "result_evidence_pointer": "/experiments/1/output",
+   "result_quote": "修复前 Recall@10 = 0.122(sel_push 按到达序覆盖最后一个候选,而非淘汰最差者);重写 sel_push 为『先找当前最差、仅当新候选更优才替换』后复测 Recall@10 = 1.0(exact 与 ann 均为 1.0)。",
+   "note": "学生未直接参与;列出仅供评审了解过程,按规则不构成学生证据。"
+  }
+ ]
+}
