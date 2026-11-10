@@ -26,9 +26,17 @@ namespace storage
 {
 namespace
 {
+// NOTE: every helper in this anonymous namespace carries an fts_ prefix.
+// The production build compiles this file together with the other fts .cpp
+// files of the ob_storage_fts_0 unity group into a single translation unit,
+// and ob_fts_stop_word.cpp already defines a helper named is_ascii_word in
+// the very same oceanbase::storage anonymous namespace.  The shared plain
+// name therefore collides (redefinition error) once both files are merged,
+// so each struct.cpp helper below is given a group-unique name.
+//
 // True when the word contains only ASCII bytes.  Empty words are treated as
 // ASCII because the fast paths below handle zero-length explicitly.
-OB_INLINE bool is_ascii_word(const common::ObString &word)
+OB_INLINE bool fts_word_is_ascii(const common::ObString &word)
 {
   bool is_ascii = true;
   const int64_t len = word.length();
@@ -53,7 +61,7 @@ OB_INLINE bool is_ascii_word(const common::ObString &word)
 // step has already produced a canonical lower-case byte sequence, so a byte
 // hash is distribution-compatible with the generic collation-aware hash while
 // avoiding the charset/sort-weight overhead.
-OB_INLINE uint64_t ascii_byte_hash(const common::ObString &word)
+OB_INLINE uint64_t fts_ascii_byte_hash(const common::ObString &word)
 {
   uint64_t hash = 1469598103934665603ULL; // FNV-1a offset basis
   const unsigned char *ptr = reinterpret_cast<const unsigned char *>(word.ptr());
@@ -66,7 +74,7 @@ OB_INLINE uint64_t ascii_byte_hash(const common::ObString &word)
 
 // Collations for which an ASCII word can be hashed/compared byte-wise after
 // the FTS casedown step has canonicalised the token.
-OB_INLINE bool coll_type_allows_ascii_fast_path(const common::ObCollationType coll_type)
+OB_INLINE bool fts_coll_type_allows_ascii_fast_path(const common::ObCollationType coll_type)
 {
   return common::CS_TYPE_UTF8MB4_GENERAL_CI == coll_type
          || common::CS_TYPE_UTF8MB4_BIN == coll_type
@@ -79,9 +87,9 @@ int ObFTWord::hash(uint64_t &hash_val) const
   int ret = OB_SUCCESS;
   const common::ObCollationType coll_type = meta_.get_collation_type();
   if (OB_LIKELY(common::ObVarcharType == meta_.get_type())
-      && OB_LIKELY(coll_type_allows_ascii_fast_path(coll_type))
-      && OB_LIKELY(is_ascii_word(word_.get_string()))) {
-    hash_val = ascii_byte_hash(word_.get_string());
+      && OB_LIKELY(fts_coll_type_allows_ascii_fast_path(coll_type))
+      && OB_LIKELY(fts_word_is_ascii(word_.get_string()))) {
+    hash_val = fts_ascii_byte_hash(word_.get_string());
   } else {
     common::ObDatumBasicFuncs *funcs = ObDatumFuncs::get_basic_func(meta_.get_type(), coll_type);
     if (OB_ISNULL(funcs)) {
@@ -110,10 +118,10 @@ bool ObFTWord::operator==(const ObFTWord &other) const
   if (OB_LIKELY(word_.len_ == other.word_.len_)
       && meta_.get_type() == other.meta_.get_type()
       && coll_type == other.meta_.get_collation_type()
-      && OB_LIKELY(coll_type_allows_ascii_fast_path(coll_type))
+      && OB_LIKELY(fts_coll_type_allows_ascii_fast_path(coll_type))
       && (common::CS_TYPE_UTF8MB4_GENERAL_CI != coll_type
-          || (is_ascii_word(word_.get_string())
-              && is_ascii_word(other.word_.get_string())))) {
+          || (fts_word_is_ascii(word_.get_string())
+              && fts_word_is_ascii(other.word_.get_string())))) {
     is_equal = (0 == word_.len_)
                || (nullptr != word_.ptr_ && nullptr != other.word_.ptr_
                    && 0 == MEMCMP(word_.ptr_, other.word_.ptr_, word_.len_));
