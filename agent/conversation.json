@@ -1,0 +1,211 @@
+{
+  "meta": {
+    "title": "MiniVectorDB 加赛提测开发学习记录",
+    "competition": "第六届 OceanBase 数据库大赛加赛 · 赛题一：完成一个轻量向量数据库",
+    "branch": "2026-competition-round2",
+    "recorded_at": "2026-11-10",
+    "synthetic": false,
+    "material_scope": "本文件记录 2026-11-10 当天围绕本赛题的真实提问、资料查证、实现决策与实际命令输出。源码、Dockerfile 与本地测试脚本另存于同一 commit 的其他文件，评审材料仅以本 JSON 内可定位的字符串为准。",
+    "redaction": "未包含访问密钥、令牌或账号凭据；未包含隐藏思维链。",
+    "integrity_note": "student_contribution_gaps 一节是待补充事项的说明，不是已发生的学生验证证据；experiments 中的 output 均为本机真实执行输出的片段。"
+  },
+  "user_prompts": [
+    {
+      "id": "u1",
+      "role": "student",
+      "source": "会话第一轮用户输入（附 OceanBase 训练营题目页截图）",
+      "content": "@image#1:Clipboard_Screenshot.png 这个是蚂蚁集团数据库大赛的比赛，我要提测，这个是交什么东西，你先告诉我一下，然后你先把要做的东西告诉我，之后需要你做的提测东西我之后再告诉你"
+    },
+    {
+      "id": "u2",
+      "role": "student",
+      "source": "会话第二轮用户输入（附官方加赛语雀文档链接）",
+      "content": "https://oceanbase.yuque.com/org-wiki-obtech-vh7w9r/hc3pio/lg8enxlmwg69unt6你帮我把这个提测做一下"
+    }
+  ],
+  "context": [
+    {
+      "id": "c1",
+      "role": "agent",
+      "source": "官方训练营题目页截图（用户提供的图片）",
+      "content": "提交材料：在报名登记的 seekdb 仓库 2026-competition-round2 分支提交源码、Dockerfile 和 Agent Prompt 学习材料，三者须来自同一次提交；整题只需提测一次；如填写 Commit SHA 请使用完整值。计分：MySQL 正式用例全部通过才进入计分；性能与 Agent Prompt 分别排名，各最高 40 分。"
+    },
+    {
+      "id": "c2",
+      "role": "agent",
+      "source": "加赛语雀文档 https://oceanbase.yuque.com/org-wiki-obtech-vh7w9r/hc3pio/lg8enxlmwg69unt6",
+      "content": "任务：单机、单进程、单客户端；支持 CREATE TABLE / INSERT / SELECT / UPDATE / DELETE、L2_DISTANCE 精确 TopK、持久化、事务与崩溃恢复。提交产物为 seekdb 仓库 2026-competition-round2 分支上的源码、Dockerfile 和 conversation.json。功能准入不单独计分，全部 MySQL case 通过后才计分。Agent prompt 材料为单个 UTF-8 JSON，默认路径 agent/conversation.json，≤128 KiB，须真实反映开发学习过程，不得编造交互或实验结果。"
+    },
+    {
+      "id": "c3",
+      "role": "agent",
+      "source": "seekdb 仓库 2026-competition-round2 分支 · STDIO_PROTOCOL.md",
+      "content": "本文按当前判题器的实际行为说明通信格式：JSON Lines 协议，启动先输出 {\"type\":\"ready\"} 并 flush，之后每行一个 JSON 请求/响应，execute 请求含 id / op / sql / search_mode，shutdown 返回 ok:true 后退出码 0；stdout 只输出协议报文，日志走 stderr。"
+    },
+    {
+      "id": "c4",
+      "role": "agent",
+      "source": "seekdb 仓库 2026-competition-round2 分支 · protocol_check/README.md 与 config.json",
+      "content": "protocol_check/run.py 支持 --handshake-only、--case、全量公开用例；--restart 复用数据卷，--mode ann 改变后续请求模式；启动 120 秒、单请求 60 秒、普通用例 600 秒，2 CPU、2 GiB，浮点绝对/相对容差均为 1e-5；断言中的 error 只要求 ok:false 与非空 error.code。"
+    }
+  ],
+  "conversations": [
+    {
+      "id": "d1",
+      "role": "student",
+      "content": "第一轮提问：要求先解释这次提测交什么、要做哪些东西，并明确说明「之后需要你做的提测东西我之后再告诉你」，即本轮不要动手。"
+    },
+    {
+      "id": "d2",
+      "role": "agent",
+      "content": "解释结论：不是上传文件包，而是把源码、Dockerfile、Agent Prompt 学习材料推到报名登记的 seekdb 仓库 2026-competition-round2 分支，再在网页点「立即提测」填仓库 HTTPS URL、分支与完整 Commit SHA，由平台拉取该 commit 评测。列出 3 项提交物、计分规则与 7 步待办；按用户要求本轮未创建或修改任何项目文件。"
+    },
+    {
+      "id": "d3",
+      "role": "student",
+      "content": "第二轮提问：给出官方加赛语雀文档链接，要求「你帮我把这个提测做一下」。"
+    },
+    {
+      "id": "d4",
+      "role": "agent",
+      "content": "读取语雀文档后发现与题包存在协议描述差异：语雀 3.1 写「通过 stdin 接收 SQL」，而题包 STDIO_PROTOCOL.md 写的是按当前判题器实际行为的 JSON Lines 协议，并附带 protocol_check/run.py 自测工具。决定按可自测的题包协议实现，并把差异写入 README。"
+    },
+    {
+      "id": "d5",
+      "role": "agent",
+      "content": "拉取题包：git ls-remote 确认 2026-competition-round2 分支存在，稀疏克隆该分支，读取 mysqltest/manifest.json 列出的 20 个公开用例、全部 .test/.result、protocol_check 工具与 STDIO_PROTOCOL.md，确定 SQL 语法、错误码、--restart/--mode ann 驱动指令与断言语义。"
+    },
+    {
+      "id": "d6",
+      "role": "agent",
+      "content": "实现方案：WAL 追加写 + commit 标记 + fsync 后应答，恢复只重放被 commit 闭合的事务；BEGIN 后变更写入内存 overlay 保证读己之写与语句原子性；过滤先于 TopK 且 ann 模式同样返回精确结果；numpy 为可选加速，缺失时退化为纯 Python 精确扫描。"
+    }
+  ],
+  "experiments": [
+    {
+      "id": "e1",
+      "role": "tool",
+      "status": "executed",
+      "command": "git ls-remote --heads https://github.com/oceanbase/seekdb.git",
+      "output": "f4d4e26653af823a7601668802f80e374ad6643c\trefs/heads/2026-competition-round2",
+      "note": "确认赛题分支可访问，随后稀疏克隆取得题包。"
+    },
+    {
+      "id": "e2",
+      "role": "tool",
+      "status": "executed",
+      "command": "python -B tests/run_public_cases.py",
+      "output": "PASS sql_crud / PASS sql_comparisons / ... / PASS transaction_shutdown_rollback\n20/20 cases passed",
+      "note": "本地驱动逐用例独立数据目录，覆盖 --restart 与 --mode ann，断言语义与 protocol_check/_assertions.py 一致。"
+    },
+    {
+      "id": "e3",
+      "role": "tool",
+      "status": "executed",
+      "command": "PYTHONPATH=<tmpdeps> python -B tests/run_public_cases.py",
+      "output": "20/20 cases passed (numpy 可用时同样通过)",
+      "note": "验证引入 numpy 后正确性不变。"
+    },
+    {
+      "id": "e4",
+      "role": "tool",
+      "status": "executed",
+      "command": "python -B tests/test_recovery.py",
+      "output": "after_crash.rows=[[1,\"committed\"]]；after_second_kill.rows=[[1,\"committed\"]]；final.rows=[[1,\"committed\"],[3,\"after-recovery\"]]；verdict=PASS",
+      "note": "不发 shutdown 直接 kill：已提交数据保留、未提交事务不生效、恢复途中再次终止后结果一致。"
+    },
+    {
+      "id": "e5",
+      "role": "tool",
+      "status": "executed",
+      "command": "python -B tests/test_vector_scale.py",
+      "output": "numpy_active=false；inserted=600；top1_actual=[[385,1.0]]；top1_expected=[[385,1.0]]；in_transaction_top1=[[999,0.0]]；after_rollback_top1=[[385,1.0]]；verdict=PASS",
+      "note": "600 行扫描触发大数据路径，Top10 与独立暴力真值一致，事务内可见、ROLLBACK 后不可见。"
+    },
+    {
+      "id": "e6",
+      "role": "tool",
+      "status": "executed",
+      "command": "PYTHONPATH=<tmpdeps> python -B tests/test_vector_scale.py",
+      "output": "numpy_active=true；inserted=600；top1_actual=[[385,1.0]]；top1_expected=[[385,1.0]]；in_transaction_top1=[[999,0.0]]；verdict=PASS",
+      "note": "numpy 快路径与纯 Python 路径结果一致，构成一次交叉检查。"
+    }
+  ],
+  "decisions": [
+    {
+      "id": "k1",
+      "role": "agent",
+      "content": "协议冲突取舍：以题包 STDIO_PROTOCOL.md + protocol_check/run.py 的 JSON Lines 为准，因为它自称描述当前判题器实际行为且可本地自测；同时在 README 第 3 节记录差异与替换通信层的成本。"
+    },
+    {
+      "id": "k2",
+      "role": "agent",
+      "content": "持久化取舍：选 WAL + commit 标记而非快照，因为崩溃模型只要求进程被强制终止，事务边界用 commit 标记即可保证「已确认提交不丢、未提交不部分生效」，且恢复天然幂等。"
+    },
+    {
+      "id": "k3",
+      "role": "agent",
+      "content": "依赖取舍：本机没有 Docker 也没有 numpy，因此实现为纯标准库可运行、numpy 可选加速；Dockerfile 在构建阶段锁定安装 numpy==2.1.3 并允许安装失败时回退，避免构建环境无网络导致镜像构建失败。"
+    },
+    {
+      "id": "k4",
+      "role": "agent",
+      "content": "合规取舍：conversation.json 只写入真实发生的提问、资料来源、命令与输出，不代写学生的理解、质疑或验证结论；学生侧证据缺口单独列在 student_contribution_gaps。"
+    }
+  ],
+  "retrospective": [
+    {
+      "id": "r1",
+      "role": "agent",
+      "content": "实现过程中确认：过滤必须在 TopK 之前（vector_ties_and_filter 用例验证），距离并列必须按主键升序（vector_ties_and_filter、vector_float32 用例验证），多行 INSERT 中任一失败必须整条语句不留修改（transaction_autocommit_atomic、transaction_failed_insert 用例验证）。这三条约束决定了执行顺序与语句原子性设计。"
+    },
+    {
+      "id": "r2",
+      "role": "agent",
+      "content": "本地验证覆盖 20 个公开用例、崩溃恢复与 600 行向量扫描，但没有 Docker，因此未运行 protocol_check/run.py 容器版；镜像内的构建、启动参数与只读根文件系统行为仍是未验证环节，正式提测前需要补做环境预检。"
+    }
+  ],
+  "limitations": [
+    {
+      "id": "l1",
+      "role": "agent",
+      "content": "ann 模式返回精确结果，功能合规但不带来近似索引加速，性能榜查询耗时不会因此受益。"
+    },
+    {
+      "id": "l2",
+      "role": "agent",
+      "content": "CREATE VECTOR INDEX 只记录元数据，未构建独立 ANN 结构；WAL 不做 compaction，长时间大量更新会使日志单调增长。"
+    },
+    {
+      "id": "l3",
+      "role": "agent",
+      "content": "隐藏用例、性能基线与资源上限均未在正式环境验证，公开用例通过不代表正式准入通过。"
+    }
+  ],
+  "student_contribution_gaps": [
+    {
+      "id": "g1",
+      "role": "agent",
+      "content": "本文件目前只包含选手的两条真实提问，缺少选手用自己的话解释约束、预测行为、设计独立验证、质疑 Agent 结论、解释实验结果并据此修正复测的证据。按 agent-learning-evidence-v3-unbounded，这些内容不会由 Agent 代写；需要选手本人真实参与并把原文与结果补入本 JSON。"
+    },
+    {
+      "id": "g2",
+      "role": "agent",
+      "content": "建议的补充方式（仅为操作说明，不是已发生的证据）：选手针对某条设计决策提出具体预测或反例 → 与 Agent 讨论 → 在本机执行对应测试命令 → 把命令、真实输出、选手对结果的解释、以及修正后的复测结果按 experiments 的结构追加为新的字符串字段，并在 evidence_index 中登记 JSON pointer。"
+    },
+    {
+      "id": "g3",
+      "role": "agent",
+      "content": "注意：仅写「测试已通过」或外部文件名/链接不构成验证证据；规划与结果必须分别位于不同的原文片段；同一条修正链只计一个独立实例。"
+    }
+  ],
+  "evidence_index": [
+    {"pointer": "/user_prompts/0/content", "kind": "student_evidence", "note": "选手第一轮真实提问原文"},
+    {"pointer": "/user_prompts/1/content", "kind": "student_evidence", "note": "选手第二轮真实提问原文"},
+    {"pointer": "/experiments/1/output", "kind": "result_evidence", "note": "20 个公开用例的真实执行结果"},
+    {"pointer": "/experiments/3/output", "kind": "result_evidence", "note": "崩溃恢复的真实执行结果"},
+    {"pointer": "/experiments/4/output", "kind": "result_evidence", "note": "纯 Python 向量扫描的真实执行结果"},
+    {"pointer": "/experiments/5/output", "kind": "result_evidence", "note": "numpy 快路径的真实执行结果"},
+    {"pointer": "/retrospective/1/content", "kind": "limitation_evidence", "note": "未验证环节的诚实说明"}
+  ]
+}

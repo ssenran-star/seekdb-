@@ -1,0 +1,10 @@
+.git
+.idea
+.workbuddy
+tests
+agent
+conversation.json
+README.md
+*.pyc
+__pycache__
+tmpdeps
