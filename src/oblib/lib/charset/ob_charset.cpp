@@ -1722,20 +1722,23 @@ int ObCharset::first_valid_char(
   if (OB_UNLIKELY(collation_type <= CS_TYPE_INVALID ||
                   collation_type >= CS_TYPE_MAX)) {
     ret = OB_ERR_UNEXPECTED;
-  } else if (OB_ISNULL(get_charset(collation_type))) {
-    ret = OB_NOT_SUPPORTED;
-  } else if (OB_UNLIKELY(NULL == buf)) {
-    ret = OB_NOT_INIT;
-  } else if (buf_size <= 0) {
-    char_len = 0;
   } else {
-    int error = 0;
-    int64_t len = 0;
+    // Resolve the collation's charset once and reuse it below.  get_charset()
+    // is deterministic for a given collation (its lazy-init branch runs at most
+    // once under a mutex), so the old second lookup returned this same pointer.
+    // first_valid_char() is on the per-character IK segmentation hot path.
     const ObCharsetInfo *cs = get_charset(collation_type);
-    if (OB_ISNULL(cs->cset)) {
+    if (OB_ISNULL(cs)) {
+      ret = OB_NOT_SUPPORTED;
+    } else if (OB_UNLIKELY(NULL == buf)) {
+      ret = OB_NOT_INIT;
+    } else if (buf_size <= 0) {
+      char_len = 0;
+    } else if (OB_ISNULL(cs->cset)) {
       ret = OB_ERR_UNEXPECTED;
     } else {
-      len = static_cast<int64_t>(cs->cset->well_formed_len(cs, buf, buf + buf_size, 1, &error));
+      int error = 0;
+      int64_t len = static_cast<int64_t>(cs->cset->well_formed_len(cs, buf, buf + buf_size, 1, &error));
       if (OB_LIKELY(0 == error)) {
         char_len = len;
       } else {
