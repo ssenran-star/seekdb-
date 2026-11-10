@@ -86,6 +86,7 @@ private:
   int init_char_cache();
 
   ObCollationType coll_type_;
+  ObCharsetType cs_type_; // resolved once; the collapse/prepare hot path reuses it
   const char *fulltext_;
   int64_t fulltext_len_;
 

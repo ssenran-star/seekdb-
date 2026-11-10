@@ -52,6 +52,12 @@ public:
                                  const uint8_t char_len,
                                  CharType &type);
 
+  // Classify an already-decoded Unicode code point.  Exposed so the tokenizer
+  // can fuse "find char length" + "decode" into a single inline decode on the
+  // per-character segmentation hot path (see TokenizeContext::prepare_next_char).
+  template <ObCharsetType CS_TYPE>
+  static CharType classify_codepoint(ob_wc_t unicode);
+
   static int check_cn_number(ObCollationType coll_type,
                              const char *input,
                              const uint8_t char_len,
@@ -441,6 +447,34 @@ inline int ObFTCharUtil::is_ignore_single_cjk(ObCollationType coll_type,
   return ret;
 }
 
+// Pure code-point -> character-class mapping, split out of do_classify() so the
+// tokenizer's fused fast path can reuse it after a single inline decode.
+template <ObCharsetType CS_TYPE>
+inline ObFTCharUtil::CharType ObFTCharUtil::classify_codepoint(ob_wc_t unicode)
+{
+  CharType type = CharType::USELESS;
+  if (ObUnicodeBlockUtils::is_alpha(unicode)) {
+    type = CharType::ENGLISH_LETTER;
+  } else if (ObUnicodeBlockUtils::is_arabic(unicode)) {
+    type = CharType::ARABIC_LETTER;
+  } else if (ObUnicodeBlockUtils::is_chinese(unicode)) {
+    type = CharType::CHINESE;
+  } else if (ObUnicodeBlockUtils::is_other_cjk(unicode)) {
+    type = CharType::OTHER_CJK;
+  } else if constexpr (CS_TYPE == CHARSET_UTF16 || CS_TYPE == CHARSET_UTF16LE) {
+    // Surrogate code points carry meaning only for the UTF-16 charsets.  For
+    // CHARSET_UTF8MB4 the original is_surrogate_high/low helpers were explicit
+    // no-ops that never decoded and always reported false, so compiling these
+    // checks out for UTF-8 preserves the exact previous classification.
+    if (ObUnicodeBlockUtils::check_high_surrogate(unicode)) {
+      type = CharType::SURROGATE_HIGH;
+    } else if (ObUnicodeBlockUtils::check_low_surrogate(unicode)) {
+      type = CharType::SURROGATE_LOW;
+    }
+  }
+  return type;
+}
+
 template <ObCharsetType CS_TYPE>
 inline int ObFTCharUtil::do_classify(const char *input, const uint8_t char_len, CharType &type)
 {
@@ -461,24 +495,8 @@ inline int ObFTCharUtil::do_classify(const char *input, const uint8_t char_len, 
   ob_wc_t unicode = 0;
   if (OB_FAIL(decode_unicode<CS_TYPE>(input, char_len, unicode))) {
     // decode_unicode() has already logged the failure
-  } else if (ObUnicodeBlockUtils::is_alpha(unicode)) {
-    type = CharType::ENGLISH_LETTER;
-  } else if (ObUnicodeBlockUtils::is_arabic(unicode)) {
-    type = CharType::ARABIC_LETTER;
-  } else if (ObUnicodeBlockUtils::is_chinese(unicode)) {
-    type = CharType::CHINESE;
-  } else if (ObUnicodeBlockUtils::is_other_cjk(unicode)) {
-    type = CharType::OTHER_CJK;
-  } else if constexpr (CS_TYPE == CHARSET_UTF16 || CS_TYPE == CHARSET_UTF16LE) {
-    // Surrogate code points carry meaning only for the UTF-16 charsets.  For
-    // CHARSET_UTF8MB4 the original is_surrogate_high/low helpers were explicit
-    // no-ops that never decoded and always reported false, so compiling these
-    // checks out for UTF-8 preserves the exact previous classification.
-    if (ObUnicodeBlockUtils::check_high_surrogate(unicode)) {
-      type = CharType::SURROGATE_HIGH;
-    } else if (ObUnicodeBlockUtils::check_low_surrogate(unicode)) {
-      type = CharType::SURROGATE_LOW;
-    }
+  } else {
+    type = classify_codepoint<CS_TYPE>(unicode);
   }
   return ret;
 }

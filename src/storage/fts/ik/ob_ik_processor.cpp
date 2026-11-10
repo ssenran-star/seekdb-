@@ -51,7 +51,8 @@ TokenizeContext::TokenizeContext(ObCollationType coll_type,
                                  const char *fulltext,
                                  int64_t fulltext_len,
                                  bool is_smart)
-    : coll_type_(coll_type), fulltext_(fulltext), fulltext_len_(fulltext_len), cursor_(0),
+    : coll_type_(coll_type), cs_type_(ObCharset::charset_type_by_coll(coll_type)),
+      fulltext_(fulltext), fulltext_len_(fulltext_len), cursor_(0),
       next_char_len_(0), handle_size_(0), is_smart_(is_smart), allocator_(allocator),
       char_lens_(nullptr), char_types_(nullptr), token_list_(allocator),
       result_list_(allocator)
@@ -121,14 +122,40 @@ int TokenizeContext::current_char_type(ObFTCharUtil::CharType &type)
 int TokenizeContext::prepare_next_char()
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(ObCharset::first_valid_char(coll_type_,
-                                          fulltext_ + cursor_,
-                                          fulltext_len_ - cursor_,
-                                          next_char_len_))) {
-  } else if (OB_FAIL(ObFTCharUtil::classify_first_char(coll_type_,
-                                                       fulltext_ + cursor_,
-                                                       next_char_len_,
-                                                       next_char_type_))) {
+  const char *cur = fulltext_ + cursor_;
+  const int64_t remain = fulltext_len_ - cursor_;
+
+  if (OB_LIKELY(CHARSET_UTF8MB4 == cs_type_)) {
+    // Fused single decode for the UTF-8 hot path.  The old sequence first called
+    // first_valid_char() -> ob_well_formed_len_utf8mb4() purely to learn the byte
+    // length, then classify_first_char() -> do_classify() re-parsed the very same
+    // lead/continuation bytes via ob_mb_wc_utf8_prototype<true,true>.
+    // For every sequence the decoder accepts, ob_valid_mbcharlen_utf8mb4 (the
+    // length primitive) reports the identical byte length; the decoder is
+    // stricter only on encoded surrogates, which the old two-call path rejected
+    // one step later in do_classify() anyway.  So decoding once here yields the
+    // same length and the same class.  On any decode failure we fall through to
+    // the original two-call path verbatim, preserving the exact return code,
+    // the next_char_len_ side effect and the log output.
+    ob_wc_t unicode = 0;
+    const int code_size = common::ob_charset_decode_unicode<CHARSET_UTF8MB4>(
+        reinterpret_cast<const unsigned char *>(cur),
+        reinterpret_cast<const unsigned char *>(cur + remain), unicode);
+    if (OB_LIKELY(code_size > 0)) {
+      next_char_len_ = code_size;
+      next_char_type_ = ObFTCharUtil::classify_codepoint<CHARSET_UTF8MB4>(unicode);
+      if (OB_LIKELY(nullptr != char_lens_) && cursor_ < fulltext_len_) {
+        // remember the answer for the arbiter's second pass
+        char_lens_[cursor_] = static_cast<uint8_t>(next_char_len_);
+        char_types_[cursor_] = static_cast<int8_t>(next_char_type_);
+      }
+      return OB_SUCCESS;
+    }
+    // decode rejected the bytes: reproduce the original path below
+  }
+
+  if (OB_FAIL(ObCharset::first_valid_char(coll_type_, cur, remain, next_char_len_))) {
+  } else if (OB_FAIL(ObFTCharUtil::classify_first_char(coll_type_, cur, next_char_len_, next_char_type_))) {
   } else if (OB_LIKELY(nullptr != char_lens_) && cursor_ < fulltext_len_) {
     // remember the answer for the arbiter's second pass
     char_lens_[cursor_] = static_cast<uint8_t>(next_char_len_);
