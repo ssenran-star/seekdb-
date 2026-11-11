@@ -266,17 +266,45 @@ int ObFTDATReader<DATA_TYPE>::match_with_hit(const ObString &ft_char,
                                              ObDATrieHit &hit) const
 {
   int ret = OB_SUCCESS;
-  ObFTWordCode code;
+  ObFTWordCode code = 0;
+  bool found = false;
   hit.set_unmatch();
-  auto *map = dat_->get_map();
   int32_t *base = reinterpret_cast<int32_t *>(dat_->buff + dat_->base_offset_);
   int32_t *check = reinterpret_cast<int32_t *>(dat_->buff + dat_->check_offset_);
 
-  ObFTSingleWord word;
-  word.set_word(ft_char.ptr(), ft_char.length());
-  if (OB_FAIL(dat_->get_map()->find(word, code)) && OB_ENTRY_NOT_EXIST != ret) {
-  } else if (OB_ENTRY_NOT_EXIST == ret) {
-    ret = OB_SUCCESS;
+  const int32_t len = static_cast<int32_t>(ft_char.length());
+  // The IK CJK segmenter looks up the same character once per active prefix hit
+  // plus once to start a new hit, so the DAT map find() was repeated H+1 times
+  // for identical bytes.  This reader is thread-confined and the DAT block is
+  // immutable for its lifetime, so reuse the last word->(found,code) answer.
+  // The bytes are copied (not referenced), so a reused document buffer cannot
+  // invalidate the memo.  Only single characters (1-4 bytes) use the memo.
+  if (len > 0 && len <= static_cast<int32_t>(sizeof(memo_word_))
+      && memo_len_ == len
+      && 0 == MEMCMP(memo_word_, ft_char.ptr(), static_cast<size_t>(len))) {
+    found = memo_found_;
+    code = memo_code_;
+  } else {
+    ObFTSingleWord word;
+    word.set_word(ft_char.ptr(), len);
+    if (OB_FAIL(dat_->get_map()->find(word, code))) {
+      if (OB_ENTRY_NOT_EXIST != ret) {
+        return ret; // real error; never memoize a failed probe
+      }
+      ret = OB_SUCCESS;
+      found = false;
+    } else {
+      found = true;
+    }
+    if (len > 0 && len <= static_cast<int32_t>(sizeof(memo_word_))) {
+      MEMCPY(memo_word_, ft_char.ptr(), static_cast<size_t>(len));
+      memo_len_ = len;
+      memo_code_ = code;
+      memo_found_ = found;
+    }
+  }
+
+  if (!found) {
     hit.set_unmatch();
   } else {
     if (&last_hit == &hit) {
