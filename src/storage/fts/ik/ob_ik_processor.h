@@ -48,10 +48,11 @@ public:
   int current_char(const char *&ch, uint8_t &char_len);
   int current_char_type(ObFTCharUtil::CharType &type);
 
-  // Returns the byte length and the character class of the character that
-  // starts at `pos`.  The first pass over the document already decoded every
-  // position, so the arbiter can read the cached answer instead of decoding and
-  // classifying the same character a second time.
+  // Decode and classify the character starting at `pos`.  Only the arbitrator's
+  // keep_single()==true single-word output path calls this; the normal path walks
+  // the arbitrator's ordered chains and never reaches it.  Recomputed on demand
+  // rather than served from a per-byte cache, which was write-only dead work on
+  // the live (keep_single()==false) path.
   int char_info_at(const int64_t pos,
                    int64_t &char_len,
                    ObFTCharUtil::CharType &type);
@@ -83,7 +84,6 @@ public:
 
 private:
   int prepare_next_char();
-  int init_char_cache();
 
   ObCollationType coll_type_;
   const char *fulltext_;
@@ -96,11 +96,7 @@ private:
   uint32_t handle_size_;
   bool is_smart_;
 
-  // Decode cache, one slot per byte position of the document.  A zero length
-  // means "not decoded yet"; the type is only meaningful when the length is set.
   ObIAllocator &allocator_;
-  uint8_t *char_lens_;
-  int8_t *char_types_;
 
   ObFTSortList token_list_;
   ObList<ObIKToken, ObIAllocator> result_list_;
