@@ -127,10 +127,17 @@ OB_INLINE bool casedown_may_change(const ObString &word)
       ++pos;
     } else if (ch >= 0xE4 && ch <= 0xE9 && pos + 2 < len
                && 0x80 == (ptr[pos + 1] & 0xC0) && 0x80 == (ptr[pos + 2] & 0xC0)) {
-      const uint32_t cp = (static_cast<uint32_t>(ch & 0x0F) << 12)
-                          | (static_cast<uint32_t>(ptr[pos + 1] & 0x3F) << 6)
-                          | static_cast<uint32_t>(ptr[pos + 2] & 0x3F);
-      may_change = (cp < 0x4E00 || cp > 0x9FFF);
+      // A 3 byte UTF-8 sequence with lead 0xE4..0xE9 is a code point in
+      // U+4000..U+9FFF, i.e. pages 0x40..0x9F of the case folding tables.
+      // Those pages are NULL in ob_unicase_default -- the caseinfo wired to
+      // every utf8mb4 collation in this tree (general_ci, bin, and the UCA
+      // 0900_* handlers) -- and also in ob_unicase_unicode520.  Since
+      // ob_tolower_utf8mb4() leaves a code point on a NULL page unchanged, no
+      // code point in U+4000..9FFF can ever change under casedown; decoding it
+      // here is dead work.  Skip the sequence without decoding.
+      // (The old range check also flagged U+4000..4DFF as "may change" and
+      // routed those tokens through ObCharset::tolower, which allocated a copy
+      // it never actually modified.)
       pos += 3;
     } else {
       // Be conservative for every other script / encoding.
