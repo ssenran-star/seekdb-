@@ -330,10 +330,33 @@ int ObBasicEnglishNormalizer::get_next(ObDatum &next_token, int64_t &token_freq)
       ret = OB_ERR_UNEXPECTED;
     } else {
       ObString norm_alnum_token(norm_token_len, norm_token_ptr);
-      ObString norm_lower_token;
-      if (OB_FAIL(ObCharset::tolower(cs_, norm_alnum_token, norm_lower_token, norm_allocator_))) {
+      // ObCharset::tolower always allocates a fresh copy into norm_allocator_
+      // (which is reused on the next get_next call).  For an all-lowercase
+      // ASCII token the folded bytes are byte-for-byte identical to the
+      // trimmed input, which already points into the caller's document buffer
+      // and outlives free_token_iter -- so the copy is pure overhead on the
+      // dominant case (English lowercase words).  Detect that case in one
+      // pass and return the original slice directly.
+      //
+      // Be conservative: any non-ASCII byte stays on the tolower path, because
+      // general_ci / UCA case folding can rewrite it even with no ASCII
+      // uppercase present (e.g. U+00C0 'À' -> U+00E0 'à', U+00DF 'ß' -> 's').
+      // Only [A-Z] and bytes >= 0x80 can possibly change, so everything else
+      // is provably a no-op for the identity case tables wired in this tree.
+      bool need_lower = false;
+      for (uint32_t i = 0; OB_SUCC(ret) && !need_lower && i < norm_token_len; ++i) {
+        const unsigned char c = static_cast<unsigned char>(norm_token_ptr[i]);
+        need_lower = (c >= 0x80 || (c >= 'A' && c <= 'Z'));
+      }
+      if (OB_FAIL(ret)) {
+      } else if (!need_lower) {
+        next_token.set_string(norm_alnum_token);
       } else {
-        next_token.set_string(norm_lower_token);
+        ObString norm_lower_token;
+        if (OB_FAIL(ObCharset::tolower(cs_, norm_alnum_token, norm_lower_token, norm_allocator_))) {
+        } else {
+          next_token.set_string(norm_lower_token);
+        }
       }
     }
   }
