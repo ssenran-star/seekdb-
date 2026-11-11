@@ -111,6 +111,27 @@ int ObIKArbitrator::output_result(TokenizeContext &ctx)
 {
   int ret = OB_SUCCESS;
 
+  if (!keep_single()) {
+    // add_chain() appended the accepted chains in strictly increasing document
+    // order (a new chain is seeded with the token that conflicted with - and
+    // therefore follows - the previous one; optimize()/copy() preserve the
+    // start offset).  The chains are disjoint, so walking them directly emits
+    // exactly the same tokens in exactly the same order as the full N-position
+    // scan below, but with zero get_refactored() lookups: the old scan probed N
+    // positions (mostly guaranteed misses) and then re-fetched each chain.
+    // The token set - and the official hit counts - are unchanged.
+    for (int64_t i = 0; OB_SUCC(ret) && i < ordered_chains_.size(); ++i) {
+      ObIKTokenChain *chain = ordered_chains_.at(i);
+      for (ObList<ObIKToken, ObIAllocator>::const_iterator iter = chain->list().tokens().begin();
+           OB_SUCC(ret) && iter != chain->list().tokens().end();
+           ++iter) {
+        if (OB_FAIL(ctx.result_list().push_back(*iter))) {
+        }
+      }
+    }
+    return ret;
+  }
+
   int64_t char_len = 0;
   ObIKTokenChain *chain = nullptr;
   for (int64_t current = 0; OB_SUCC(ret) && current < ctx.fulltext_len();) {
@@ -293,6 +314,7 @@ int ObIKArbitrator::remove_conflict(const ObIKToken &token, ObIKTokenChain *opti
 int ObIKArbitrator::prepare(TokenizeContext &ctx)
 {
   int ret = OB_SUCCESS;
+  ordered_chains_.reset();
 
   // chains_ is a default ObHashMap (EXTEND_RATIO == 1), so it never rehashes:
   // this bucket count is fixed for the batch and directly sets the collision
@@ -322,6 +344,11 @@ int ObIKArbitrator::add_chain(ObIKTokenChain *chain)
   } else if (chain->list().is_empty()) {
     // no need to add empty chain
   } else if (OB_FAIL(chains_.set_refactored(chain->min_offset(), chain))) {
+  } else if (OB_FAIL(ordered_chains_.push_back(chain))) {
+    // Keep the chain in document order for output_result()'s direct walk.
+    // process() consumes tokens in document order and only starts a new chain
+    // on conflict with the previous one, so each accepted chain here follows
+    // the last; no sort is needed and the emitted order is unchanged.
   }
   return ret;
 }

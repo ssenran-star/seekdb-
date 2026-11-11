@@ -18,6 +18,7 @@
 #define _OCEANBASE_STORAGE_FTS_IK_OB_IK_ARBITRATOR_H_
 
 #include "lib/allocator/page_arena.h"
+#include "lib/container/ob_vector.h"
 #include "lib/hash/ob_hashmap.h"
 #include "lib/utility/ob_macro_utils.h"
 #include "storage/fts/ik/ob_ik_token.h"
@@ -61,6 +62,15 @@ private:
 
 private:
   ObArenaAllocator alloc_;
+  // Chains in strictly increasing document order, appended by add_chain().
+  // output_result() walks these T chains directly instead of probing all N
+  // character positions (keep_single() is false, so most probes were misses),
+  // and with zero get_refactored() calls on the fast path.  The chain objects
+  // are arena-allocated and stay alive until ~ObIKArbitrator, which runs after
+  // output_result(); optimize() frees only its temporary option/old-best, never
+  // the chain handed to add_chain().  The vector's own embedded PageArena keeps
+  // its buffer lifetime independent of alloc_, which the destructor resets.
+  ObVector<ObIKTokenChain *> ordered_chains_;
   hash::ObHashMap<int64_t, ObIKTokenChain *> chains_;
 
 private:
