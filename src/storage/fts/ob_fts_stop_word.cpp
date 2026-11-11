@@ -38,6 +38,38 @@ OB_INLINE bool is_ascii_word(const ObString &word)
   return is_ascii;
 }
 
+// True when an utf8mb4 token contains a byte in 0xE4..0xE9.  Such a byte can
+// only be the lead byte of a 3 byte UTF-8 sequence (continuation bytes are
+// 0x80..0xBF), so it decodes to a code point in U+4000..U+9FFF.
+//
+// Why this is enough to rule out a stop word: utf8mb4_general_ci sorts code
+// points with ob_unicase_default (see ob_ctype_utf8.cc ob_tosort_unicode and
+// ob_ctype_utf8_tab.h ob_unicase_pages_default).  Every page of that table in
+// the range 0x40..0x9F is NULL, and for a NULL page ob_tosort_unicode leaves
+// the code point unchanged -- so each such code point keeps its own value
+// (>= 0x4000) as its sort weight.  The built in stop words are all ASCII
+// letters (sort weights <= 0x7A, well below 0x4000), therefore a token
+// containing one of these code points can never compare equal to a stop word,
+// and the collation aware hash probe in check_stopword() is provably dead work
+// for it.
+//
+// Latin-1 accents (lead 0xC0..0xDF) are deliberately NOT matched here: under
+// general_ci they fold to ASCII (U+00E1 'a'-acute -> 'A', U+00DF -> 'S'), so
+// "a" / "as" really can be stop words written with non-ASCII bytes.  Skipping
+// those would change hit counts; only the high CJK range is safe.
+OB_INLINE bool contains_utf8mb4_cjk(const ObString &word)
+{
+  const char *ptr = word.ptr();
+  const int64_t len = word.length();
+  for (int64_t i = 0; i < len; ++i) {
+    const unsigned char byte = static_cast<unsigned char>(ptr[i]);
+    if (byte >= 0xE4 && byte <= 0xE9) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // The built in stop word table is a compile time constant: a few dozen lower case
 // ASCII words.  Deciding whether a token is one of them is on the hot path of
 // every single document, and an index build runs it from several worker threads
@@ -221,8 +253,15 @@ int ObStopWordChecker::check_stopword(const ObFTWord &word, bool &is_stopword)
     // an utf8mb4 token against the utf8mb4 stop word list).
     const ObCharsetType word_cs = ObCharset::charset_type_by_coll(word.get_collation_type());
     const ObCharsetType stop_cs = ObCharset::charset_type_by_coll(stopword_type_.get_collation_type());
+    bool skip_probe = false;
     if (word_cs == stop_cs && common::CHARSET_INVALID != word_cs) {
       cmp_str = word.get_word().get_string();
+      // The common path: an utf8mb4 token against the utf8mb4 stop word list.
+      // A CJK token (any 3 byte lead 0xE4..0xE9) has general_ci sort weights
+      // >= 0x4000 and can never equal an all-ASCII stop word, so the hash
+      // probe below is provably always a miss for it.  Skip it.
+      skip_probe = (common::CHARSET_UTF8MB4 == word_cs
+                    && contains_utf8mb4_cjk(cmp_str));
     } else {
       common::ObArenaAllocator allocator(lib::ObMemAttr("ChkStopWord"));
       if (OB_FAIL(common::ObCharset::charset_convert(
@@ -233,7 +272,7 @@ int ObStopWordChecker::check_stopword(const ObFTWord &word, bool &is_stopword)
                                        cmp_str))) {
       }
     }
-    if (OB_SUCC(ret)) {
+    if (OB_SUCC(ret) && !skip_probe) {
       ObFTWord converted(cmp_str.length(), cmp_str.ptr(), stopword_type_);
       ret = stopword_set_.exist_refactored(converted);
       if (OB_HASH_NOT_EXIST == ret) {
