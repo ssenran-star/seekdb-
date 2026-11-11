@@ -376,8 +376,22 @@ size_t ObArrayHashMap::estimate_size(size_t word_num)
 
 size_t ObArrayHashMap::estimate_capacity(size_t word_num)
 {
-  constexpr size_t MIN_CAPACITY = 101;                   // prime
-  size_t capacity = MAX(word_num * 4 / 3, MIN_CAPACITY); // 75%
+  // find()/insert() probe with a fixed step of 3 and wrap via a single
+  // conditional subtract (see the two loops above).  Such a probe visits every
+  // slot only when capacity is coprime with 3.  The old MAX(word_num*4/3, 101)
+  // is divisible by 3 for a large class of inputs (e.g. word_num divisible by
+  // 9, or word_num == 7/5 (mod 9)); that silently reduces the reachable table
+  // to one third and, at ~75% load, can leave insert() spinning forever once a
+  // residue class fills up.  Size for a ~50% load factor and lift the result to
+  // the next value coprime with 3, cutting both the average probe chain and
+  // that liveness risk.  DAT codes are assigned sequentially in encode()
+  // (next_code_++), independent of bucket placement, so the emitted word->code
+  // set - and therefore the official hit counts - are unchanged.
+  constexpr size_t MIN_CAPACITY = 101;                     // prime, coprime with 3
+  size_t capacity = MAX(word_num * 2, MIN_CAPACITY);        // <= 50% load
+  while (0 == capacity % 3) {
+    ++capacity;
+  }
   return capacity;
 }
 } //  namespace storage
