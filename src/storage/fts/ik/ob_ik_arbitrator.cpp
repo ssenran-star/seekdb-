@@ -294,8 +294,19 @@ int ObIKArbitrator::prepare(TokenizeContext &ctx)
 {
   int ret = OB_SUCCESS;
 
-  int cal_bucket_num = MAX(ctx.fulltext_len() / 100, 10);
-  cal_bucket_num = MIN(cal_bucket_num, 100);
+  // chains_ is a default ObHashMap (EXTEND_RATIO == 1), so it never rehashes:
+  // this bucket count is fixed for the batch and directly sets the collision
+  // chain length of every get_refactored() in output_result().  That method
+  // scans all N char positions (keep_single() is false, so N-T of its lookups
+  // are failed probes), while T - the number of token chains - is at most the
+  // character count.  fulltext_len is in bytes and CJK tokens are ~3 bytes, so
+  // len/3 approximates the chain count and keeps the load factor near/below 1;
+  // len/2 stays conservative for single-byte (English) text.  The old len/100
+  // capped at 100 left load factors of 3-100 and probed long collision chains.
+  // Bucket placement never changes which chain a key resolves to, so the
+  // emitted tokens - and the official hit counts - are unchanged.
+  int cal_bucket_num = MAX(static_cast<int>(ctx.fulltext_len() / 2), 10);
+  cal_bucket_num = MIN(cal_bucket_num, 997);
   if (OB_FAIL(chains_.create(cal_bucket_num, ObMemAttr("IK ARBITRATE")))) {
   }
   return ret;
