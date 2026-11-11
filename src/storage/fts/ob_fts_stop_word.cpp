@@ -350,20 +350,30 @@ int ObAddWord::check_stopword(const ObFTWord &ft_word, bool &is_stopword)
 int ObAddWord::groupby_word(const ObFTWord &word, const int64_t word_freq)
 {
   int ret = OB_SUCCESS;
-  int64_t word_count = 0;
+  // A repeated word used to cost three hash probes and three bucket walks:
+  // set_refactored(word, 1) -> get_refactored(word, count) ->
+  // set_refactored(word, count + freq, overwrite).  ObFTWord::hash() is
+  // collation-aware (see the cached datum funcs on ObFTWord), so recomputing
+  // that hash three times per repeated token is pure overhead.  Collapse the
+  // whole insert-or-accumulate into one set_or_update probe.  Under
+  // NoPthreadDefendMode the bucket lock is a no-op, so the atomic helper adds
+  // no locking cost here.  The function-local, templated functor keeps this
+  // unity-build safe and independent of the HashMapPair namespace.
+  struct AddWordFreq {
+    int64_t freq_;
+    explicit AddWordFreq(const int64_t freq) : freq_(freq) {}
+    template <typename Pair>
+    void operator()(Pair &pair) const { pair.second += freq_; }
+  };
   if (OB_UNLIKELY(word.empty() || word_freq <= 0)) {
     ret = OB_INVALID_ARGUMENT;
   } else if (!flag_.groupby_word()) {
     if (OB_FAIL(word_map_.set_refactored(word, 1/*word count*/))) {
     }
-  } else if (OB_SUCC(word_map_.set_refactored(word, 1/*first word count*/))) {
-    // The word was not in the map yet, so the single insert above is enough.
-    // Only repeated words need the extra read-modify-write round trip.
-  } else if (OB_HASH_EXIST != ret) {
-    // keep the unexpected error
-  } else if (OB_FAIL(word_map_.get_refactored(word, word_count))) {
-  } else if (FALSE_IT(word_count += word_freq)) {
-  } else if (OB_FAIL(word_map_.set_refactored(word, word_count, 1/*overwrite*/))) {
+  } else {
+    AddWordFreq add_freq(word_freq);
+    if (OB_FAIL(word_map_.set_or_update(word, 1/*first word count*/, add_freq))) {
+    }
   }
   return ret;
 }
