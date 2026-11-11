@@ -118,6 +118,40 @@ int ObIKArbitrator::output_result(TokenizeContext &ctx)
 {
   int ret = OB_SUCCESS;
 
+  // keep_single() is false for this parser, so the full N-position scan below
+  // only ever emits tokens belonging to an accepted chain: every other position
+  // is a get_refactored() miss whose single word is dropped.  add_chain()
+  // appends those accepted chains in strictly increasing document order
+  // (process()/optimize() build disjoint chains that start on character
+  // boundaries), so walking ordered_chains_ directly emits the identical token
+  // sequence with zero hashmap probes and zero char_info_at() decodes.
+  //
+  // frontier mirrors the scan's "current = last token end" jump.  A chain whose
+  // min_offset() lies before the frontier would be skipped by the scan as well
+  // (the scan already advanced past it), so skipping it here keeps the two
+  // paths byte-identical even for an unexpected overlapping chain.  Under the
+  // proven regular case no chain is ever skipped by this guard.
+  if (!keep_single()) {
+    int64_t frontier = 0;
+    for (int64_t i = 0; OB_SUCC(ret) && i < ordered_chains_.size(); ++i) {
+      ObIKTokenChain *chain = ordered_chains_.at(i);
+      if (OB_ISNULL(chain) || chain->min_offset() < frontier) {
+        continue;
+      }
+      for (ObList<ObIKToken, ObIAllocator>::const_iterator iter =
+               chain->list().tokens().begin();
+           OB_SUCC(ret) && iter != chain->list().tokens().end();
+           ++iter) {
+        const ObIKToken &token = *iter;
+        if (OB_FAIL(ctx.result_list().push_back(token))) {
+        } else {
+          frontier = token.offset_ + token.length_;
+        }
+      }
+    }
+    return ret;
+  }
+
   int64_t char_len = 0;
   ObIKTokenChain *chain = nullptr;
   for (int64_t current = 0; OB_SUCC(ret) && current < ctx.fulltext_len();) {
@@ -308,6 +342,8 @@ int ObIKArbitrator::prepare(TokenizeContext &ctx)
 {
   int ret = OB_SUCCESS;
 
+  ordered_chains_.reset();
+
   int cal_bucket_num = MAX(ctx.fulltext_len() / 100, 10);
   cal_bucket_num = MIN(cal_bucket_num, 100);
   if (OB_FAIL(chains_.create(cal_bucket_num, ObMemAttr("IK ARBITRATE")))) {
@@ -325,6 +361,11 @@ int ObIKArbitrator::add_chain(ObIKTokenChain *chain)
   } else if (chain->list().is_empty()) {
     // no need to add empty chain
   } else if (OB_FAIL(chains_.set_refactored(chain->min_offset(), chain))) {
+  } else if (OB_FAIL(ordered_chains_.push_back(chain))) {
+    // Keep the chain in document order for output_result()'s direct walk.
+    // process() consumes tokens in document order and only starts a new chain
+    // on conflict with the previous one, so each accepted chain here follows
+    // the last; no sort is needed and the emitted order is unchanged.
   }
   return ret;
 }
