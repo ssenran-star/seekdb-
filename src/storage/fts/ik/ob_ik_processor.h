@@ -95,6 +95,10 @@ private:
 
   uint32_t handle_size_;
   bool is_smart_;
+  // Cached once from the document collation.  When true, ASCII bytes and
+  // 3-byte CJK sequences can be measured directly instead of dispatching
+  // through cset->well_formed_len() on every character.
+  bool is_utf8mb4_;
 
   // Decode cache, one slot per byte position of the document.  A zero length
   // means "not decoded yet"; the type is only meaningful when the length is set.

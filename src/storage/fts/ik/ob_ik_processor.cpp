@@ -31,6 +31,13 @@ namespace oceanbase
 {
 namespace storage
 {
+// UTF-8 continuation byte (10xxxxxx).  Mirrors IS_CONTINUATION_BYTE from
+// ob_ctype_utf8.cc without depending on that file-local macro.
+static OB_INLINE bool is_utf8_continuation_byte(const char c)
+{
+  return 0x02 == (static_cast<uint8_t>(c) >> 6);
+}
+
 int ObIIKProcessor::process(TokenizeContext &ctx)
 {
   int ret = OB_SUCCESS;
@@ -52,8 +59,9 @@ TokenizeContext::TokenizeContext(ObCollationType coll_type,
                                  int64_t fulltext_len,
                                  bool is_smart)
     : coll_type_(coll_type), fulltext_(fulltext), fulltext_len_(fulltext_len), cursor_(0),
-      next_char_len_(0), handle_size_(0), is_smart_(is_smart), allocator_(allocator),
-      char_lens_(nullptr), char_types_(nullptr), token_list_(allocator),
+      next_char_len_(0), handle_size_(0), is_smart_(is_smart),
+      is_utf8mb4_(CHARSET_UTF8MB4 == ObCharset::charset_type_by_coll(coll_type)),
+      allocator_(allocator), char_lens_(nullptr), char_types_(nullptr), token_list_(allocator),
       result_list_(allocator)
 {
 }
@@ -121,18 +129,44 @@ int TokenizeContext::current_char_type(ObFTCharUtil::CharType &type)
 int TokenizeContext::prepare_next_char()
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(ObCharset::first_valid_char(coll_type_,
-                                          fulltext_ + cursor_,
-                                          fulltext_len_ - cursor_,
-                                          next_char_len_))) {
-  } else if (OB_FAIL(ObFTCharUtil::classify_first_char(coll_type_,
-                                                       fulltext_ + cursor_,
-                                                       next_char_len_,
-                                                       next_char_type_))) {
-  } else if (OB_LIKELY(nullptr != char_lens_) && cursor_ < fulltext_len_) {
-    // remember the answer for the arbiter's second pass
-    char_lens_[cursor_] = static_cast<uint8_t>(next_char_len_);
-    char_types_[cursor_] = static_cast<int8_t>(next_char_type_);
+  const int64_t avail = fulltext_len_ - cursor_;
+
+  if (is_utf8mb4_) {
+    // UTF8MB4 is the dominant collation for the IK tokenizer.  Measure the two
+    // overwhelmingly common shapes directly instead of dispatching through the
+    // indirect cset->well_formed_len() call once per character:
+    //   * ASCII byte          (< 0x80)              -> 1 byte
+    //   * 3-byte CJK lead      (0xE1..0xEF + 2 cont) -> 3 bytes
+    // Both are proven byte-for-byte equivalent to ObCharset::first_valid_char
+    // everywhere they fire (see tmp/ik_fast_charlen_model.c, exhaustive sweep).
+    // Everything else falls back to the exact original decoder.  avail <= 0 is
+    // routed to the fallback so it keeps first_valid_char's safe len=0 result.
+    const uint8_t lead = avail > 0 ? static_cast<uint8_t>(fulltext_[cursor_]) : 0;
+    if (avail > 0 && lead < 0x80) {
+      next_char_len_ = 1;
+    } else if (lead >= 0xE1 && lead <= 0xEF && avail >= 3
+               && is_utf8_continuation_byte(fulltext_[cursor_ + 1])
+               && is_utf8_continuation_byte(fulltext_[cursor_ + 2])) {
+      next_char_len_ = 3;
+    } else {
+      ret = ObCharset::first_valid_char(coll_type_, fulltext_ + cursor_, avail, next_char_len_);
+    }
+  } else {
+    ret = ObCharset::first_valid_char(coll_type_, fulltext_ + cursor_, avail, next_char_len_);
+  }
+
+  // Length determination above is the only part that changes.  Classification
+  // and the per-byte decode cache are kept exactly as before so the arbiter's
+  // second pass still observes identical (char_len, type) at every position.
+  if (OB_SUCC(ret)) {
+    if (OB_FAIL(ObFTCharUtil::classify_first_char(coll_type_,
+                                                  fulltext_ + cursor_,
+                                                  next_char_len_,
+                                                  next_char_type_))) {
+    } else if (OB_LIKELY(nullptr != char_lens_) && cursor_ < fulltext_len_) {
+      char_lens_[cursor_] = static_cast<uint8_t>(next_char_len_);
+      char_types_[cursor_] = static_cast<int8_t>(next_char_type_);
+    }
   }
   return ret;
 }
