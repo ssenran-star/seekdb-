@@ -31,6 +31,13 @@ namespace oceanbase
 {
 namespace storage
 {
+// UTF-8 continuation byte (10xxxxxx).  Mirrors IS_CONTINUATION_BYTE from
+// ob_ctype_utf8.cc without depending on that file-local macro.
+static OB_INLINE bool is_utf8_continuation_byte(const char c)
+{
+  return 0x02 == (static_cast<uint8_t>(c) >> 6);
+}
+
 int ObIIKProcessor::process(TokenizeContext &ctx)
 {
   int ret = OB_SUCCESS;
@@ -52,8 +59,9 @@ TokenizeContext::TokenizeContext(ObCollationType coll_type,
                                  int64_t fulltext_len,
                                  bool is_smart)
     : coll_type_(coll_type), fulltext_(fulltext), fulltext_len_(fulltext_len), cursor_(0),
-      next_char_len_(0), handle_size_(0), is_smart_(is_smart), allocator_(allocator),
-      token_list_(allocator), result_list_(allocator)
+      next_char_len_(0), handle_size_(0), is_smart_(is_smart),
+      is_utf8mb4_(ObCharset::charset_type_by_coll(coll_type) == CHARSET_UTF8MB4),
+      allocator_(allocator), token_list_(allocator), result_list_(allocator)
 {
 }
 
@@ -102,14 +110,36 @@ int TokenizeContext::current_char_type(ObFTCharUtil::CharType &type)
 int TokenizeContext::prepare_next_char()
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(ObCharset::first_valid_char(coll_type_,
-                                          fulltext_ + cursor_,
-                                          fulltext_len_ - cursor_,
-                                          next_char_len_))) {
-  } else if (OB_FAIL(ObFTCharUtil::classify_first_char(coll_type_,
-                                                       fulltext_ + cursor_,
-                                                       next_char_len_,
-                                                       next_char_type_))) {
+  const int64_t avail = fulltext_len_ - cursor_;
+  bool got_len = false;
+  // For UTF8MB4 (gated once in the constructor) the first-character byte length
+  // is directly known for the two dominant cases, so skip the indirect
+  // cs->cset->well_formed_len() call ObCharset::first_valid_char() makes on every
+  // character.  Verified byte-identical to first_valid_char() for all 256 lead
+  // bytes, all continuation patterns and every buffer boundary by
+  // tmp/ik_fast_charlen_model.c.  Everything else falls back to the original.
+  if (is_utf8mb4_ && avail > 0) {
+    const uint8_t c = static_cast<uint8_t>(fulltext_[cursor_]);
+    if (c < 0x80) {
+      next_char_len_ = 1;  // ASCII is always a valid single byte
+      got_len = true;
+    } else if (c >= 0xE1 && c <= 0xEF && avail >= 3
+               && is_utf8_continuation_byte(fulltext_[cursor_ + 1])
+               && is_utf8_continuation_byte(fulltext_[cursor_ + 2])) {
+      // 0xE1..0xEF satisfies the "c >= 0xe1" overlong guard in
+      // ob_valid_mbcharlen_utf8mb3(); two valid continuation bytes give length 3.
+      next_char_len_ = 3;
+      got_len = true;
+    }
+  }
+  if (!got_len) {
+    if (OB_FAIL(ObCharset::first_valid_char(coll_type_, fulltext_ + cursor_,
+                                            avail, next_char_len_))) {
+      return ret;
+    }
+  }
+  if (OB_FAIL(ObFTCharUtil::classify_first_char(coll_type_, fulltext_ + cursor_,
+                                                next_char_len_, next_char_type_))) {
   }
   return ret;
 }

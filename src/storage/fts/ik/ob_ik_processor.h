@@ -95,6 +95,9 @@ private:
 
   uint32_t handle_size_;
   bool is_smart_;
+  // Cached once so prepare_next_char() can take the direct UTF-8 length path
+  // without re-deriving the charset on every character.
+  bool is_utf8mb4_;
 
   ObIAllocator &allocator_;
 
