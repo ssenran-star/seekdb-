@@ -220,7 +220,8 @@ int ObTokenStopWordNormalizer::filter_special_marks(const ObDatum &check_token, 
 
 ObBasicEnglishNormalizer::ObBasicEnglishNormalizer()
   : ObTokenNormalizer(),
-    norm_allocator_("TxtTokGrpFilter", OB_MALLOC_NORMAL_BLOCK_SIZE)
+    norm_allocator_("TxtTokGrpFilter", OB_MALLOC_NORMAL_BLOCK_SIZE),
+    result_allocator_(nullptr)
 {
 }
 
@@ -295,7 +296,13 @@ int ObBasicEnglishNormalizer::get_next(ObDatum &next_token, int64_t &token_freq)
     } else {
       ObString norm_alnum_token(norm_token_len, norm_token_ptr);
       ObString norm_lower_token;
-      if (OB_FAIL(ObCharset::tolower(cs_, norm_alnum_token, norm_lower_token, norm_allocator_))) {
+      // When a long-lived result allocator was supplied (the FTS build path),
+      // emit the lower-cased token there so it outlives free_token_iter, which
+      // destroys this stream.  Otherwise keep the original per-token allocator
+      // whose storage is reused on the next get_next() call.
+      ObIAllocator &out_alloc = (nullptr != result_allocator_)
+                                    ? *result_allocator_ : norm_allocator_;
+      if (OB_FAIL(ObCharset::tolower(cs_, norm_alnum_token, norm_lower_token, out_alloc))) {
       } else {
         next_token.set_string(norm_lower_token);
       }

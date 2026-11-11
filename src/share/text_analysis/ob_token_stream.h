@@ -130,8 +130,13 @@ public:
   virtual void reset() override;
   virtual void reuse() override;
   virtual int get_next(ObDatum &next_token, int64_t &token_freq) override;
+  // Emit lower-cased tokens into a caller-provided, long-lived allocator so
+  // the returned pointers survive free_token_iter (the FTS word map keeps
+  // shallow pointers into them).  When unset, fall back to norm_allocator_.
+  void set_result_allocator(ObIAllocator &allocator) { result_allocator_ = &allocator; }
 private:
   ObArenaAllocator norm_allocator_;
+  ObIAllocator *result_allocator_;
 };
 
 // group (deduplicate) and count

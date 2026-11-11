@@ -35,7 +35,6 @@ int ObBEngFTParser::get_next_token(
   int ret = OB_SUCCESS;
   ObDatum token;
   int64_t token_freq = 0;
-  char *buf = nullptr;
   word = nullptr;
   word_len = 0;
   char_len = 0;
@@ -49,11 +48,14 @@ int ObBEngFTParser::get_next_token(
     }
   } else if (OB_ISNULL(token.ptr_) || OB_UNLIKELY(0 >= token.len_ || 0 >= token_freq)) {
     ret = OB_INVALID_ARGUMENT;
-  } else if (OB_ISNULL(buf = static_cast<char *>(allocator_.alloc(token.len_)))) {
-    ret = OB_ALLOCATE_MEMORY_FAILED;
   } else {
-    MEMCPY(buf, token.ptr_, token.len_);
-    word = buf;
+    // The basic-English normalizer was given this parser's long-lived
+    // allocator_ in init() (set_result_allocator), so it emits the trimmed,
+    // lower-cased token directly into the arena the word map already points
+    // into.  It survives free_token_iter and row emission, making the old
+    // per-token alloc + MEMCPY here redundant.  Byte content and freq are
+    // unchanged (same ObCharset::tolower call, different destination arena).
+    word = token.ptr_;
     word_len = token.len_;
     char_len = token.len_;
     word_freq = token_freq;
@@ -76,7 +78,11 @@ int ObBEngFTParser::init(ObFTParserParam *param)
     analysis_ctx_.cs_ = param->cs_;
     analysis_ctx_.filter_stopword_ = false;
     analysis_ctx_.need_grouping_ = false;
-    if (OB_FAIL(english_analyzer_.init(analysis_ctx_, *param->allocator_))) {
+    // Route the English normalizer's lower-cased tokens into the same
+    // long-lived arena this parser uses, so get_next_token can return them
+    // without an extra alloc + copy (see ObBasicEnglishNormalizer::
+    // set_result_allocator and ObITextAnalyzer::add_normalizer).
+    if (OB_FAIL(english_analyzer_.init(analysis_ctx_, allocator_))) {
     } else if (OB_FAIL(segment(doc_, token_stream_))) {
     } else if (OB_ISNULL(token_stream_)) {
       ret = OB_ERR_UNEXPECTED;

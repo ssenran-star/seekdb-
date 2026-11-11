@@ -114,7 +114,15 @@ int ObITextAnalyzer::add_normalizer(
     if (OB_SUCC(ret)) {
       ObTokenNormalizer *normalizer = static_cast<ObTokenNormalizer *>(token_stream);
       if (OB_FAIL(normalizer->init(ctx.cs_, *get_tail_token_stream()))) {
-      } else if (OB_FAIL(analyze_pipeline_.push_back(normalizer))) {
+      } else {
+        if (ObTokenNormalizer::ENG_BASIC_NORM == type) {
+          // The basic-English normalizer's tokens are retained as shallow
+          // pointers in the FTS word map after the iterator is freed, so its
+          // output must live in the same long-lived arena the pipeline uses
+          // (allocator_ is set by init() before inner_init() calls here).
+          static_cast<ObBasicEnglishNormalizer *>(normalizer)->set_result_allocator(*allocator_);
+        }
+        ret = analyze_pipeline_.push_back(normalizer);
       }
     }
   }
