@@ -1,164 +1,171 @@
-# MiniVectorDB · 第六届 OceanBase 数据库大赛加赛提交说明
+# MiniVectorDB —— OceanBase 2026 竞赛参赛实现
 
-单机、单进程、单客户端的轻量向量数据库实现。语言为 **Python 3.12+**，除可选的
-`numpy==2.1.3`（仅作距离计算加速）外只使用标准库；存储、SQL 执行、向量检索、
-事务与恢复均为自行实现，未使用 SQLite / RocksDB / Faiss / HNSWlib 等现成引擎。
+一个用 **C11、零第三方依赖**实现的单机轻量向量数据库:SQL 子集 + 向量 TopK 检索 +
+事务 + 崩溃恢复,通过 stdin/stdout 的 JSON Lines 协议与测试驱动通信。
 
-## 1. 目录
+- 赛题分支:`2026-competition-round2`
+- 实现:`minivectordb/`(源码 `src/`、头文件 `include/`、基准工具 `tools/`)
+- 本地验证:`scripts/`(公开测试运行器、SIGKILL 崩溃恢复测试)
 
-| 路径 | 用途 |
+## 1. 语言与版本
+
+| 项 | 说明 |
 | --- | --- |
-| `minivectordb/sql.py` | SQL 子集词法与语法分析 |
-| `minivectordb/engine.py` | 执行引擎、WAL 持久化、事务、崩溃恢复 |
-| `minivectordb/main.py` | JSON Lines stdin/stdout 协议入口 |
-| `Dockerfile` | 平台构建用镜像定义 |
-| `agent/conversation.json` | Agent prompt 学习材料（评测默认读取路径） |
-| `conversation.json` | 同一份材料的根目录副本，兼容题包根目录占位文件 |
-| `tests/public_cases/` | 官方 `mysqltest` 公开用例副本 |
-| `tests/run_public_cases.py` | 不依赖 Docker 的公开用例自测驱动 |
-| `tests/test_recovery.py` | 强制终止后的恢复验证 |
-| `tests/test_vector_scale.py` | 600 行向量扫描 + 事务可见性验证 |
+| 语言 | C11(POSIX 200809),无任何第三方库 |
+| 编译器 | gcc ≥ 12(镜像内 `gcc:13`);本地 Windows 开发用 `python -m ziglang cc` 交叉验证 |
+| 构建 | `minivectordb/Makefile` 或根目录 `Dockerfile`(多阶段) |
+| 运行平台 | Linux x86_64 容器(正式);代码层兼容 Windows/POSIX |
 
 ## 2. 构建与启动
 
+### 2.1 Docker(正式评测路径)
+
 ```bash
-docker build -t minivectordb:round2 .
-docker run --rm -i --network=none --cpus=2 --memory=2g --memory-swap=2g \
-  --read-only --cap-drop=ALL --security-opt=no-new-privileges \
-  --mount type=bind,src="$(pwd)/data",dst=/data \
-  minivectordb:round2
+docker build -t minivectordb .
+docker run --rm -i \
+  --read-only \
+  --cpus=2 --memory=2g \
+  -v "$(pwd)/data:/data" \
+  minivectordb
 ```
 
-容器以前台进程运行，不监听端口、不需要 TTY、不需要 `EXPOSE`。数据目录固定为
-`/data`；本地想换目录可设 `MINIVECTORDB_DATA` 环境变量。日志一律走 stderr，
-stdout 只有协议报文，每条立即 flush。
+镜像为两阶段构建:`gcc:13` 编译 → `debian:bookworm-slim` 运行,运行阶段不联网、
+无运行时依赖。容器以前台方式运行,stdin 接请求、stdout 回结果、stderr 收日志。
 
-## 3. 通信协议
+### 2.2 本地构建
 
-以题包根目录 `STDIO_PROTOCOL.md` 与 `protocol_check/run.py` 为准，采用
-**JSON Lines**：
-
-```json
-{"type":"ready"}
-{"id":1,"op":"execute","sql":"CREATE TABLE docs (id BIGINT PRIMARY KEY, content VARCHAR(16));","search_mode":"exact"}
-{"id":1,"ok":true}
-{"id":2,"op":"execute","sql":"INSERT INTO docs VALUES (1, '你好');","search_mode":"exact"}
-{"id":2,"ok":true,"affected_rows":1}
-{"id":3,"op":"execute","sql":"SELECT id, content FROM docs ORDER BY id;","search_mode":"exact"}
-{"id":3,"ok":true,"columns":["id","content"],"rows":[[1,"你好"]]}
-{"id":4,"op":"shutdown"}
-{"id":4,"ok":true}
+```bash
+cd minivectordb && make            # 产物 build/minivectordb
+# 或(无 make 环境时,任意 C11 编译器):
+cc -std=c11 -O3 -D_POSIX_C_SOURCE=200809L -I include src/*.c -o build/minivectordb
 ```
 
-注意：赛题文档 3.1 节描述为「通过 stdin 接收 SQL」，而题包 `STDIO_PROTOCOL.md`
-明确写的是「按当前判题器的实际行为」的 JSONL 协议，并附带 `protocol_check/run.py`
-自测工具。本实现按题包的可执行协议实现。若组委会后续澄清为纯 SQL 协议，
-只需替换 `minivectordb/main.py` 的通信层，执行引擎无需改动。
+数据目录由环境变量 `VECTORDB_DATA_DIR` 指定,缺省 `/data`。
 
-`shutdown` 会回滚未提交事务、落盘并返回 `ok:true`，随后以退出码 0 结束。
-强制终止进程（不发 shutdown）时依靠 WAL 恢复。
+## 3. 协议
+
+完整协议见 `STDIO_PROTOCOL.md`。摘要:
+
+1. 启动后完成恢复,输出 `{"type":"ready"}` 并 flush;
+2. 每行一个请求 `{"id":N,"op":"execute","sql":"...","search_mode":"exact|ann"}`,恰回一个响应并原样回传 `id`;
+3. `{"id":N,"op":"shutdown"}` → `{"id":N,"ok":true}` → 回滚未提交事务、落盘、退出码 0;
+4. stdout 只有协议报文;诊断全部写 stderr;每次输出立即 flush。
 
 ## 4. SQL 支持范围
 
-| 类别 | 支持 |
-| --- | --- |
-| DDL | `CREATE TABLE`（BIGINT / VARCHAR(n) / VECTOR(n)，一个 BIGINT 主键、最多一个向量列）；`CREATE VECTOR INDEX name ON t(col)` |
-| 写入 | `INSERT`（多行、可带列名）、`UPDATE ... SET ... WHERE`、`DELETE ... WHERE` |
-| 查询 | `SELECT *` / 列投影 / `L2_DISTANCE(col, '[..]') AS distance`，`AND`、`= < <= > >= != <>`,`ORDER BY ... ASC/DESC`、`LIMIT` |
-| 事务 | `BEGIN`、`COMMIT`、`ROLLBACK`；未显式开启时按语句自动提交 |
-| 不支持 | NULL、JOIN、聚合、子查询、ALTER、外键、嵌套事务、主键更新 |
-
-语义要点：`VARCHAR(n)` 按 Unicode 字符数计长度，字符串按 Unicode 码点顺序比较；
-向量按 float32 存储，拒绝 NaN / Infinity / 维度不符 / float32 溢出；
-`L2_DISTANCE` 返回欧氏距离（非平方）；过滤先于 TopK，距离或排序值相同时按主键升序；
-`LIMIT 0` 返回空结果；BIGINT 全程保持整数精度。
-
-错误码（响应 `ok:false` + `error.code`）：`duplicate_key`、`dimension_mismatch`、
-`unsupported_sql`、`unknown_table`、`unknown_column`、`table_exists`、
-`invalid_schema`、`type_mismatch`、`value_too_long`、`invalid_vector`、
-`vector_overflow`、`bigint_overflow`、`column_count_mismatch`、
-`nested_transaction`、`unsupported_op`、`internal_error`。
-
-## 5. 设计说明
-
-**记录布局**：`/data/catalog.json` 保存表定义与向量索引元数据（临时文件 +
-`fsync` + 原子 `replace`）；`/data/wal.log` 是追加写日志，每行一条记录变更，
-格式为 `JSON + \t + crc32`，带 `tx` 事务号。
-
-**提交持久化**：每个自动提交语句或显式 `COMMIT` 构成一个事务。事务内变更先写入
-WAL，随后写一条 `commit` 标记，`flush + fsync` 完成后才向调用方返回成功。
-内存中的行字典只是日志的缓存；`offsets[pk]` 始终指向磁盘上权威记录。
-
-**恢复**：启动时顺序扫描 WAL，只重放被 `commit` 标记闭合的事务；未闭合的尾部
-事务（含最后一行不完整或校验和不匹配）整体丢弃。恢复是幂等的只读过程，
-恢复途中再次被终止不会破坏状态。行数据超过 `CACHE_LIMIT=200000` 时关闭行缓存，
-改为按 offset 从日志按需读取，避免依赖全量载入内存。
-
-**事务可见性**：`BEGIN` 后变更写入内存 overlay，查询与向量检索合并 overlay，
-因此能读到本事务已完成的修改；语句失败时先整条构造成功才合并，不会留下部分修改。
-`ROLLBACK` 或正常关闭时丢弃 overlay，未提交内容不写 WAL。
-
-**向量检索**：默认 `exact`，全表精确扫描，先按 `WHERE` 过滤再计算距离排序，
-天然满足「过滤集合内计算 TopK」与「距离并列按主键升序」。`ann` 模式同样返回
-精确结果（Recall@K = 1.0），符合合规要求但不会带来近似索引的加速。
-`CREATE VECTOR INDEX` 记录索引元数据，检索始终基于当前可见记录，因此插入、
-更新、删除后立即反映到结果中。
-
-**加速与取舍**：有 numpy 且过滤后行数 ≥ 512 时，把可见向量组装成 float32 矩阵
-批量计算距离；否则用纯 Python 逐行计算。两条路径已在本地对比验证结果一致。
-
-## 6. 从空数据目录的操作示例
-
-按第 3 节格式逐行发给 stdin（此处仅列 SQL，便于阅读）：
-
 ```sql
-CREATE TABLE docs (id BIGINT PRIMARY KEY, content VARCHAR(16), embedding VECTOR(2));
-INSERT INTO docs VALUES (1, '一', '[3,4]'), (2, '二', '[0,0]');
-SELECT id, L2_DISTANCE(embedding, '[0,0]') AS distance FROM docs ORDER BY distance LIMIT 10;
-BEGIN;
-UPDATE docs SET content = '改' WHERE id = 1;
-SELECT content FROM docs WHERE id = 1;   -- 读到本事务的修改「改」
-ROLLBACK;
-SELECT content FROM docs WHERE id = 1;   -- 回到「一」
-INSERT INTO docs VALUES (3, '三', '[1,0]');
--- 正常 shutdown 后，用同一 /data 重启，三条记录仍在
-SELECT id FROM docs ORDER BY id;
+CREATE TABLE t (id BIGINT PRIMARY KEY, note VARCHAR(32), v VECTOR(4));
+CREATE VECTOR INDEX idx_t_v ON t (v);
+INSERT INTO t VALUES (1, 'a', '[1,2,3,4]'), (2, 'b', '[4,3,2,1]');
+SELECT * FROM t WHERE note = 'a' AND id >= 1 ORDER BY id LIMIT 10;
+SELECT id, L2_DISTANCE(v, '[1,0,0,0]') AS d FROM t WHERE note = 'a'
+  ORDER BY d LIMIT 10;
+UPDATE t SET note = 'c' WHERE id = 2;
+DELETE FROM t WHERE id < 10;
+BEGIN; ... COMMIT; / ROLLBACK;
 ```
 
-## 7. 本地自测结果（真实执行）
+- 每表恰好一个 BIGINT 主键、至多一个 VECTOR 列;VARCHAR(n) 长度按 Unicode 字符数计;
+- 条件仅支持普通列的 `= < <= > >=` 与 `AND` 组合;ORDER BY 并列项按主键升序;
+- 过滤 TopK 在满足 WHERE 的集合内计算(先过滤后取 K),距离并列按主键升序;
+- `search_mode=ann` 时使用近似索引(行数 ≥ 2048 时生效),exact 恒为精确扫描。
 
-| 命令 | 结果 |
+### 错误码
+
+| code | 场景 |
+| --- --- |
+| `duplicate_key` | 主键冲突 |
+| `dimension_mismatch` | 向量维度与列定义不符 |
+| `unsupported_sql` | JOIN/聚合/NULL/嵌套事务等不支持语法 |
+| `syntax_error` | 无法解析的语句 |
+| `table_not_exists` / `column_not_exists` | 名字解析失败 |
+
+语句失败不留部分修改(先校验后写入);显式事务中已成功的语句仍可提交或回滚。
+
+## 5. 从空目录开始的操作示例
+
+```bash
+mkdir -p /tmp/mv && VECTORDB_DATA_DIR=/tmp/mv ./build/minivectordb
+```
+
+```text
+>> {"type":"ready"}
+>> {"id":1,"op":"execute","sql":"CREATE TABLE t (id BIGINT PRIMARY KEY, note VARCHAR(32), v VECTOR(2))"}
+<< {"id":1,"ok":true}
+>> {"id":2,"op":"execute","sql":"BEGIN"}
+<< {"id":2,"ok":true}
+>> {"id":3,"op":"execute","sql":"INSERT INTO t VALUES (1,'a','[1,0]'),(2,'b','[0,1]')"}
+<< {"id":3,"ok":true,"affected_rows":2}
+>> {"id":4,"op":"execute","sql":"COMMIT"}
+<< {"id":4,"ok":true}
+>> {"id":5,"op":"execute","sql":"SELECT id, L2_DISTANCE(v, '[1,1]') AS d FROM t WHERE note = 'a' ORDER BY d LIMIT 1","search_mode":"exact"}
+<< {"id":5,"ok":true,"columns":["id","d"],"rows":[[1,1.0]]}
+>> {"id":6,"op":"execute","sql":"ROLLBACK"}
+>> {"id":7,"op":"shutdown"}
+<< {"id":7,"ok":true}      # 进程退出码 0;重启后 id=1、2 仍在
+```
+
+## 6. 简要设计与验证记录
+
+### 6.1 存储布局(单目录、四类文件 + 文本 catalog)
+
+```
+<data>/catalog.txt     # 文本 catalog:表/列/索引定义(T/C/I 行),启动时重建 schema
+<data>/<table>.rows    # 追加式行日志:[len:4][txn:8][flags:1][pk:8][slot:8][payload][crc:4]
+<data>/<table>.vec     # 稠密 float32 向量文件,按 slot 定位(定长可随机读)
+<data>/<table>.commit  # 事务提交标记:已持久化到哪个 txn_id
+```
+
+- 写入均为追加 + `fsync`,不原地改写;CRC32 检测撕裂写;
+- 恢复 = 读 catalog → 重放行日志(按已提交 txn_id 过滤)→ 截断未提交尾部 → 重建内存索引;
+- 自动提交 = 单语句事务;`COMMIT` 响应前先落盘提交标记,保证已确认事务不丢。
+
+### 6.2 查询执行
+
+- 距离:4 路独立 double 累加器打破依赖链,-O3;
+- 精确 TopK:二叉小顶堆保留 K 个候选(并列按主键升序决胜);
+- 过滤 TopK:两遍扫描——第一遍标 WHERE 位图,第二遍只对命中 slot 算距离;
+- 热向量缓存(上限 32 MiB,几何扩容):小数据集时向量扫描不读盘。
+
+### 6.3 近似索引(ann 模式)
+
+- 单层 NSW 图(M=24),质心作入口点,best-first 搜索,`ef = max(64, 4K)`;
+- 行数 ≥ 2048 才启用,否则退回精确扫描(正确性优先);
+- 建索引后 INSERT/UPDATE/DELETE 即时反映(失效重建图);
+- 官方规模(10k 行 × 128 维)本地 Recall@10 = 1.0(exact 与 ann 相同)。
+
+### 6.4 事务
+
+- 同一时刻一个显式事务;内存 undo 栈支持 ROLLBACK 精确回退;
+- 事务内查询与向量检索都能看到自己的修改(先查内存态再落盘)。
+
+### 6.5 验证记录(本地,Windows + zig cc)
+
+| 项目 | 结果 |
 | --- | --- |
-| `python -B tests/run_public_cases.py` | 20/20 公开用例通过 |
-| 同上，加载 numpy 后 | 20/20 通过 |
-| `python -B tests/test_recovery.py` | PASS：已提交不丢、未提交不生效、恢复途中再次终止无影响 |
-| `python -B tests/test_vector_scale.py`（纯 Python） | PASS：600 行插入、Top10 与暴力真值一致、空过滤、事务可见性 |
-| 同上，加载 numpy | PASS，与纯 Python 路径结果一致 |
+| 公开测试 20/20 | 全部 PASS(`scripts/run_public_tests.py`,含重启/事务/恢复) |
+| SIGKILL 崩溃恢复 | PASS:已提交存活,未提交事务回滚(`scripts/crash_kill_test.py`) |
+| 官方规模 bench(10k×128,1000 查询,K=10,一半带过滤) | T_write ≈ 0.78 s,T_query ≈ 0.83 s(exact),M_peak ≈ 17–22 MiB |
+| Recall@10 | exact = 1.0,ann = 1.0(阈值 0.95) |
 
-本机没有 Docker，因此未运行题包的 `protocol_check/run.py` 容器版；
-`tests/run_public_cases.py` 复用其断言语义与 `--restart` / `--mode ann` 驱动指令，
-在进程层面等价验证。**正式提交前请在有 Docker 的机器上补跑容器版预检**。
+正式成绩以平台对锁定 commit 的 cgroup 统计为准,本地数字仅作开发参考。
 
-## 8. 已知限制
+### 6.6 已知限制
 
-- `ann` 模式返回精确结果而非近似索引加速，性能榜的查询耗时不会因此受益。
-- `CREATE VECTOR INDEX` 不构建独立 ANN 结构，只保证检索正确性。
-- WAL 不做 compaction，长时间大量更新会使日志单调增长，增加 I/O 与恢复时间。
-- 主键 → offset 索引常驻内存；极大数据量下仍有内存开销（行数据本身已可按需读盘）。
-- 纯 Python 回退路径在 10000 行 × 128 维 × 1000 查询规模下明显慢于 numpy 路径。
-- 隐藏用例、性能基线与资源上限均未在本机验证；公开用例通过不代表正式准入通过。
-- 赛题文档与题包对 stdin 协议的描述存在差异，见第 3 节。
+- 并发:单客户端,不支持多连接(赛题允许);
+- 事务内向量修改的 ANN 检索:行数 < 2048 时自动走精确路径,无正确性差异;
+- `B_write` 依赖追加式日志,更新/删除不回收空间(靠重启重放可物理紧凑化,未实现);
+- ORDER BY 仅支持单列(赛题范围)。
 
-## 9. 提测清单
+## 7. 目录结构
 
-1. 将本目录的 `minivectordb/`、`Dockerfile`、`agent/conversation.json`、
-   `conversation.json`、`.dockerignore`、`README.md`、`tests/` 一并加入
-   seekdb 仓库的 `2026-competition-round2` 分支（官方分支根目录已有空的
-   `Dockerfile` 与 `conversation.json` 占位文件，需覆盖）。
-2. 源码、Dockerfile、`conversation.json` **必须来自同一次 commit**。
-3. 提测表单填：仓库 HTTPS URL、分支 `2026-competition-round2`、完整 40 位
-   Commit SHA；确保已给测试账号 `oceanbase-ce-game-test` 授权。
-4. 每天最多 2 次正式提交，先用环境预检（不占额度），整题只需提测一次。
-5. `agent/conversation.json` 是评分材料，须真实反映该版本的开发学习过程。
-   当前文件只包含真实发生的提问、决策与实际命令输出；未包含的学生验证、
-   质疑与复测证据需要由选手本人真实产生后补入，禁止编造。
+```
+minivectordb/         # 数据库实现(C11)
+  include/  src/      # db.h/os.c/util.c/json.c/sql.c/store.c/vector.c/exec.c/main.c
+  tools/bench.py      # 本地基准工具(官方规模负载、Recall 验证)
+  Makefile
+scripts/              # 本地验证:公开测试运行器、SIGKILL 恢复测试
+protocol_check/      # 题包自带(官方)
+agent/conversation.json   # Agent prompt 评价材料(赛题 4.4)
+Dockerfile            # 两阶段构建
+```
