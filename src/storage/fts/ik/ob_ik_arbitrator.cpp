@@ -64,8 +64,15 @@ int ObIKArbitrator::process(TokenizeContext &ctx)
                                     judge_result))) {
         } else if (OB_FAIL(add_chain(judge_result))) {
         } else {
-          // add best chain and delete origin chain
-          OB_DELETEx(ObIKTokenChain, &alloc_, chain_need_arbitrate);
+          // add best chain; the origin chain is overwritten by a fresh OB_NEWx
+          // in the "start a new chain" block just below.  alloc_ is an
+          // ObArenaAllocator whose free() is a no-op, so the old
+          // OB_DELETEx(chain_need_arbitrate) only ran ~ObIKTokenChain ->
+          // ObList::clear(), an O(n) walk of token nodes calling a no-op free
+          // that reclaimed nothing (the arena reclaims it on reset() either
+          // way).  optimize() never stored the origin pointer in
+          // ordered_chains_, so dropping it here is byte-identical and skips
+          // that clear loop.  On failure the tail cleanup still frees it once.
         }
 
         // start a new chain
