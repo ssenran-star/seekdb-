@@ -253,7 +253,14 @@ int ObIKArbitrator::optimize(TokenizeContext &ctx,
       if (OB_FAIL(remove_conflict(*iter, option))) {
       } else if (OB_FAIL(try_add_next_words(chain, iter, option, false, conflict_stack))) {
       } else if (option->better_than(*best)) {
-        OB_DELETEx(ObIKTokenChain, &alloc_, best);
+        // alloc_ is an ObArenaAllocator whose free() is a no-op, so the old
+        // OB_DELETEx(best) did not reclaim the chain or its token nodes: it only
+        // ran ~ObIKTokenChain -> ObList::clear(), walking every token node and
+        // calling that no-op free.  The abandoned storage is reclaimed by the
+        // arena on reset() either way, so dropping the pointer here is
+        // byte-for-byte equivalent while skipping that O(n) clear loop on every
+        // improving DFS step.  On OB_NEWx failure `best` still points at the
+        // previous chain, which the failure path below frees exactly once.
         if (OB_ISNULL(best = OB_NEWx(ObIKTokenChain, &alloc_, alloc_))) {
           ret = OB_ALLOCATE_MEMORY_FAILED;
           LOG_WARN("Alloc memory failed");

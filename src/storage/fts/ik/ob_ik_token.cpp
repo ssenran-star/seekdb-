@@ -157,14 +157,34 @@ int ObIKTokenChain::copy(ObIKTokenChain *other)
   if (OB_ISNULL(other)) {
     ret = OB_INVALID_ARGUMENT;
   } else {
+    // copy() is only ever called on `option` in ObIKArbitrator::optimize(), and
+    // `option` is built exclusively by add_token_if_no_conflict().  Its token
+    // list is therefore already strictly ordered by offset and non-overlapping.
+    // Re-feeding every token through add_token_if_no_conflict() (what this used
+    // to do) re-ran conflict detection and the sorted-insert comparison for
+    // each token even though neither can fire on such a source.  A direct
+    // in-order append reproduces the identical list and the identical derived
+    // metadata:
+    //   min_offset_ = first token's offset
+    //   max_offset_ = last token's offset + length
+    //   payload_    = sum of token lengths
+    // (For an empty source the metadata is preserved from `other`, matching the
+    // old behaviour where the re-insert loop never executed.)
     min_offset_ = other->min_offset_;
     max_offset_ = other->max_offset_;
     payload_ = other->payload_;
     ObFTSortList::CellIter iter = other->list().tokens().begin();
 
     for (; OB_SUCC(ret) && iter != other->list().tokens().end(); ++iter) {
-      bool added = false;
-      if (OB_FAIL(add_token_if_no_conflict(*iter, added))) {
+      const bool was_empty = list_.tokens().empty();
+      if (OB_FAIL(list_.tokens().push_back(*iter))) {
+      } else if (was_empty) {
+        min_offset_ = iter->offset_;
+        max_offset_ = iter->offset_ + iter->length_;
+        payload_ = iter->length_;
+      } else {
+        max_offset_ = iter->offset_ + iter->length_;
+        payload_ += iter->length_;
       }
     }
   }
