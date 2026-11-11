@@ -267,7 +267,10 @@ ObAddWord::ObAddWord(
     stopword_cnt_(0),
     min_token_size_(property.min_token_size_),
     max_token_size_(property.max_token_size_),
-    flag_(flag)
+    flag_(flag),
+    hash_funcs_(ObFTWord::resolve_hash_funcs(meta)),
+    cmp_func_(ObFTWord::resolve_cmp_func(meta)),
+    stop_word_checker_(ObFTParseData::instance().stop_word_checker())
 {
 }
 
@@ -279,7 +282,7 @@ int ObAddWord::process_word(
 {
   int ret = OB_SUCCESS;
   bool is_stopword = false;
-  ObFTWord src_word(word_len, word, word_meta_);
+  ObFTWord src_word(word_len, word, word_meta_, hash_funcs_, cmp_func_);
   ObFTWord dst_word;
   if (OB_ISNULL(word) || OB_UNLIKELY(0 >= word_len || 0 >= char_cnt || 0 >= word_freq)) {
     ret = OB_INVALID_ARGUMENT;
@@ -319,7 +322,7 @@ int ObAddWord::casedown_word(const ObFTWord &src, ObFTWord &dst)
                       dst_str,
                       allocator_))) {
       } else {
-        ObFTWord tmp(dst_str.length(), dst_str.ptr(), word_meta_);
+        ObFTWord tmp(dst_str.length(), dst_str.ptr(), word_meta_, hash_funcs_, cmp_func_);
         dst = tmp;
       }
     }
@@ -335,7 +338,7 @@ int ObAddWord::check_stopword(const ObFTWord &ft_word, bool &is_stopword)
   if (OB_UNLIKELY(ft_word.empty())) {
     ret = OB_INVALID_ARGUMENT;
   } else if (flag_.stopword()) {
-    ObStopWordChecker *stop_word_checker = ObFTParseData::instance().stop_word_checker();
+    ObStopWordChecker *stop_word_checker = stop_word_checker_;
     if (OB_ISNULL(stop_word_checker)) {
       ret = OB_ERR_UNEXPECTED;
     } else if (OB_FAIL(stop_word_checker->check_stopword(ft_word, is_stopword))) {

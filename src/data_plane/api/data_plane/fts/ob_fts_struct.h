@@ -30,8 +30,11 @@ namespace storage
 class ObFTWord final
 {
 public:
-  ObFTWord() : word_(), meta_() {}
-  ObFTWord(const int64_t length, const char *ptr, const ObObjMeta &meta) : meta_(meta)
+  ObFTWord() : word_(), meta_(), hash_funcs_(nullptr), cmp_func_(nullptr) {}
+  ObFTWord(const int64_t length, const char *ptr, const ObObjMeta &meta,
+           common::ObDatumBasicFuncs *hash_funcs = nullptr,
+           common::ObDatumCmpFuncType cmp_func = nullptr)
+    : meta_(meta), hash_funcs_(hash_funcs), cmp_func_(cmp_func)
   {
     word_.set_string(ptr, length);
   }
@@ -44,11 +47,21 @@ public:
   bool operator==(const ObFTWord &other) const;
   OB_INLINE bool operator !=(const ObFTWord &other) const { return !(other == *this); }
 
+  // Every token of one document shares the same ObObjMeta. ObAddWord resolves
+  // the collation-bound datum functions once per document and hands them to each
+  // ObFTWord, avoiding a non-inline get_basic_func()/get_datum_cmp_func() lookup
+  // on every word-map hash and every probe. A null value means "resolve per
+  // call", so all other construction sites keep their original behaviour.
+  static common::ObDatumBasicFuncs *resolve_hash_funcs(const ObObjMeta &meta);
+  static common::ObDatumCmpFuncType resolve_cmp_func(const ObObjMeta &meta);
+
   TO_STRING_KV(K_(meta), K_(word));
 
 private:
   ObDatum word_;
   ObObjMeta meta_;
+  common::ObDatumBasicFuncs *hash_funcs_;
+  common::ObDatumCmpFuncType cmp_func_;
 };
 
 // The word map is always a per-call / per-thread scratch structure (it is built

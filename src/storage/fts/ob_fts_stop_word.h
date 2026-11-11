@@ -133,6 +133,11 @@ private:
   int64_t min_token_size_;
   int64_t max_token_size_;
   ObAddWordFlag flag_;
+  // Resolved once for the whole document (all tokens share word_meta_), instead
+  // of on every hash()/word-map probe. Null means "resolve per call" fallback.
+  common::ObDatumBasicFuncs *hash_funcs_;
+  common::ObDatumCmpFuncType cmp_func_;
+  ObStopWordChecker *stop_word_checker_;
 };
 
 } // end namespace storage

@@ -25,10 +25,25 @@ namespace oceanbase
 namespace storage
 {
 
+/*static*/ common::ObDatumBasicFuncs *ObFTWord::resolve_hash_funcs(const ObObjMeta &meta)
+{
+  return ObDatumFuncs::get_basic_func(meta.get_type(), meta.get_collation_type());
+}
+
+/*static*/ common::ObDatumCmpFuncType ObFTWord::resolve_cmp_func(const ObObjMeta &meta)
+{
+  return get_datum_cmp_func(meta, meta);
+}
+
 int ObFTWord::hash(uint64_t &hash_val) const
 {
   int ret = OB_SUCCESS;
-  common::ObDatumBasicFuncs *funcs = ObDatumFuncs::get_basic_func(meta_.get_type(), meta_.get_collation_type());
+  common::ObDatumBasicFuncs *funcs = hash_funcs_;
+  if (OB_ISNULL(funcs)) {
+    // Non per-document words (e.g. the static stop-word table) keep the
+    // original per-call resolution, so their behaviour is byte-for-byte the same.
+    funcs = ObDatumFuncs::get_basic_func(meta_.get_type(), meta_.get_collation_type());
+  }
   if (OB_ISNULL(funcs)) {
     ret = OB_ERR_UNEXPECTED;
   } else if (funcs->default_hash_ == nullptr) {
@@ -59,7 +74,15 @@ bool ObFTWord::operator==(const ObFTWord &other) const
                    && 0 == MEMCMP(word_.ptr_, other.word_.ptr_, word_.len_));
     return is_equal;
   }
-  ObDatumCmpFuncType func = get_datum_cmp_func(meta_, other.meta_);
+  common::ObDatumCmpFuncType func = cmp_func_;
+  if (OB_ISNULL(func)
+      || meta_.get_type() != other.meta_.get_type()
+      || meta_.get_collation_type() != other.meta_.get_collation_type()) {
+    // Either this word was not produced by a per-document ObAddWord, or the two
+    // operands carry different collations. Fall back to the original per-call
+    // resolution so behaviour is identical in every such case.
+    func = get_datum_cmp_func(meta_, other.meta_);
+  }
   if (func == nullptr) {
     ob_abort();
   } else if (OB_FAIL(func(word_, other.word_, cmp_ret, nullptr))) {

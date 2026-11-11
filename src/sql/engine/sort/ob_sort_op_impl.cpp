@@ -1107,7 +1107,11 @@ int ObSortOpImpl::before_add_row()
   } else if (sort_force_dump_rows > 0 && rows_->count() >= sort_force_dump_rows) {
     if (OB_FAIL(do_dump())) {
     }
-  } else if (!rows_->empty()) {
+  // FTS index-build sorts are forced in memory: need_dump() is hard-wired to
+  // false for them, so the periodic work-area sizing / dump-detection below is
+  // dead work on every expanded word row. Skip it for those sorts; the non-FTS
+  // path (and the forced-dump error-injection valve above) is untouched.
+  } else if (!rows_->empty() && !sql_mem_processor_.get_profile().force_in_memory()) {
     bool updated = false;
     if (OB_FAIL(sql_mem_processor_.update_max_available_mem_size_periodically(
       &mem_context_->get_malloc_allocator(),
