@@ -73,9 +73,13 @@ OB_INLINE bool contains_utf8mb4_cjk(const ObString &word)
 // ASCII words.  Deciding whether a token is one of them is on the hot path of
 // every single document, and an index build runs it from several worker threads
 // at once, so the check must not touch any shared writable state.  The table is
-// therefore folded once into a read only list of (length, leading bytes) pairs
-// and membership is decided by comparing two integers per entry: no lock, no
-// allocation, no charset work, and nothing that several threads can contend on.
+// therefore folded once into read only prefixes grouped by exact byte length;
+// membership becomes a short scan of just that one length's bucket.  With the
+// current table (len1=2, len2=15, len3=10, len4=7, len5=2) this cuts the prefix
+// comparisons per ASCII token from 36 down to at most 15, and lengths 6..8 touch
+// nothing at all.  No lock, no allocation, no charset work, and nothing to
+// contend on.  The build is a counting sort, so buckets stay correct for any
+// table that fits in MAX_WORD_CNT, and a compile time guard enforces that bound.
 class ObStopWordLut
 {
 public:
@@ -84,18 +88,47 @@ public:
 
   ObStopWordLut() : count_(0)
   {
+    static_assert(sizeof(ob_stop_word_list) / sizeof(ob_stop_word_list[0]) <= MAX_WORD_CNT,
+                  "stop word table exceeds ObStopWordLut capacity");
+
     const int64_t table_cnt = static_cast<int64_t>(
         sizeof(ob_stop_word_list) / sizeof(ob_stop_word_list[0]));
-    for (int64_t i = 0; i < table_cnt && count_ < MAX_WORD_CNT; ++i) {
-      const char *word = ob_stop_word_list[i];
-      int64_t len = 0;
-      while (len < MAX_WORD_LEN && '\0' != word[len]) {
-        ++len;
+
+    // Pass 1: how many stop words have each byte length.
+    int64_t len_count[MAX_WORD_LEN + 1];
+    for (int64_t l = 0; l <= MAX_WORD_LEN; ++l) {
+      len_count[l] = 0;
+    }
+    for (int64_t i = 0; i < table_cnt; ++i) {
+      const int64_t len = stop_word_len(ob_stop_word_list[i]);
+      if (len > 0 && len <= MAX_WORD_LEN) {
+        ++len_count[len];
       }
-      if (len > 0) {
-        entries_[count_].prefix_ = pack_prefix(word, len);
-        entries_[count_].len_ = static_cast<uint8_t>(len);
-        ++count_;
+    }
+
+    // Prefix sums give each length its own contiguous slice of entries_.
+    int64_t offset = 0;
+    for (int64_t l = 0; l <= MAX_WORD_LEN; ++l) {
+      bucket_offset_[l] = static_cast<uint8_t>(offset);
+      bucket_size_[l] = static_cast<uint8_t>(len_count[l]);
+      offset += len_count[l];
+    }
+    count_ = offset;
+
+    // Pass 2: scatter each word into its length slice.  cursor_ tracks the next
+    // free slot of each slice; entries_ ends up grouped by length.
+    int64_t cursor[MAX_WORD_LEN + 1];
+    for (int64_t l = 0; l <= MAX_WORD_LEN; ++l) {
+      cursor[l] = bucket_offset_[l];
+    }
+    for (int64_t i = 0; i < table_cnt; ++i) {
+      const char *word = ob_stop_word_list[i];
+      const int64_t len = stop_word_len(word);
+      if (len > 0 && len <= MAX_WORD_LEN) {
+        const int64_t slot = cursor[len]++;
+        if (slot < count_) {
+          entries_[slot] = pack_prefix(word, len);
+        }
       }
     }
   }
@@ -105,20 +138,24 @@ public:
     bool found = false;
     if (len > 0 && len <= MAX_WORD_LEN) {
       const uint64_t prefix = pack_prefix(word, len);
-      for (int64_t i = 0; !found && i < count_; ++i) {
-        found = (entries_[i].len_ == static_cast<uint8_t>(len)
-                 && entries_[i].prefix_ == prefix);
+      const int64_t begin = bucket_offset_[len];
+      const int64_t end = begin + bucket_size_[len];
+      for (int64_t i = begin; !found && i < end; ++i) {
+        found = (entries_[i] == prefix);
       }
     }
     return found;
   }
 
 private:
-  struct Entry
+  static int64_t stop_word_len(const char *word)
   {
-    uint64_t prefix_;
-    uint8_t len_;
-  };
+    int64_t len = 0;
+    while (len < MAX_WORD_LEN && '\0' != word[len]) {
+      ++len;
+    }
+    return len;
+  }
 
   static uint64_t pack_prefix(const char *word, const int64_t len)
   {
@@ -130,7 +167,9 @@ private:
   }
 
 private:
-  Entry entries_[MAX_WORD_CNT];
+  uint64_t entries_[MAX_WORD_CNT];
+  uint8_t bucket_offset_[MAX_WORD_LEN + 1];
+  uint8_t bucket_size_[MAX_WORD_LEN + 1];
   int64_t count_;
 };
 
