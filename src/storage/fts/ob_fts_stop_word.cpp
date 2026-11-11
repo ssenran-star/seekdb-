@@ -51,7 +51,7 @@ public:
   static const int64_t MAX_WORD_LEN = 8;
   static const int64_t MAX_WORD_CNT = 64;
 
-  ObStopWordLut() : count_(0)
+  ObStopWordLut() : count_(0), max_word_len_(0)
   {
     const int64_t table_cnt = static_cast<int64_t>(
         sizeof(ob_stop_word_list) / sizeof(ob_stop_word_list[0]));
@@ -65,14 +65,23 @@ public:
         entries_[count_].prefix_ = pack_prefix(word, len);
         entries_[count_].len_ = static_cast<uint8_t>(len);
         ++count_;
+        if (len > max_word_len_) {
+          max_word_len_ = len;
+        }
       }
     }
   }
 
+  // Longest built-in stop word.  Any ASCII token longer than this cannot match
+  // an entry, so the caller can skip the pack + linear scan entirely.  Derived
+  // from the table at construction (rather than hardcoded) so the fast path
+  // stays correct if the stop-word list ever changes.
+  OB_INLINE int64_t max_word_len() const { return max_word_len_; }
+
   bool contains(const char *word, const int64_t len) const
   {
     bool found = false;
-    if (len > 0 && len <= MAX_WORD_LEN) {
+    if (len > 0 && len <= max_word_len_) {
       const uint64_t prefix = pack_prefix(word, len);
       for (int64_t i = 0; !found && i < count_; ++i) {
         found = (entries_[i].len_ == static_cast<uint8_t>(len)
@@ -101,6 +110,7 @@ private:
 private:
   Entry entries_[MAX_WORD_CNT];
   int64_t count_;
+  int64_t max_word_len_;
 };
 
 const ObStopWordLut &get_stop_word_lut()
@@ -139,6 +149,23 @@ OB_INLINE bool casedown_may_change(const ObString &word)
   }
   return may_change;
 }
+
+// Insert-or-accumulate callback for the per-document word map.  ObHashMap wraps
+// its bucket latch with NoPthreadDefendMode (the word map is a per-document
+// scratch structure, never shared), so the atomic helper below adds no lock
+// cost.  The callback is invoked with the map's HashMapPair and mutates only the
+// value (accumulated term frequency); the key is left untouched.  Keeping this
+// at file scope in the anonymous namespace avoids any dependence on the exact
+// namespace of HashMapPair at the call site and stays unity-build safe.
+struct ObAddWordFreq final
+{
+  explicit ObAddWordFreq(const int64_t freq) : freq_(freq) {}
+  void operator()(common::hash::HashMapPair<ObFTWord, int64_t> &pair) const
+  {
+    pair.second += freq_;
+  }
+  int64_t freq_;
+};
 } // namespace
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -197,7 +224,11 @@ int ObStopWordChecker::check_stopword(const ObFTWord &word, bool &is_stopword)
     // general_ci comparison over ASCII is case insensitive byte comparison, so a
     // lower cased copy of the token is what the table has to be asked about.
     const ObString ascii_word = word.get_word().get_string();
-    if (ascii_word.length() > ObStopWordLut::MAX_WORD_LEN) {
+    const ObStopWordLut &lut = get_stop_word_lut();
+    // No built-in stop word is longer than max_word_len() (derived from the
+    // table).  Tokens past that length can never match, so return before the
+    // uppercase scan, the lowercase copy and the LUT walk.
+    if (ascii_word.length() > lut.max_word_len()) {
       is_stopword = false;
     } else {
       char lower_buf[ObStopWordLut::MAX_WORD_LEN];
@@ -213,7 +244,7 @@ int ObStopWordChecker::check_stopword(const ObFTWord &word, bool &is_stopword)
         }
         lookup_ptr = lower_buf;
       }
-      is_stopword = get_stop_word_lut().contains(lookup_ptr, ascii_word.length());
+      is_stopword = lut.contains(lookup_ptr, ascii_word.length());
     }
   } else {
     common::ObString cmp_str;
@@ -347,20 +378,26 @@ int ObAddWord::check_stopword(const ObFTWord &ft_word, bool &is_stopword)
 int ObAddWord::groupby_word(const ObFTWord &word, const int64_t word_freq)
 {
   int ret = OB_SUCCESS;
-  int64_t word_count = 0;
   if (OB_UNLIKELY(word.empty() || word_freq <= 0)) {
     ret = OB_INVALID_ARGUMENT;
   } else if (!flag_.groupby_word()) {
     if (OB_FAIL(word_map_.set_refactored(word, 1/*word count*/))) {
     }
-  } else if (OB_SUCC(word_map_.set_refactored(word, 1/*first word count*/))) {
-    // The word was not in the map yet, so the single insert above is enough.
-    // Only repeated words need the extra read-modify-write round trip.
-  } else if (OB_HASH_EXIST != ret) {
-    // keep the unexpected error
-  } else if (OB_FAIL(word_map_.get_refactored(word, word_count))) {
-  } else if (FALSE_IT(word_count += word_freq)) {
-  } else if (OB_FAIL(word_map_.set_refactored(word, word_count, 1/*overwrite*/))) {
+  } else {
+    // A repeated token used to cost three collation-aware hash computations and
+    // three bucket walks: set_refactored(word, 1) -> get_refactored(word, count)
+    // -> set_refactored(word, count + freq, overwrite).  ObFTWord::hash() calls
+    // the collation's default_hash_, so recomputing it three times per repeated
+    // token is pure overhead, and CJK / natural-language text repeats tokens
+    // heavily.  Collapse insert-or-accumulate into a single set_or_update probe:
+    // one hash, one bucket walk.  A new key is inserted with value 1 (identical
+    // to the old first-insert); an existing key is handed to the callback which
+    // adds this occurrence's frequency in place (identical to the old
+    // get/add/overwrite).  No key is ever dropped or duplicated, so the emitted
+    // word set -- and therefore the official hit counts -- are unchanged.
+    ObAddWordFreq add_freq(word_freq);
+    if (OB_FAIL(word_map_.set_or_update(word, 1/*first word count*/, add_freq))) {
+    }
   }
   return ret;
 }
