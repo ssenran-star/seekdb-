@@ -71,6 +71,9 @@ private:
   // the chain handed to add_chain().  The vector's own embedded PageArena keeps
   // its buffer lifetime independent of alloc_, which the destructor resets.
   ObVector<ObIKTokenChain *> ordered_chains_;
+  // Only consulted by the keep_single()==true single-word scan.  On the live
+  // keep_single()==false path prepare()/add_chain() skip creating and filling
+  // this map (the ordered-chain walk never reads it), so it costs nothing there.
   hash::ObHashMap<int64_t, ObIKTokenChain *> chains_;
 
 private:

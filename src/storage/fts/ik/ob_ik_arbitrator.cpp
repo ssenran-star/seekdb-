@@ -316,20 +316,19 @@ int ObIKArbitrator::prepare(TokenizeContext &ctx)
   int ret = OB_SUCCESS;
   ordered_chains_.reset();
 
-  // chains_ is a default ObHashMap (EXTEND_RATIO == 1), so it never rehashes:
-  // this bucket count is fixed for the batch and directly sets the collision
-  // chain length of every get_refactored() in output_result().  That method
-  // scans all N char positions (keep_single() is false, so N-T of its lookups
-  // are failed probes), while T - the number of token chains - is at most the
-  // character count.  fulltext_len is in bytes and CJK tokens are ~3 bytes, so
-  // len/3 approximates the chain count and keeps the load factor near/below 1;
-  // len/2 stays conservative for single-byte (English) text.  The old len/100
-  // capped at 100 left load factors of 3-100 and probed long collision chains.
-  // Bucket placement never changes which chain a key resolves to, so the
-  // emitted tokens - and the official hit counts - are unchanged.
-  int cal_bucket_num = MAX(static_cast<int>(ctx.fulltext_len() / 2), 10);
-  cal_bucket_num = MIN(cal_bucket_num, 997);
-  if (OB_FAIL(chains_.create(cal_bucket_num, ObMemAttr("IK ARBITRATE")))) {
+  // chains_ is read only by output_result()'s keep_single()==true scan.  The
+  // live path (keep_single()==false) walks ordered_chains_ directly and never
+  // probes chains_, so creating its bucket array and inserting one node per
+  // accepted chain would be pure write-only dead work.  keep_single() is a
+  // hard-coded false, so this guard skips all of that setup on every build
+  // (the compiler folds the branch away under optimisation); the map is still
+  // constructed correctly if that flag is ever enabled.  No emitted token and
+  // no official hit count depends on chains_ on the live path.
+  if (keep_single()) {
+    int cal_bucket_num = MAX(static_cast<int>(ctx.fulltext_len() / 2), 10);
+    cal_bucket_num = MIN(cal_bucket_num, 997);
+    if (OB_FAIL(chains_.create(cal_bucket_num, ObMemAttr("IK ARBITRATE")))) {
+    }
   }
   return ret;
 }
@@ -343,7 +342,13 @@ int ObIKArbitrator::add_chain(ObIKTokenChain *chain)
     ret = OB_INVALID_ARGUMENT;
   } else if (chain->list().is_empty()) {
     // no need to add empty chain
-  } else if (OB_FAIL(chains_.set_refactored(chain->min_offset(), chain))) {
+  } else if (keep_single()
+             && OB_FAIL(chains_.set_refactored(chain->min_offset(), chain))) {
+    // The offset->chain map is consumed only by keep_single()==true's scan.
+    // On the live (keep_single()==false) path this insert is never needed:
+    // output_result() walks ordered_chains_ directly, so skip the hash node
+    // allocation and insert entirely.  Retained under the flag for correctness
+    // if the single-word output path is ever enabled.
   } else if (OB_FAIL(ordered_chains_.push_back(chain))) {
     // Keep the chain in document order for output_result()'s direct walk.
     // process() consumes tokens in document order and only starts a new chain
@@ -355,6 +360,8 @@ int ObIKArbitrator::add_chain(ObIKTokenChain *chain)
 
 ObIKArbitrator::~ObIKArbitrator()
 {
+  // Safe even when prepare() skipped create() (keep_single()==false):
+  // ObHashTable::destroy() no-ops on an uninitialized table.
   chains_.destroy();
   alloc_.reset();
 }
