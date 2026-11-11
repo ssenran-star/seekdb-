@@ -19,10 +19,12 @@
 #include "src/storage/fts/ob_ik_ft_parser.h"
 
 #include "lib/charset/ob_charset.h"
+#include "lib/allocator/page_arena.h"
 #include "lib/ob_errno.h"
 #include "lib/oblog/ob_log_module.h"
 #include "lib/utility/ob_macro_utils.h"
 #include "lib/utility/utility.h"
+#include <mutex>
 #include "data_plane/fts/ob_fts_struct.h"
 #include "data_plane/fts/ob_fts_parser_helper.h"
 #include "storage/fts/dict/ob_ft_dict.h"
@@ -40,6 +42,144 @@ namespace oceanbase
 {
 namespace storage
 {
+namespace
+{
+// IK tokenization depends on only three immutable dictionaries (main /
+// quantifier / stopword), built from the compiled-in dictionary text and
+// process-unique once built.  The old path reloaded all three cache handles
+// and rebuilt all three range dictionaries for EVERY parsed document (3 cache
+// loads + 3 range-dict builds + 3 destroys per document), which dominated both
+// TOKENIZE and fulltext index build.  Build one shared, read-only set on the
+// first parse and pin it in every later parser.  The per-instance path is kept
+// for the "newest table" case (currently never taken) so dictionary-refresh
+// semantics are preserved if that flag is ever enabled.
+class ObIKSharedDictSet final
+{
+public:
+  ObIKSharedDictSet()
+      : main_cache_(alloc_),
+        quan_cache_(alloc_),
+        stop_cache_(alloc_),
+        main_dict_(nullptr),
+        quan_dict_(nullptr),
+        stop_dict_(nullptr),
+        last_err_(OB_NOT_INIT),
+        inited_(false)
+  {
+  }
+
+  int get(ObIFTDict *&main_dict, ObIFTDict *&quan_dict, ObIFTDict *&stop_dict);
+
+private:
+  int build();
+  int build_one(const ObFTDictDesc &desc,
+                ObFTCacheRangeContainer &cache,
+                ObIFTDict *&dict);
+
+private:
+  ObArenaAllocator alloc_;
+  ObFTCacheRangeContainer main_cache_;
+  ObFTCacheRangeContainer quan_cache_;
+  ObFTCacheRangeContainer stop_cache_;
+  ObIFTDict *main_dict_;
+  ObIFTDict *quan_dict_;
+  ObIFTDict *stop_dict_;
+  int last_err_;
+  bool inited_;
+  std::mutex mutex_;
+
+  DISABLE_COPY_ASSIGN(ObIKSharedDictSet);
+};
+
+int ObIKSharedDictSet::build_one(const ObFTDictDesc &desc,
+                                 ObFTCacheRangeContainer &cache,
+                                 ObIFTDict *&dict)
+{
+  int ret = OB_SUCCESS;
+  ObFTDictHub *hub = nullptr;
+  if (OB_FAIL(ObFTParseData::instance().get_dict_hub(hub))) {
+    LOG_WARN("failed to get dict hub", K(ret));
+  } else if (OB_FAIL(hub->load_cache(desc, cache))) {
+    if (OB_ENTRY_NOT_EXIST == ret) {
+      if (OB_FAIL(hub->build_cache(desc, cache))) {
+        LOG_WARN("failed to build dict cache", K(ret), K(desc.type_));
+      }
+    } else {
+      LOG_WARN("failed to load dict cache", K(ret), K(desc.type_));
+    }
+  }
+
+  if (OB_FAIL(ret)) {
+  } else if (OB_ISNULL(dict = OB_NEWx(ObFTRangeDict, &alloc_, alloc_, &cache, desc))) {
+    ret = OB_ALLOCATE_MEMORY_FAILED;
+  } else if (OB_FAIL(dict->init())) {
+    LOG_WARN("failed to init range dict", K(ret), K(desc.type_));
+    OB_DELETEx(ObIFTDict, &alloc_, dict);
+    dict = nullptr;
+  }
+  return ret;
+}
+
+int ObIKSharedDictSet::build()
+{
+  int ret = OB_SUCCESS;
+  ObFTDictDesc main_dict_desc("main_dict",
+                              ObFTDictType::DICT_IK_MAIN,
+                              ObCharsetType::CHARSET_UTF8MB4,
+                              ObCollationType::CS_TYPE_UTF8MB4_BIN);
+  ObFTDictDesc quan_dict_desc("quan_dict",
+                              ObFTDictType::DICT_IK_QUAN,
+                              ObCharsetType::CHARSET_UTF8MB4,
+                              ObCollationType::CS_TYPE_UTF8MB4_BIN);
+  ObFTDictDesc stopword_dict_desc("stopword",
+                                  ObFTDictType::DICT_IK_STOP,
+                                  ObCharsetType::CHARSET_UTF8MB4,
+                                  ObCollationType::CS_TYPE_UTF8MB4_BIN);
+
+  if (OB_FAIL(build_one(main_dict_desc, main_cache_, main_dict_))) {
+  } else if (OB_FAIL(build_one(quan_dict_desc, quan_cache_, quan_dict_))) {
+  } else if (OB_FAIL(build_one(stopword_dict_desc, stop_cache_, stop_dict_))) {
+  }
+  return ret;
+}
+
+int ObIKSharedDictSet::get(ObIFTDict *&main_dict, ObIFTDict *&quan_dict, ObIFTDict *&stop_dict)
+{
+  int ret = OB_SUCCESS;
+  if (!inited_) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    if (!inited_) {
+      if (OB_FAIL(build())) {
+        last_err_ = ret;
+        LOG_WARN("failed to build shared ik dict", K(ret));
+      } else {
+        last_err_ = OB_SUCCESS;
+        inited_ = true;
+      }
+    }
+  }
+
+  if (!inited_) {
+    // Keep retryable: a transient failure (e.g. dict hub not yet ready) is
+    // re-attempted on the next parse rather than being cached permanently.
+    ret = (OB_SUCCESS == last_err_) ? OB_NOT_INIT : last_err_;
+  } else {
+    main_dict = main_dict_;
+    quan_dict = quan_dict_;
+    stop_dict = stop_dict_;
+  }
+  return ret;
+}
+
+// Process lifetime: intentionally never destructed, so it cannot race the
+// global dict cache's destruction order.  The leaked set is bounded (one).
+ObIKSharedDictSet &get_shared_ik_dict_set()
+{
+  static ObIKSharedDictSet *instance = new ObIKSharedDictSet();
+  return *instance;
+}
+} // namespace
+
 int ObIKFTParser::init(const ObFTParserParam &param)
 {
   int ret = OB_SUCCESS;
@@ -257,14 +397,17 @@ int ObIKFTParser::init_dict(const ObFTParserParam &param)
 
   if (should_read_newest_table()) {
     // clear dict cache, always false now
+  } else if (OB_FAIL(get_shared_ik_dict_set().get(dict_main_, dict_quan_, dict_stop_))) {
+    // logged in get(); a transient failure is retried on the next parse.
   } else {
-    if (OB_FAIL(init_single_dict(main_dict_desc, cache_main_))) {
-    } else if (OB_FAIL(init_single_dict(quan_dict_desc, cache_quan_))) {
-    } else if (OB_FAIL(init_single_dict(stopword_dict_desc, cache_stop_))) {
-    }
+    // Pin the process-wide read-only set; this parser does not own the dicts.
+    owns_dict_ = false;
   }
 
-  if (OB_FAIL(ret)) {
+  if (OB_SUCC(ret) && !owns_dict_) {
+    // Shared dicts are already in place -- no per-document cache reload or
+    // range-dict rebuild needed.
+  } else if (OB_FAIL(ret)) {
     // already logged.
   } else if (OB_FAIL(build_dict_from_cache(main_dict_desc, cache_main_, dict_main_))) {
   } else if (OB_FAIL(build_dict_from_cache(quan_dict_desc, cache_quan_, dict_quan_))) {
@@ -364,22 +507,29 @@ void ObIKFTParser::reset()
   }
   segmenters_.clear();
 
-  cache_main_.reset();
-  cache_quan_.reset();
-  cache_stop_.reset();
+  if (owns_dict_) {
+    cache_main_.reset();
+    cache_quan_.reset();
+    cache_stop_.reset();
 
-  if (!OB_ISNULL(dict_main_)) {
-    dict_main_->~ObIFTDict();
-    allocator_.free(dict_main_);
+    if (!OB_ISNULL(dict_main_)) {
+      dict_main_->~ObIFTDict();
+      allocator_.free(dict_main_);
+      dict_main_ = nullptr;
+    }
+    if (!OB_ISNULL(dict_quan_)) {
+      dict_quan_->~ObIFTDict();
+      allocator_.free(dict_quan_);
+      dict_quan_ = nullptr;
+    }
+    if (!OB_ISNULL(dict_stop_)) {
+      dict_stop_->~ObIFTDict();
+      allocator_.free(dict_stop_);
+      dict_stop_ = nullptr;
+    }
   }
-  if (!OB_ISNULL(dict_quan_)) {
-    dict_quan_->~ObIFTDict();
-    allocator_.free(dict_quan_);
-  }
-  if (!OB_ISNULL(dict_stop_)) {
-    dict_stop_->~ObIFTDict();
-    allocator_.free(dict_stop_);
-  }
+  // owns_dict_ == false: dicts alias the process-wide set; drop our references
+  // only, never destroy or free them (they outlive this parser).
 
   is_inited_ = false;
 }

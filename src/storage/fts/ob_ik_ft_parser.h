@@ -46,7 +46,8 @@ public:
         cache_stop_(allocator),
         dict_main_(nullptr),
         dict_quan_(nullptr),
-        dict_stop_(nullptr)
+        dict_stop_(nullptr),
+        owns_dict_(true)
   {
   }
 
@@ -106,6 +107,10 @@ private:
   ObIFTDict *dict_main_;
   ObIFTDict *dict_quan_;
   ObIFTDict *dict_stop_;
+  // true -> this parser built the dicts from its own caches and frees them in
+  // reset(); false -> the dict pointers alias the process-wide shared set and
+  // are only dereferenced (never destroyed or freed) here.
+  bool owns_dict_;
 
   DISABLE_COPY_ASSIGN(ObIKFTParser);
 };
