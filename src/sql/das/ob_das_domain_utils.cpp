@@ -285,7 +285,17 @@ int ObDASDomainUtils::build_ft_doc_word_infos(
   int ret = OB_SUCCESS;
   static int64_t FT_WORD_DOC_COL_CNT = 4;
   static constexpr int64_t FT_MAX_WORD_BUCKET = 997;
-  const int64_t ft_word_bkt_cnt = MIN(MAX(fulltext.length() / 10, 2), FT_MAX_WORD_BUCKET);
+  // ObFTWordMap uses the default EXTEND_RATIO == 1, so it never rehashes:
+  // this bucket count is fixed for the whole document and directly sets the
+  // chaining load factor.  IK/CJK tokens average ~3 bytes each, so the old
+  // length/10 sizing left roughly 4-5 words per bucket and every lookup
+  // walked a chain of collation-aware ObFTWord::operator== calls.  Sizing at
+  // length/3 keeps the load factor near or below 1 for CJK, while staying
+  // conservative for BENG/English (~6 bytes per token, load factor ~0.5).
+  // This only changes bucket placement - it never drops or duplicates a key,
+  // so the emitted word set (and therefore the official hit counts) are
+  // unchanged.
+  const int64_t ft_word_bkt_cnt = MIN(MAX(fulltext.length() / 3, 2), FT_MAX_WORD_BUCKET);
   int64_t doc_length = 0;
   ObFTWordMap ft_word_map;
   void *rows_buf = nullptr;
