@@ -317,15 +317,17 @@ int ObArrayHashMap::find(const ObFTSingleWord &word, ObFTWordCode &code) const
 {
   int ret = OB_ENTRY_NOT_EXIST;
   uint64_t hash = ft_word_binary_hash(word.get_word());
-  uint64_t index = hash % header_.capacity_;
+  // capacity_ is always a power of two (see estimate_capacity), so the start
+  // slot is a mask instead of a 64-bit division on this per-character path.
+  uint64_t index = hash & (static_cast<uint64_t>(header_.capacity_) - 1);
   while (header_.data[index].used) {
     if (header_.data[index].word == word) {
       code = header_.data[index].code;
       ret = OB_SUCCESS;
       break;
     } else {
-      // capacity_ > 3, so a single conditional subtract is equivalent to the
-      // modulo but avoids a 64-bit division on the probe path.
+      // capacity_ > 3, so a single conditional subtract wraps the +3 step
+      // without another division.
       index += 3;
       if (OB_UNLIKELY(index >= header_.capacity_)) {
         index -= header_.capacity_;
@@ -339,7 +341,8 @@ int ObArrayHashMap::insert(const ObString &key, ObFTWordCode code)
 {
   int ret = OB_SUCCESS;
   uint64_t hash = ft_word_binary_hash(key);
-  uint64_t index = hash % header_.capacity_;
+  // capacity_ is a power of two; mask instead of a 64-bit division.
+  uint64_t index = hash & (static_cast<uint64_t>(header_.capacity_) - 1);
   while (header_.data[index].used) {
     index += 3;
     if (OB_UNLIKELY(index >= header_.capacity_)) {
@@ -378,19 +381,19 @@ size_t ObArrayHashMap::estimate_capacity(size_t word_num)
 {
   // find()/insert() probe with a fixed step of 3 and wrap via a single
   // conditional subtract (see the two loops above).  Such a probe visits every
-  // slot only when capacity is coprime with 3.  The old MAX(word_num*4/3, 101)
-  // is divisible by 3 for a large class of inputs (e.g. word_num divisible by
-  // 9, or word_num == 7/5 (mod 9)); that silently reduces the reachable table
-  // to one third and, at ~75% load, can leave insert() spinning forever once a
-  // residue class fills up.  Size for a ~50% load factor and lift the result to
-  // the next value coprime with 3, cutting both the average probe chain and
-  // that liveness risk.  DAT codes are assigned sequentially in encode()
+  // slot only when capacity is coprime with 3; the old MAX(word_num*4/3, 101)
+  // was divisible by 3 for ~1/3 of inputs, degenerating to a third of the table
+  // and even hanging insert() in the worst case.  Round the ~50%-load target up
+  // to a power of two: that is always coprime with 3 AND lets the hot per-char
+  // lookup replace the 64-bit "hash % capacity" division with a single
+  // "hash & (capacity-1)" mask.  DAT codes are assigned sequentially in encode()
   // (next_code_++), independent of bucket placement, so the emitted word->code
   // set - and therefore the official hit counts - are unchanged.
-  constexpr size_t MIN_CAPACITY = 101;                     // prime, coprime with 3
-  size_t capacity = MAX(word_num * 2, MIN_CAPACITY);        // <= 50% load
-  while (0 == capacity % 3) {
-    ++capacity;
+  constexpr size_t MIN_CAPACITY = 101;                     // load-target floor
+  const size_t target = MAX(word_num * 2, MIN_CAPACITY);    // <= 50% load
+  size_t capacity = 1;
+  while (capacity < target) {
+    capacity <<= 1;                                        // next power of two
   }
   return capacity;
 }
