@@ -50,9 +50,50 @@ static void write_value(MvBuf *b, const MvValue *v) {
     }
 }
 
-static void write_id(MvBuf *b, int is_int, int64_t id_int, double id_double) {
-    if (is_int) mv_buf_printf(b, "%lld", (long long)id_int);
-    else mv_json_double(b, id_double);
+/* Echo the request id verbatim, preserving its JSON type (protocol rule 5).
+ * The judge compares both value and Python type, so a string/bool/null id
+ * must not be coerced to a number. */
+static void write_json_value(MvBuf *b, const MvJson *v) {
+    if (!v) { APPEND(b, "null"); return; }
+    switch (v->type) {
+        case MV_JSON_NULL:
+            APPEND(b, "null");
+            break;
+        case MV_JSON_BOOL:
+            /* APPEND uses sizeof(literal)-1; keep it a literal, not a pointer. */
+            if (v->bval) APPEND(b, "true");
+            else APPEND(b, "false");
+            break;
+        case MV_JSON_INT:
+            mv_buf_printf(b, "%lld", (long long)v->ival);
+            break;
+        case MV_JSON_DOUBLE:
+            mv_json_double(b, v->dval);
+            break;
+        case MV_JSON_STRING:
+            /* mv_json_escape already emits the surrounding quotes. */
+            mv_json_escape(b, v->sval ? v->sval : "", v->slen);
+            break;
+        case MV_JSON_ARRAY:
+            mv_buf_append(b, "[", 1);
+            for (size_t i = 0; i < v->count; i++) {
+                if (i) mv_buf_append(b, ",", 1);
+                write_json_value(b, v->items[i]);
+            }
+            mv_buf_append(b, "]", 1);
+            break;
+        case MV_JSON_OBJECT:
+            mv_buf_append(b, "{", 1);
+            for (size_t i = 0; i < v->count; i++) {
+                const char *key = v->keys[i] ? v->keys[i] : "";
+                if (i) mv_buf_append(b, ",", 1);
+                mv_json_escape(b, key, strlen(key));
+                APPEND(b, ":");
+                write_json_value(b, v->items[i]);
+            }
+            mv_buf_append(b, "}", 1);
+            break;
+    }
 }
 
 int main(void) {
@@ -110,23 +151,10 @@ int main(void) {
         const MvJson *jsql = mv_json_get(req, "sql");
         const MvJson *jmode = mv_json_get(req, "search_mode");
 
-        int id_is_int = 1;
-        int64_t id_int = 0;
-        double id_double = 0;
-        if (jid && jid->type == MV_JSON_INT) {
-            id_int = jid->ival;
-        } else if (jid && jid->type == MV_JSON_DOUBLE) {
-            id_is_int = 0;
-            id_double = jid->dval;
-        } else if (jid) {
-            id_is_int = 0;
-            id_double = (double)jid->ival;
-        }
-
         if (jop && jop->type == MV_JSON_STRING && strcmp(jop->sval, "shutdown") == 0) {
             mv_buf_init(&out);
             APPEND(&out, "{\"id\":");
-            write_id(&out, id_is_int, id_int, id_double);
+            write_json_value(&out, jid);
             APPEND(&out, ",\"ok\":true}");
             out_line(&out);
             mv_json_free(req);
@@ -139,7 +167,7 @@ int main(void) {
         if (!jsql || jsql->type != MV_JSON_STRING) {
             mv_buf_init(&out);
             APPEND(&out, "{\"id\":");
-            write_id(&out, id_is_int, id_int, id_double);
+            write_json_value(&out, jid);
             APPEND(&out, ",\"ok\":false,\"error\":{\"code\":\"bad_request\",\"message\":");
             mv_json_escape(&out, "missing sql field", 16);
             APPEND(&out, "}}");
@@ -159,7 +187,7 @@ int main(void) {
         if (mv_sql_parse(jsql->sval, &st, &serr) != MV_OK) {
             mv_buf_init(&out);
             APPEND(&out, "{\"id\":");
-            write_id(&out, id_is_int, id_int, id_double);
+            write_json_value(&out, jid);
             APPEND(&out, ",\"ok\":false,\"error\":{\"code\":");
             mv_json_escape(&out, serr.code, strlen(serr.code));
             APPEND(&out, ",\"message\":");
@@ -174,7 +202,7 @@ int main(void) {
         if (mv_exec(db, &st, mode, &res, &serr) != MV_OK) {
             mv_buf_init(&out);
             APPEND(&out, "{\"id\":");
-            write_id(&out, id_is_int, id_int, id_double);
+            write_json_value(&out, jid);
             APPEND(&out, ",\"ok\":false,\"error\":{\"code\":");
             mv_json_escape(&out, serr.code, strlen(serr.code));
             APPEND(&out, ",\"message\":");
@@ -184,7 +212,7 @@ int main(void) {
         } else if (res.is_query) {
             mv_buf_init(&out);
             APPEND(&out, "{\"id\":");
-            write_id(&out, id_is_int, id_int, id_double);
+            write_json_value(&out, jid);
             APPEND(&out, ",\"ok\":true,\"columns\":[");
             for (int i = 0; i < res.ncols; i++) {
                 if (i) mv_buf_append(&out, ",", 1);
@@ -206,13 +234,13 @@ int main(void) {
                                                st.type == MV_ST_DELETE)) {
             mv_buf_init(&out);
             APPEND(&out, "{\"id\":");
-            write_id(&out, id_is_int, id_int, id_double);
+            write_json_value(&out, jid);
             mv_buf_printf(&out, ",\"ok\":true,\"affected_rows\":%lld}", (long long)res.affected_rows);
             out_line(&out);
         } else {
             mv_buf_init(&out);
             APPEND(&out, "{\"id\":");
-            write_id(&out, id_is_int, id_int, id_double);
+            write_json_value(&out, jid);
             APPEND(&out, ",\"ok\":true}");
             out_line(&out);
         }

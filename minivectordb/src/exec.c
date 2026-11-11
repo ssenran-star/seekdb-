@@ -577,6 +577,13 @@ static int exec_select(MvDb *db, const MvStmt *st, const char *search_mode, MvRe
     const MvSchema *s = mv_table_schema(t);
     int nvals = mv_table_nvals(t);
     MvValue *vals = NULL; /* one scratch row reused for every result row */
+    /* Everything read by the `fail:` cleanup must exist and be initialised
+     * before the first `goto fail`.  These used to be declared further down,
+     * so an early parse error jumped over them and the cleanup walked garbage
+     * pointers (heap corruption / exit before response). */
+    MvCond *conds = NULL;
+    SelCtx ctx;
+    memset(&ctx, 0, sizeof(ctx));
 
     int nout = 0;
     int *out_col = NULL;
@@ -589,9 +596,15 @@ static int exec_select(MvDb *db, const MvStmt *st, const char *search_mode, MvRe
     } else {
         nout = st->nprojs;
     }
-    out_col = mv_xmalloc((size_t)(nout > 0 ? nout : 1) * sizeof(int));
-    out_dist = mv_xmalloc((size_t)(nout > 0 ? nout : 1) * sizeof(int));
-    out_name = mv_xmalloc((size_t)(nout > 0 ? nout : 1) * sizeof(char *));
+    size_t out_cap = (size_t)(nout > 0 ? nout : 1);
+    out_col = mv_xmalloc(out_cap * sizeof(int));
+    out_dist = mv_xmalloc(out_cap * sizeof(int));
+    out_name = mv_xmalloc(out_cap * sizeof(char *));
+    /* Zero them: on an early `goto fail` only the first few out_name entries
+     * have been assigned, and free() must see NULL for the rest. */
+    memset(out_col, 0, out_cap * sizeof(int));
+    memset(out_dist, 0, out_cap * sizeof(int));
+    memset(out_name, 0, out_cap * sizeof(char *));
 
     if (st->star) {
         for (int i = 0; i < nout; i++) {
@@ -634,7 +647,6 @@ static int exec_select(MvDb *db, const MvStmt *st, const char *search_mode, MvRe
         }
     }
 
-    MvCond *conds = NULL;
     if (st->nconds > 0) {
         conds = mv_xmalloc((size_t)st->nconds * sizeof(MvCond));
         for (int i = 0; i < st->nconds; i++) {
@@ -666,7 +678,10 @@ static int exec_select(MvDb *db, const MvStmt *st, const char *search_mode, MvRe
     if (st->norders > 0) {
         const MvOrder *o = &st->orders[0];
         int matched = -1;
-        for (int i = 0; i < nout && st->projs; i++) {
+        /* Walk the projection list, not the output columns: with SELECT * the
+         * output count is s->ncols while nprojs is 0, which used to read past
+         * the projection array. */
+        for (int i = 0; i < st->nprojs && st->projs; i++) {
             if (st->projs[i].has_alias && strcmp(st->projs[i].alias, o->col_name) == 0) {
                 matched = i;
                 break;
@@ -700,8 +715,6 @@ static int exec_select(MvDb *db, const MvStmt *st, const char *search_mode, MvRe
         order_desc = o->desc;
     }
 
-    SelCtx ctx;
-    memset(&ctx, 0, sizeof(ctx));
     ctx.db = db;
     ctx.t = t;
     ctx.s = s;
