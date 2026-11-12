@@ -343,11 +343,12 @@ int ObIKArbitrator::prepare(TokenizeContext &ctx)
   int ret = OB_SUCCESS;
 
   ordered_chains_.reset();
-
-  int cal_bucket_num = MAX(ctx.fulltext_len() / 100, 10);
-  cal_bucket_num = MIN(cal_bucket_num, 100);
-  if (OB_FAIL(chains_.create(cal_bucket_num, ObMemAttr("IK ARBITRATE")))) {
-  }
+  // chains_ is never read: keep_single() is hardwired false, so output_result()
+  // walks ordered_chains_ directly and the only get_refactored() caller sits in
+  // the dead keep_single()==true branch.  Skip building the per-batch hashmap
+  // (create here + per-chain set_refactored in add_chain); the destructor's
+  // destroy() is a documented no-op on a never-created map.
+  (void)ctx;
   return ret;
 }
 
@@ -360,7 +361,6 @@ int ObIKArbitrator::add_chain(ObIKTokenChain *chain)
     ret = OB_INVALID_ARGUMENT;
   } else if (chain->list().is_empty()) {
     // no need to add empty chain
-  } else if (OB_FAIL(chains_.set_refactored(chain->min_offset(), chain))) {
   } else if (OB_FAIL(ordered_chains_.push_back(chain))) {
     // Keep the chain in document order for output_result()'s direct walk.
     // process() consumes tokens in document order and only starts a new chain
