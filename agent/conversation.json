@@ -1,0 +1,142 @@
+{
+  "material_version": "minivectordb-round2-2026-11-12",
+  "project": "MiniVectorDB — OceanBase 2026 大赛加赛 Round 2",
+  "synthetic": false,
+  "scope_note": "本文件如实记录 2026-11-12 初始开发会话。来源标注：student=参赛选手（用户），agent=Qoder AI 助手，tool=虚拟机 shell / protocol_check / 测试脚本的实际输出。agent 与 tool 产出不作为学生理解证据；学生贡献以 user_prompts 与 conversations 中 role=student 的原文为准。未执行的内容一律标 status=plan。",
+  "user_prompts": [
+    {
+      "id": "P1",
+      "timestamp": "2026-11-12",
+      "source": "student",
+      "content": "参照这个文件做一个进度板，接下来所有的提测都要在这个进度板里记录，错误点，分数点也要记录，每次执行任务开始之前，查看文档，吸取教训再继续"
+    },
+    {
+      "id": "P2",
+      "timestamp": "2026-11-12",
+      "source": "student",
+      "content": "https://oceanbase.yuque.com/org-wiki-obtech-vh7w9r/hc3pio/dbf6uzmwsuupp7hn 这是加赛的算分规则 https://oceanbase.yuque.com/org-wiki-obtech-vh7w9r/hc3pio/lg8enxlmwg69unt6 这是加赛题目，使用 seekdb 仓库的 2026-competition-round2 分支进行开发，将以下材料上传并提交到该分支：1. 源码：完整数据库实现、锁定依赖及必要的构建文件。2. Dockerfile：能够从提交的源码构建并启动评测容器。3. Agent prompt 材料 conversation.json：实际使用的提示词、必要上下文、交互记录及学习验证材料，具体要求见第 4.4 节。提测时提交平台可获取的源码仓库 HTTPS URL、分支名称 2026-competition-round2 和完整 40 位 commit SHA。源码、Dockerfile 和 Agent prompt 材料 conversation.json须来自同一次提交，平台以该 commit 锁定评测材料。运行说明一并保留在仓库中，不得仅提交二进制或依赖选手本地已有的未交付文件。这是重点，仔细阅读文件内容，提测前可以在本地虚拟机上进行尝试编译，编译完全通过后方可进行提测，将文档重点内容记录在excel表中，便于记忆，每次执行前阅读excel表，虚拟机ssh账号密码均为root"
+    },
+    {
+      "id": "P3",
+      "timestamp": "2026-11-12",
+      "source": "student",
+      "content": "（回答实现语言选择题）C++（推荐）——在得知性能排名占 40 分、需自实现存储/事务/向量索引核心后，选手选择 C++ 作为实现语言。"
+    }
+  ],
+  "conversations": [
+    {
+      "id": "C1",
+      "role": "student",
+      "source_prompt": "P2",
+      "content": "选手设定提测硬门槛：必须先在本地虚拟机尝试编译，编译完全通过后方可提测；并要求把文档重点记入 Excel 进度板、每次执行前阅读。这是选手独立提出的验证准入条件，先于任何代码产出。"
+    },
+    {
+      "id": "C2",
+      "role": "agent",
+      "content": "agent 抓取两份语雀文档全文并提炼：总分 700=620+性能排名 40+Agent 排名 40；正式 29 个 MySQL case 全过才准入；三材料同一 commit；随后克隆 seekdb 2026-competition-round2 分支，发现官方题包含 STDIO_PROTOCOL.md（JSONL 协议）、20 个公开用例与 protocol_check 自测驱动。重点已写入进度板「加赛Round2」工作表。"
+    },
+    {
+      "id": "C3",
+      "role": "agent",
+      "content": "架构决策（agent 提出）：单一日志结构文件 /data/mvdb.log 承载表定义、行版本与提交标记；内存 pk→最新版本偏移索引 + 版本链回退实现 MVCC 可见性；COMMIT 追加提交标记并 fdatasync 后才响应；恢复顺序扫描日志、无提交标记的事务整体回滚、torn 尾部按记录帧截断；向量索引用自实现 HNSW，ready 前从可见记录重建。选择理由：单客户端单事务场景下日志结构最简单且天然满足崩溃模型，fsync 次数=提交次数利于写入性能。"
+    },
+    {
+      "id": "C4",
+      "role": "student",
+      "source_prompt": "P3",
+      "content": "选手在语言选择中确认 C++，接受 agent 给出的权衡说明（性能上限最高、利于 40 分性能排名、存储/WAL/内存控制最直接、开发量中等偏大）。"
+    },
+    {
+      "id": "C5",
+      "role": "agent",
+      "content": "首轮实现约 2000 行 C++17：parser（递归下降 SQL 子集）、storage（记录帧日志）、engine（执行器+事务+行缓存）、hnsw、main（JSONL 协议）。唯一第三方依赖 nlohmann/json v3.11.3 单头文件锁定入仓库。g++ 15.2 一次编译通过（仅 1 个 unused-parameter 警告，后消除）。"
+    },
+    {
+      "id": "C6",
+      "role": "agent",
+      "content": "首轮公开用例 19/20：sql_ordering 失败，ORDER BY value 引用非投影列被误判 column_not_found。根因：ORDER BY 解析只在投影列表内查找。修正：回退到表列解析。复测 20/20 通过。"
+    },
+    {
+      "id": "C7",
+      "role": "agent",
+      "content": "崩溃恢复自测（公开题包无强杀指令，agent 补充 tests/crash_test.py）：kill -9 后未提交事务回滚、重复恢复、已提交数据保留、ROLLBACK 持久、HNSW 重建后 ann 结果正确、日志 torn 尾部截断恢复，全部通过。"
+    },
+    {
+      "id": "C8",
+      "role": "agent",
+      "content": "性能迭代（tests/bench.py，10k 行/128 维/1000 查询/K=10 半过滤）：(1) 初版精确查询 3.47s，ANN 召回 0.866 低于 0.95 要求；(2) ef 64→256、efConstruction 200→400 后召回 0.939 仍不足；(3) ef→512 后召回 0.985 达标；(4) 发现每查询全行拷贝瓶颈（约 5GB memcpy），resolve_row 改返回缓存指针零拷贝 → 2.18s；(5) TopK 改有界堆避免万行全排序与逐行堆分配 → 0.694s。写入稳定 0.47s。"
+    }
+  ],
+  "experiments": [
+    {
+      "id": "E1",
+      "status": "executed",
+      "executor": "agent",
+      "hypothesis": "源码可在评测同构 Linux x86_64 环境从源码完整编译（选手设定的提测门槛）。",
+      "command": "cmake -B build && cmake --build build -j32（VM: Ubuntu 26.04, g++ 15.2.0, cmake 4.2.3）",
+      "output": "[100%] Linking CXX executable minivectordb / [100%] Built target minivectordb",
+      "interpretation": "编译门槛达成（本地进程形态）；Docker 镜像形态验证见 E6。"
+    },
+    {
+      "id": "E2",
+      "status": "executed",
+      "executor": "agent",
+      "hypothesis": "实现满足全部 20 个公开 mysqltest 用例（95 条 SQL）。",
+      "command": "python3 protocol_check/run.py --command '[\"./build/minivectordb\",\"--data-dir\",\"{data_dir}\"]' --output protocol-results/pubN",
+      "output": "首轮：sql_ordering: FAIL line 3: SELECT id FROM docs ORDER BY value;: statement failed: {'error': {'code': 'column_not_found', 'message': 'unknown ORDER BY: value'}, 'id': 3, 'ok': False}，其余 19 PASS；修正后复测：20 PASS（pub2/pub3/pub4/pub5/pub6 均 20）。",
+      "interpretation": "ORDER BY 可引用非投影列是 SQL 基本语义，解析器必须回退到表列；公开样例通过不等于正式 29 用例准入。"
+    },
+    {
+      "id": "E3",
+      "status": "executed",
+      "executor": "agent",
+      "hypothesis": "崩溃模型（进程强杀）下：已提交不丢、未提交整体回滚、重复恢复与 torn 尾部可恢复。",
+      "command": "python3 tests/crash_test.py ./build/minivectordb",
+      "output": "CRASH TESTS PASS",
+      "interpretation": "提交标记+fdatasync 的持久化确认与版本链可见性设计满足赛题崩溃语义；该脚本随仓库提交供复核。"
+    },
+    {
+      "id": "E4",
+      "status": "executed",
+      "executor": "agent",
+      "hypothesis": "自实现 HNSW 在 10k/128 维随机数据上 Recall@10 ≥ 0.95。",
+      "command": "python3 tests/bench.py ./build/minivectordb（ann 与 exact 结果集合对比）",
+      "output": "ef=64: recall_ann_indexed=0.8660；ef=256/efC=400: 0.9390；ef=512: recall_ann_indexed=0.9850",
+      "interpretation": "搜索宽度 ef 是该数据规模下召回率的主因；0.985 达标但保留余量有限，正式数据分布未知，必要时再提高 ef 或改进邻居选择启发式。"
+    },
+    {
+      "id": "E5",
+      "status": "executed",
+      "executor": "agent",
+      "hypothesis": "精确 TopK 查询瓶颈在逐行拷贝与全排序，而非距离计算。",
+      "command": "python3 tests/bench.py ./build/minivectordb（三次迭代对比）",
+      "output": "T_query_exact: 3.467s（全行拷贝+全排序）→ 2.175s（零拷贝行缓存）→ 0.694s（TopK 有界堆）；T_write≈0.47s",
+      "interpretation": "1000 查询×10k 行的全行拷贝约 5GB memcpy 是主要开销；有界堆把每查询排序规模从 N 降到 K。"
+    },
+    {
+      "id": "E6",
+      "status": "executed",
+      "executor": "agent",
+      "hypothesis": "Dockerfile 多阶段构建的镜像在只读根文件系统、--network=none、2CPU/2GiB 限制下通过握手与全部公开用例。",
+      "command": "docker build -t minivectordb:latest . && python3 protocol_check/run.py --image minivectordb:latest --handshake-only && python3 protocol_check/run.py --image minivectordb:latest",
+      "output": "handshake: PASS；20/20 公开用例 PASS（protocol-results/docker-pub）；镜像 minivectordb:latest (cf8199eb1dcf)，ubuntu:24.04 多阶段源码构建。",
+      "interpretation": "镜像形态满足协议与公开用例。过程教训：Dockerfile 中 cmake -D 参数丢失等号导致首次镜像构建失败，而本地进程验证无法发现——构建脚本必须在与正式一致的容器环境实际跑通。VM 的 Docker Hub 拉取受阻，用 ubuntu-base rootfs import + --network=host 绕过；Dockerfile 本身为标准多阶段构建，平台环境可直接构建。"
+    },
+    {
+      "id": "E7",
+      "status": "plan",
+      "executor": "student+agent",
+      "hypothesis": "学生复核崩溃恢复与召回率实验后，能独立解释提交确认为何必须先于 COMMIT 响应、以及 ef 与召回率的关系，并设计新的反例（如提交响应后立刻强杀、过滤集小于 K 的 ann 查询）。",
+      "command": null,
+      "output": null,
+      "interpretation": "计划：等待学生实际执行与提问，不预填结果。"
+    }
+  ],
+  "retrospective": "初始会话由 agent 主导实现，学生贡献集中在流程约束（编译门槛、进度板留痕）与技术选型（C++）。已验证：编译通过、20 公开用例全过（本地进程与 Docker 镜像双形态）、崩溃恢复与边界自测过、Recall@10=0.985、精确查询 0.694s/1000。尚未验证：正式 29 用例、超内存数据场景、性能三轮中位数。教训：(1) 公开样例的 ORDER BY 非投影列这类基础语义容易在解析器里漏掉，必须逐条对照 .result；(2) ANN 参数不能凭感觉，要用基准脚本量化召回；(3) 性能优化先量化瓶颈（拷贝/排序）再动手；(4) Dockerfile 构建脚本必须在容器环境实际跑通，本地进程验证覆盖不了构建错误。",
+  "limitations": [
+    "本材料目前的学生证据有限：技术解释与修正链多为 agent 产出，按规则不直接证明学生理解；后续会话将如实追加学生复核、质疑与独立验证记录。",
+    "日志无 compaction，频繁更新场景文件与恢复扫描量会增长。",
+    "ANN 召回 0.985 基于均匀随机数据，正式分布未知。",
+    "超内存数据场景与正式 29 用例尚未验证。"
+  ]
+}
