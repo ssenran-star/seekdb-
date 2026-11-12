@@ -65,6 +65,16 @@
       "id": "C8",
       "role": "agent",
       "content": "性能迭代（tests/bench.py，10k 行/128 维/1000 查询/K=10 半过滤）：(1) 初版精确查询 3.47s，ANN 召回 0.866 低于 0.95 要求；(2) ef 64→256、efConstruction 200→400 后召回 0.939 仍不足；(3) ef→512 后召回 0.985 达标；(4) 发现每查询全行拷贝瓶颈（约 5GB memcpy），resolve_row 改返回缓存指针零拷贝 → 2.18s；(5) TopK 改有界堆避免万行全排序与逐行堆分配 → 0.694s。写入稳定 0.47s。"
+    },
+    {
+      "id": "C9",
+      "role": "student",
+      "content": "推送时发现提交分支已有 2026-11-10 会话产出的 C11 实现（零依赖、ANN 召回 1.0、agent 材料完整）。agent 在 VM 上用同一基准实测两版并给出对比表后，学生决策：「改用 C++ 提测」。取舍依据：正式性能评测默认 exact 模式，C++ 精确查询 0.694s 对 C11 0.816s 快约 15%（查询项权重 2/3、耗时权重 60%），且 C++ 的 Docker 镜像已在本 VM 验证；接受 ANN 召回 0.985 低于 C11 的 1.0（仍高于 0.95 门槛，且 ANN 不计入正式性能分）。学生同时授权：先把 C11 备份到 archive 分支，再重写 round2 分支历史。"
+    },
+    {
+      "id": "C10",
+      "role": "agent",
+      "content": "执行学生决策：git push 创建 archive/c11-2026-11-10（4e316940e961baeb2cc5c0eb6ece7f8f88f31d87）保留 C11 全部历史；随后 --force-with-lease（锁定远端旧值 4e316940）推送 C++ commit 101832bdcb197580354525f1f9ebf0e82c7102d1 到 2026-competition-round2；ls-remote 核验远端 SHA 一致，且匿名 ls-remote 成功（仓库公开，平台可获取）。"
     }
   ],
   "experiments": [
@@ -130,9 +140,18 @@
       "command": null,
       "output": null,
       "interpretation": "计划：等待学生实际执行与提问，不预填结果。"
+    },
+    {
+      "id": "E8",
+      "status": "executed",
+      "executor": "student+agent",
+      "hypothesis": "提交分支可安全切换到 C++ 版本：旧 C11 工作完整保留，远端 round2 与本地 commit 一致，且平台可匿名获取。",
+      "command": "git push <url> FETCH_HEAD:refs/heads/archive/c11-2026-11-10 && git push --force-with-lease=2026-competition-round2:4e316940e... <url> 2026-competition-round2 && git ls-remote <url>（含匿名）",
+      "output": "* [new branch] FETCH_HEAD -> archive/c11-2026-11-10；+ 4e316940e...101832bdc 2026-competition-round2 -> 2026-competition-round2 (forced update)；ls-remote: 101832bdcb197580354525f1f9ebf0e82c7102d1 refs/heads/2026-competition-round2 / 4e316940e961baeb2cc5c0eb6ece7f8f88f31d87 refs/heads/archive/c11-2026-11-10；匿名 ls-remote 同样返回 101832bdc。",
+      "interpretation": "学生基于实测对比做出取舍（exact 模式性能优先），force-with-lease 防止覆盖远端未知变更，archive 分支保证旧工作可恢复；仓库公开满足平台可获取要求。提测信息：https://github.com/ssenran-star/seekdb- + 2026-competition-round2 + 101832bdcb197580354525f1f9ebf0e82c7102d1（材料回填 commit 见进度板提交清单）。"
     }
   ],
-  "retrospective": "初始会话由 agent 主导实现，学生贡献集中在流程约束（编译门槛、进度板留痕）与技术选型（C++）。已验证：编译通过、20 公开用例全过（本地进程与 Docker 镜像双形态）、崩溃恢复与边界自测过、Recall@10=0.985、精确查询 0.694s/1000。尚未验证：正式 29 用例、超内存数据场景、性能三轮中位数。教训：(1) 公开样例的 ORDER BY 非投影列这类基础语义容易在解析器里漏掉，必须逐条对照 .result；(2) ANN 参数不能凭感觉，要用基准脚本量化召回；(3) 性能优化先量化瓶颈（拷贝/排序）再动手；(4) Dockerfile 构建脚本必须在容器环境实际跑通，本地进程验证覆盖不了构建错误。",
+  "retrospective": "初始会话由 agent 主导实现，学生贡献集中在流程约束（编译门槛、进度板留痕）与技术选型（C++）。已验证：编译通过、20 公开用例全过（本地进程与 Docker 镜像双形态）、崩溃恢复与边界自测过、Recall@10=0.985、精确查询 0.694s/1000。尚未验证：正式 29 用例、超内存数据场景、性能三轮中位数。教训：(1) 公开样例的 ORDER BY 非投影列这类基础语义容易在解析器里漏掉，必须逐条对照 .result；(2) ANN 参数不能凭感觉，要用基准脚本量化召回；(3) 性能优化先量化瓶颈（拷贝/排序）再动手；(4) Dockerfile 构建脚本必须在容器环境实际跑通，本地进程验证覆盖不了构建错误；(5) 存在多个候选实现时先用同一基准实测再决策，优化要对准正式评测口径（exact 模式）；重写分支前先把旧工作备份到 archive 分支并用 --force-with-lease。",
   "limitations": [
     "本材料目前的学生证据有限：技术解释与修正链多为 agent 产出，按规则不直接证明学生理解；后续会话将如实追加学生复核、质疑与独立验证记录。",
     "日志无 compaction，频繁更新场景文件与恢复扫描量会增长。",
