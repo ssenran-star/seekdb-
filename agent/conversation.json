@@ -2,7 +2,7 @@
   "material_version": "minivectordb-round2-2026-11-12",
   "project": "MiniVectorDB — OceanBase 2026 大赛加赛 Round 2",
   "synthetic": false,
-  "scope_note": "本文件如实记录 2026-11-12 初始开发会话。来源标注：student=参赛选手（用户），agent=Qoder AI 助手，tool=虚拟机 shell / protocol_check / 测试脚本的实际输出。agent 与 tool 产出不作为学生理解证据；学生贡献以 user_prompts 与 conversations 中 role=student 的原文为准。未执行的内容一律标 status=plan。",
+  "scope_note": "本文件如实记录 2026-11-12 初始开发会话、首次正式提测平台反馈，以及反馈后的验证会话。来源标注：student=参赛选手（用户），agent=Qoder AI 助手，tool=虚拟机 shell / protocol_check / 测试脚本的实际输出。agent 与 tool 产出不作为学生理解证据；学生贡献以 user_prompts 与 conversations 中 role=student 的原文为准。未执行的内容一律标 status=plan；学生未作出的预测/解释如实标注为未提供，不代写。",
   "user_prompts": [
     {
       "id": "P1",
@@ -75,6 +75,21 @@
       "id": "C10",
       "role": "agent",
       "content": "执行学生决策：git push 创建 archive/c11-2026-11-10（4e316940e961baeb2cc5c0eb6ece7f8f88f31d87）保留 C11 全部历史；随后 --force-with-lease（锁定远端旧值 4e316940）推送 C++ commit 101832bdcb197580354525f1f9ebf0e82c7102d1 到 2026-competition-round2；ls-remote 核验远端 SHA 一致，且匿名 ls-remote 成功（仓库公开，平台可获取）。"
+    },
+    {
+      "id": "C11",
+      "role": "student",
+      "content": "验证会话实验 1 预测（选择题作答，原文）：「部分保留（不确定几行）」——学生怀疑提交标记和数据行分开写，kill -9 后可能出现只有一部分行保留的情况。"
+    },
+    {
+      "id": "C12",
+      "role": "student",
+      "content": "实验 1 结果（4 行完整保留）与学生预测相反。agent 请学生用自己的话解释为何不可能部分保留，学生回复（逐字）：「不知道，要你在虚拟机上试」——拒绝接受纯理论解释，要求在虚拟机上做实证。agent 遂补充日志解剖实验 E10。"
+    },
+    {
+      "id": "C13",
+      "role": "student",
+      "content": "实验 2（ann 过滤 TopK）预测环节：学生未作预测（作答为 No preference）。如实记录：该实验无学生预测证据，仅作为 agent 演示与学生旁观。"
     }
   ],
   "experiments": [
@@ -149,13 +164,40 @@
       "command": "git push <url> FETCH_HEAD:refs/heads/archive/c11-2026-11-10 && git push --force-with-lease=2026-competition-round2:4e316940e... <url> 2026-competition-round2 && git ls-remote <url>（含匿名）",
       "output": "* [new branch] FETCH_HEAD -> archive/c11-2026-11-10；+ 4e316940e...101832bdc 2026-competition-round2 -> 2026-competition-round2 (forced update)；ls-remote: 101832bdcb197580354525f1f9ebf0e82c7102d1 refs/heads/2026-competition-round2 / 4e316940e961baeb2cc5c0eb6ece7f8f88f31d87 refs/heads/archive/c11-2026-11-10；匿名 ls-remote 同样返回 101832bdc。",
       "interpretation": "学生基于实测对比做出取舍（exact 模式性能优先），force-with-lease 防止覆盖远端未知变更，archive 分支保证旧工作可恢复；仓库公开满足平台可获取要求。提测信息：https://github.com/ssenran-star/seekdb- + 2026-competition-round2 + 101832bdcb197580354525f1f9ebf0e82c7102d1（材料回填 commit 见进度板提交清单）。"
+    },
+    {
+      "id": "E9",
+      "status": "executed",
+      "executor": "student+agent",
+      "hypothesis": "学生预测（C11）：COMMIT 成功响应后立刻 kill -9，重启后数据可能部分保留。",
+      "command": "python3 tests/e1_commit_kill.py ./build/minivectordb（VM 实际执行）",
+      "output": "COMMIT response received: {\"affected_rows\": 0, \"id\": 5, \"ok\": true} / process killed with SIGKILL immediately after COMMIT response / after restart: {\"columns\": [\"id\", \"v\"], \"id\": 1, \"ok\": true, \"rows\": [[1, \"a\"], [2, \"b\"], [3, \"c\"], [4, \"d\"]]} / RESULT_A: ALL 4 ROWS SURVIVED / second kill: inside open transaction, no COMMIT sent / RESULT_B: UNCOMMITTED ROW 5 ROLLED BACK",
+      "interpretation": "实验否证了学生的部分保留预测：已提交 4 行完整保留，未提交第 5 行整体回滚。学生未自行解释原因，要求虚拟机实证（C12），见 E10。机制解释由 agent 提供（不计为学生理解证据）。"
+    },
+    {
+      "id": "E10",
+      "status": "executed",
+      "executor": "student+agent",
+      "hypothesis": "应学生要求（C12）用日志解剖证明：数据行物理存在不等于可见，可见性由 COMMIT 标记按事务整体判定。",
+      "command": "python3 tests/e1b_log_autopsy.py ./build/minivectordb（VM 实际执行；阶段2人为截断标记为机制演示，非崩溃模型合规测试）",
+      "output": "PHASE 1（提交前 kill）：@225: INSERT pk=3 txn=3 / @281: INSERT pk=4 txn=3（无 txn=3 的 COMMIT）→ visible rows after restart: [1, 2]。PHASE 2（提交后 kill）：@337: COMMIT txn=3 → visible rows (marker intact): [1, 2, 3, 4]；截断文件末尾 10 字节后 → visible rows (marker torn): [1, 2]。",
+      "interpretation": "agent 解释：数据行先写、COMMIT 标记后写、fdatasync 后才回 ok:true；恢复按完整标记判定整个事务可见，标记缺失/不完整则整个事务不可见，故不存在部分保留。学生贡献为提出实证要求并观看结果；截至本条记录，学生未用自己的话复述该机制（如实标注，不代写）。"
+    },
+    {
+      "id": "E11",
+      "status": "executed",
+      "executor": "agent",
+      "hypothesis": "ann 模式过滤 TopK 满足先过滤后检索、不足 K 返回全部、并列按主键升序；恢复途中反复强杀不丢已提交数据。",
+      "command": "python3 tests/e2_ann_filter.py ./build/minivectordb && python3 tests/e3_recovery_kill.py ./build/minivectordb（VM 实际执行）",
+      "output": "E2: exact keep LIMIT 10: [[1,0.0],[3,1.0],[8,1.0]]；ann keep LIMIT 10: [[1,0.0],[3,1.0],[8,1.0]]；ann absent LIMIT 10: []；ann nofilter LIMIT 2: [[1,0.0],[2,0.0]]。E3: loaded 20000 rows + index in 2.11s；kill during recovery #1/#2/#3 (150ms after start, before ready)；final recovery ready in 1.70s; rows=20000 first=0 last=19999；E3 PASS: repeated mid-recovery kills lose no committed data。",
+      "interpretation": "ann 与 exact 在小数据上结果一致（候选不足 K 时回退精确扫描）；20k 行恢复途中连续 3 次强杀后数据零丢失。本组为学生未预测的 agent 演示（C13），不作为学生理解证据。"
     }
   ],
-  "retrospective": "初始会话由 agent 主导实现，学生贡献集中在流程约束（编译门槛、进度板留痕）与技术选型（C++）。已验证：编译通过、20 公开用例全过（本地进程与 Docker 镜像双形态）、崩溃恢复与边界自测过、Recall@10=0.985、精确查询 0.694s/1000。尚未验证：正式 29 用例、超内存数据场景、性能三轮中位数。教训：(1) 公开样例的 ORDER BY 非投影列这类基础语义容易在解析器里漏掉，必须逐条对照 .result；(2) ANN 参数不能凭感觉，要用基准脚本量化召回；(3) 性能优化先量化瓶颈（拷贝/排序）再动手；(4) Dockerfile 构建脚本必须在容器环境实际跑通，本地进程验证覆盖不了构建错误；(5) 存在多个候选实现时先用同一基准实测再决策，优化要对准正式评测口径（exact 模式）；重写分支前先把旧工作备份到 archive 分支并用 --force-with-lease。",
+  "retrospective": "初始会话由 agent 主导实现，学生贡献集中在流程约束（编译门槛、进度板留痕）与技术选型（C++）。首次正式提测：性能与 Agent 评测均完成（按规则推断 MySQL case 准入全过），Agent 原始分 2.0，性能 E=1628.165077（平台显示口径与文档 0~1 公式不符，待确认）。反馈后验证会话：学生预测提交后强杀会部分保留（E9 被否证），拒绝理论解释、要求虚拟机实证（E10 日志解剖），未对 ann 实验作预测（E11 为 agent 演示）。已验证：编译通过、20 公开用例全过（本地进程与 Docker 镜像双形态）、崩溃恢复与边界自测过、Recall@10=0.985、精确查询 0.694s/1000、20k 行恢复中反复强杀零丢失。教训：(1) 公开样例的 ORDER BY 非投影列这类基础语义容易在解析器里漏掉，必须逐条对照 .result；(2) ANN 参数不能凭感觉，要用基准脚本量化召回；(3) 性能优化先量化瓶颈（拷贝/排序）再动手；(4) Dockerfile 构建脚本必须在容器环境实际跑通；(5) 多候选实现先同基准实测再决策，优化对准正式口径（exact）；重写分支前备份 archive + force-with-lease；(6) Agent 评分只认学生自身证据：预测被否证+要求实证是有效实例，但机制解释若由 agent 代述则不计学生理解——后续需要学生自己复述与迁移。",
   "limitations": [
-    "本材料目前的学生证据有限：技术解释与修正链多为 agent 产出，按规则不直接证明学生理解；后续会话将如实追加学生复核、质疑与独立验证记录。",
+    "学生证据仍有限：E9 含学生预测与被否证后的实证要求（有效实例），但机制解释为 agent 产出；学生尚未用自己的话复述/迁移，1.5 及以上档位证据缺失，如实标注。",
     "日志无 compaction，频繁更新场景文件与恢复扫描量会增长。",
     "ANN 召回 0.985 基于均匀随机数据，正式分布未知。",
-    "超内存数据场景与正式 29 用例尚未验证。"
+    "性能 E 的平台显示口径待确认；两榜排名与折算分待公布。"
   ]
 }
