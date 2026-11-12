@@ -25,6 +25,7 @@
 #include "lib/utility/ob_macro_utils.h"
 #include "lib/utility/utility.h"
 #include <mutex>
+#include <atomic>
 #include "data_plane/fts/ob_fts_struct.h"
 #include "data_plane/fts/ob_fts_parser_helper.h"
 #include "storage/fts/dict/ob_ft_dict.h"
@@ -84,8 +85,8 @@ private:
   ObIFTDict *main_dict_;
   ObIFTDict *quan_dict_;
   ObIFTDict *stop_dict_;
-  int last_err_;
-  bool inited_;
+  std::atomic<int> last_err_;
+  std::atomic<bool> inited_;
   std::mutex mutex_;
 
   DISABLE_COPY_ASSIGN(ObIKSharedDictSet);
@@ -146,23 +147,27 @@ int ObIKSharedDictSet::build()
 int ObIKSharedDictSet::get(ObIFTDict *&main_dict, ObIFTDict *&quan_dict, ObIFTDict *&stop_dict)
 {
   int ret = OB_SUCCESS;
-  if (!inited_) {
+  // acquire load pairs with the release store below: once a reader observes
+  // inited_ == true it is guaranteed to see the dict pointers published before
+  // that store, without taking the mutex on the hot path.
+  if (!inited_.load(std::memory_order_acquire)) {
     std::lock_guard<std::mutex> guard(mutex_);
-    if (!inited_) {
+    if (!inited_.load(std::memory_order_relaxed)) {
       if (OB_FAIL(build())) {
-        last_err_ = ret;
+        last_err_.store(ret, std::memory_order_relaxed);
         LOG_WARN("failed to build shared ik dict", K(ret));
       } else {
-        last_err_ = OB_SUCCESS;
-        inited_ = true;
+        last_err_.store(OB_SUCCESS, std::memory_order_relaxed);
+        inited_.store(true, std::memory_order_release);
       }
     }
   }
 
-  if (!inited_) {
+  if (!inited_.load(std::memory_order_acquire)) {
     // Keep retryable: a transient failure (e.g. dict hub not yet ready) is
     // re-attempted on the next parse rather than being cached permanently.
-    ret = (OB_SUCCESS == last_err_) ? OB_NOT_INIT : last_err_;
+    const int err = last_err_.load(std::memory_order_relaxed);
+    ret = (OB_SUCCESS == err) ? OB_NOT_INIT : err;
   } else {
     main_dict = main_dict_;
     quan_dict = quan_dict_;
