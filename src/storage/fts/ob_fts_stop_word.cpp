@@ -29,22 +29,69 @@ namespace storage
 
 namespace
 {
-OB_INLINE bool is_ascii_word(const ObString &word)
+// True when an utf8mb4 token is well-formed UTF-8 up to and including a 3-byte
+// sequence whose lead byte is 0xE4..0xE9, i.e. a code point in U+4000..U+9FFF.
+// Under utf8mb4_general_ci those code points keep a sort weight >= 0x4000 (the
+// ob_unicase_default pages 0x40..0x9F are NULL, so ob_tosort_unicode leaves them
+// unchanged), while every built-in stop word is ASCII with weight <= 0x7A.  Such
+// a token can therefore never compare equal to a stop word and the collation
+// hash probe is provably always a miss.
+//
+// The scan validates each preceding sequence exactly like ob_mb_wc_utf8mb4 and
+// bails out on the first malformed/truncated byte: ob_hash_sort_utf8mb4 stops
+// decoding at such a byte, so a CJK code point after it would never reach the
+// hash and the prefix could still be an ASCII stop word.  Returning false there
+// keeps the probe on the safe side.  For a token that starts with CJK (the
+// common IK case) this returns on the first character.
+OB_INLINE bool contains_utf8mb4_cjk(const ObString &word)
 {
-  bool is_ascii = true;
-  for (int64_t i = 0; is_ascii && i < word.length(); ++i) {
-    is_ascii = (0 == (static_cast<unsigned char>(word.ptr()[i]) & 0x80));
+  const unsigned char *ptr = reinterpret_cast<const unsigned char *>(word.ptr());
+  const int64_t len = word.length();
+  int64_t i = 0;
+  while (i < len) {
+    const unsigned char c = ptr[i];
+    if (c < 0x80) {
+      ++i;
+    } else if (c >= 0xC2 && c < 0xE0) {
+      if (i + 1 >= len || 0x80 != (ptr[i + 1] & 0xC0)) {
+        return false;
+      }
+      i += 2;
+    } else if (c >= 0xE0 && c < 0xF0) {
+      if (i + 2 >= len || 0x80 != (ptr[i + 1] & 0xC0) || 0x80 != (ptr[i + 2] & 0xC0)
+          || (c < 0xE1 && ptr[i + 1] < 0xA0)) {
+        return false;
+      }
+      if (c >= 0xE4 && c <= 0xE9) {
+        return true;
+      }
+      i += 3;
+    } else if (c >= 0xF0 && c < 0xF5) {
+      if (i + 3 >= len || 0x80 != (ptr[i + 1] & 0xC0) || 0x80 != (ptr[i + 2] & 0xC0)
+          || 0x80 != (ptr[i + 3] & 0xC0)
+          || (c < 0xF1 && ptr[i + 1] < 0x90) || (c > 0xF3 && ptr[i + 1] > 0x8F)) {
+        return false;
+      }
+      i += 4;
+    } else {
+      return false;
+    }
   }
-  return is_ascii;
+  return false;
 }
 
 // The built in stop word table is a compile time constant: a few dozen lower case
 // ASCII words.  Deciding whether a token is one of them is on the hot path of
 // every single document, and an index build runs it from several worker threads
 // at once, so the check must not touch any shared writable state.  The table is
-// therefore folded once into a read only list of (length, leading bytes) pairs
-// and membership is decided by comparing two integers per entry: no lock, no
-// allocation, no charset work, and nothing that several threads can contend on.
+// therefore folded once into read only prefixes grouped by exact byte length;
+// membership becomes a short scan of just that one length's bucket.  With the
+// current table (len1=2, len2=15, len3=10, len4=7, len5=2) this cuts the prefix
+// comparisons per ASCII token from 36 down to at most 15, and lengths past the
+// longest stop word touch nothing at all.  No lock, no allocation, no charset
+// work, and nothing to contend on.  The build is a counting sort, so buckets stay
+// correct for any table that fits in MAX_WORD_CNT, and a compile time guard
+// enforces that bound.
 class ObStopWordLut
 {
 public:
@@ -53,20 +100,49 @@ public:
 
   ObStopWordLut() : count_(0), max_word_len_(0)
   {
+    static_assert(sizeof(ob_stop_word_list) / sizeof(ob_stop_word_list[0]) <= MAX_WORD_CNT,
+                  "stop word table exceeds ObStopWordLut capacity");
+
     const int64_t table_cnt = static_cast<int64_t>(
         sizeof(ob_stop_word_list) / sizeof(ob_stop_word_list[0]));
-    for (int64_t i = 0; i < table_cnt && count_ < MAX_WORD_CNT; ++i) {
-      const char *word = ob_stop_word_list[i];
-      int64_t len = 0;
-      while (len < MAX_WORD_LEN && '\0' != word[len]) {
-        ++len;
-      }
-      if (len > 0) {
-        entries_[count_].prefix_ = pack_prefix(word, len);
-        entries_[count_].len_ = static_cast<uint8_t>(len);
-        ++count_;
+
+    // Pass 1: how many stop words have each byte length, and the longest one.
+    int64_t len_count[MAX_WORD_LEN + 1];
+    for (int64_t l = 0; l <= MAX_WORD_LEN; ++l) {
+      len_count[l] = 0;
+    }
+    for (int64_t i = 0; i < table_cnt; ++i) {
+      const int64_t len = stop_word_len(ob_stop_word_list[i]);
+      if (len > 0 && len <= MAX_WORD_LEN) {
+        ++len_count[len];
         if (len > max_word_len_) {
           max_word_len_ = len;
+        }
+      }
+    }
+
+    // Prefix sums give each length its own contiguous slice of entries_.
+    int64_t offset = 0;
+    for (int64_t l = 0; l <= MAX_WORD_LEN; ++l) {
+      bucket_offset_[l] = static_cast<uint8_t>(offset);
+      bucket_size_[l] = static_cast<uint8_t>(len_count[l]);
+      offset += len_count[l];
+    }
+    count_ = offset;
+
+    // Pass 2: scatter each word into its length slice.  cursor tracks the next
+    // free slot of each slice; entries_ ends up grouped by length.
+    int64_t cursor[MAX_WORD_LEN + 1];
+    for (int64_t l = 0; l <= MAX_WORD_LEN; ++l) {
+      cursor[l] = bucket_offset_[l];
+    }
+    for (int64_t i = 0; i < table_cnt; ++i) {
+      const char *word = ob_stop_word_list[i];
+      const int64_t len = stop_word_len(word);
+      if (len > 0 && len <= MAX_WORD_LEN) {
+        const int64_t slot = cursor[len]++;
+        if (slot < count_) {
+          entries_[slot] = pack_prefix(word, len);
         }
       }
     }
@@ -81,22 +157,28 @@ public:
   bool contains(const char *word, const int64_t len) const
   {
     bool found = false;
-    if (len > 0 && len <= max_word_len_) {
+    if (len > 0 && len <= max_word_len_ && bucket_size_[len] > 0) {
+      // No stop word has this byte length (e.g. len 6..8): skip pack_prefix
+      // altogether instead of building a key for an empty bucket.
       const uint64_t prefix = pack_prefix(word, len);
-      for (int64_t i = 0; !found && i < count_; ++i) {
-        found = (entries_[i].len_ == static_cast<uint8_t>(len)
-                 && entries_[i].prefix_ == prefix);
+      const int64_t begin = bucket_offset_[len];
+      const int64_t end = begin + bucket_size_[len];
+      for (int64_t i = begin; !found && i < end; ++i) {
+        found = (entries_[i] == prefix);
       }
     }
     return found;
   }
 
 private:
-  struct Entry
+  static int64_t stop_word_len(const char *word)
   {
-    uint64_t prefix_;
-    uint8_t len_;
-  };
+    int64_t len = 0;
+    while (len < MAX_WORD_LEN && '\0' != word[len]) {
+      ++len;
+    }
+    return len;
+  }
 
   static uint64_t pack_prefix(const char *word, const int64_t len)
   {
@@ -108,7 +190,9 @@ private:
   }
 
 private:
-  Entry entries_[MAX_WORD_CNT];
+  uint64_t entries_[MAX_WORD_CNT];
+  uint8_t bucket_offset_[MAX_WORD_LEN + 1];
+  uint8_t bucket_size_[MAX_WORD_LEN + 1];
   int64_t count_;
   int64_t max_word_len_;
 };
@@ -227,62 +311,85 @@ int ObStopWordChecker::check_stopword(const ObFTWord &word, bool &is_stopword)
     ret = OB_NOT_INIT;
   } else if (OB_UNLIKELY(word.empty())) {
     ret = OB_INVALID_ARGUMENT;
-  } else if (is_ascii_word(word.get_word().get_string())) {
-    // general_ci comparison over ASCII is case insensitive byte comparison, so a
-    // lower cased copy of the token is what the table has to be asked about.
-    const ObString ascii_word = word.get_word().get_string();
-    const ObStopWordLut &lut = get_stop_word_lut();
-    // No built-in stop word is longer than max_word_len() (derived from the
-    // table).  Tokens past that length can never match, so return before the
-    // uppercase scan, the lowercase copy and the LUT walk.
-    if (ascii_word.length() > lut.max_word_len()) {
-      is_stopword = false;
-    } else {
-      char lower_buf[ObStopWordLut::MAX_WORD_LEN];
-      bool has_upper = false;
-      for (int64_t i = 0; !has_upper && i < ascii_word.length(); ++i) {
-        has_upper = (ascii_word.ptr()[i] >= 'A' && ascii_word.ptr()[i] <= 'Z');
-      }
-      const char *lookup_ptr = ascii_word.ptr();
-      if (has_upper) {
-        for (int64_t i = 0; i < ascii_word.length(); ++i) {
-          const char c = ascii_word.ptr()[i];
-          lower_buf[i] = (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
-        }
-        lookup_ptr = lower_buf;
-      }
-      is_stopword = lut.contains(lookup_ptr, ascii_word.length());
-    }
   } else {
-    common::ObString cmp_str;
-    // Skip the conversion copy when the charsets already match (the common case:
-    // an utf8mb4 token against the utf8mb4 stop word list).
-    const ObCharsetType word_cs = ObCharset::charset_type_by_coll(word.get_collation_type());
-    const ObCharsetType stop_cs = ObCharset::charset_type_by_coll(stopword_type_.get_collation_type());
-    if (word_cs == stop_cs && common::CHARSET_INVALID != word_cs) {
-      cmp_str = word.get_word().get_string();
-    } else {
-      common::ObArenaAllocator allocator(lib::ObMemAttr("ChkStopWord"));
-      if (OB_FAIL(common::ObCharset::charset_convert(
-                                       allocator,
-                                       word.get_word().get_string(),
-                                       word.get_collation_type(),
-                                       stopword_type_.get_collation_type(),
-                                       cmp_str))) {
+    const ObString word_str = word.get_word().get_string();
+    const int64_t len = word_str.length();
+    const ObStopWordLut &lut = get_stop_word_lut();
+    char lower_buf[ObStopWordLut::MAX_WORD_LEN];
+    bool is_ascii = true;
+    bool has_upper = false;
+    // One combined pass decides ASCII-ness and, for short tokens, builds the
+    // lowercased lookup key.  The old code walked every ASCII token up to three
+    // times: is_ascii_word() to test the high bit, a second scan to find an
+    // upper-case byte, then a third to build a lower-cased copy.  For BENG the
+    // normalizer has already lower-cased, so the second and third walks were
+    // always dead.  Stop at the first non-ASCII byte exactly as is_ascii_word
+    // did, so the non-ASCII branch below sees an identical token.
+    for (int64_t i = 0; i < len; ++i) {
+      const unsigned char c = static_cast<unsigned char>(word_str.ptr()[i]);
+      if (0 != (c & 0x80)) {
+        is_ascii = false;
+        break;
+      }
+      if (c >= 'A' && c <= 'Z' && !has_upper && len <= lut.max_word_len()) {
+        // First upper-case byte of a short token: build the lookup key once.
+        // Already-lowercase tokens (the common BENG case) never enter here.
+        has_upper = true;
+        for (int64_t j = 0; j < len; ++j) {
+          const char cc = word_str.ptr()[j];
+          lower_buf[j] = (cc >= 'A' && cc <= 'Z')
+                         ? static_cast<char>(cc - 'A' + 'a') : cc;
+        }
       }
     }
-    if (OB_SUCC(ret)) {
-      ObFTWord converted(cmp_str.length(), cmp_str.ptr(), stopword_type_);
-      ret = stopword_set_.exist_refactored(converted);
-      if (OB_HASH_NOT_EXIST == ret) {
+    if (is_ascii) {
+      // general_ci comparison over ASCII is case insensitive byte comparison,
+      // so the lower-cased key built above is what the table must be asked about.
+      // No built-in stop word is longer than max_word_len(), so longer tokens
+      // can never match and return before any LUT walk.
+      if (len > lut.max_word_len()) {
         is_stopword = false;
-        ret = OB_SUCCESS;
-      } else if (OB_HASH_EXIST == ret) {
-        is_stopword = true;
-        ret = OB_SUCCESS;
-      } else if (OB_SUCC(ret)) {
-        ret = OB_ERR_UNEXPECTED;
       } else {
+        const char *lookup_ptr = has_upper ? lower_buf : word_str.ptr();
+        is_stopword = lut.contains(lookup_ptr, len);
+      }
+    } else {
+      common::ObString cmp_str;
+      // Skip the conversion copy when the charsets already match (the common case:
+      // an utf8mb4 token against the utf8mb4 stop word list).
+      const ObCharsetType word_cs = ObCharset::charset_type_by_coll(word.get_collation_type());
+      const ObCharsetType stop_cs = ObCharset::charset_type_by_coll(stopword_type_.get_collation_type());
+      bool skip_probe = false;
+      if (word_cs == stop_cs && common::CHARSET_INVALID != word_cs) {
+        cmp_str = word_str;
+        // A well-formed CJK token has general_ci sort weights >= 0x4000 and can
+        // never equal an all-ASCII stop word, so the hash probe below is provably
+        // always a miss for it.  Skip it.
+        skip_probe = (common::CHARSET_UTF8MB4 == word_cs
+                      && contains_utf8mb4_cjk(cmp_str));
+      } else {
+        common::ObArenaAllocator allocator(lib::ObMemAttr("ChkStopWord"));
+        if (OB_FAIL(common::ObCharset::charset_convert(
+                                         allocator,
+                                         word_str,
+                                         word.get_collation_type(),
+                                         stopword_type_.get_collation_type(),
+                                         cmp_str))) {
+        }
+      }
+      if (OB_SUCC(ret) && !skip_probe) {
+        ObFTWord converted(cmp_str.length(), cmp_str.ptr(), stopword_type_);
+        ret = stopword_set_.exist_refactored(converted);
+        if (OB_HASH_NOT_EXIST == ret) {
+          is_stopword = false;
+          ret = OB_SUCCESS;
+        } else if (OB_HASH_EXIST == ret) {
+          is_stopword = true;
+          ret = OB_SUCCESS;
+        } else if (OB_SUCC(ret)) {
+          ret = OB_ERR_UNEXPECTED;
+        } else {
+        }
       }
     }
   }
