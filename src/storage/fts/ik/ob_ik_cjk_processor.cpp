@@ -55,7 +55,12 @@ int ObIKCJKProcessor::do_process(TokenizeContext &ctx,
       } else if (hit.is_prefix()) {
         // nothing
       } else if (hit.is_unmatch()) {
-        hits_.erase(hit);
+        // erase by iterator (O(1)) instead of by value: erase(const T&) rescans
+        // from begin() for an operator== match even though `iter` already pins
+        // this node.  The node is arena-allocated (free() is a no-op), so its
+        // next pointer survives the unlink and the loop's iter++ still advances
+        // exactly as it did with the by-value erase.
+        hits_.erase(iter);
       } else {
         ret = OB_UNEXPECT_INTERNAL_ERROR;
       }
