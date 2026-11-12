@@ -250,17 +250,19 @@ int ObIKFTParser::init_dict(const ObFTParserParam &param)
                               ObCharsetType::CHARSET_UTF8MB4,
                               ObCollationType::CS_TYPE_UTF8MB4_BIN);
 
-  ObFTDictDesc stopword_dict_desc("stopword",
-                                  ObFTDictType::DICT_IK_STOP,
-                                  ObCharsetType::CHARSET_UTF8MB4,
-                                  ObCollationType::CS_TYPE_UTF8MB4_BIN);
+  // The IK stopword dict is never consulted: the only dict_stop_->match() call
+  // (in get_next_token) is commented out and is_stop is hardwired false, and no
+  // other code path reads DICT_IK_STOP.  Loading and building it per document
+  // (load_cache bucket lock + dict_info probe + per-range ObDictCache::get_dict,
+  // then an ObFTRangeDict + ObFTCacheDict wrapper) was pure dead work.  Skip it;
+  // dict_stop_ stays nullptr and cache_stop_ stays empty, both of which reset()
+  // already handles.  This pins fewer KV handles, never more.
 
   if (should_read_newest_table()) {
     // clear dict cache, always false now
   } else {
     if (OB_FAIL(init_single_dict(main_dict_desc, cache_main_))) {
     } else if (OB_FAIL(init_single_dict(quan_dict_desc, cache_quan_))) {
-    } else if (OB_FAIL(init_single_dict(stopword_dict_desc, cache_stop_))) {
     }
   }
 
@@ -268,7 +270,6 @@ int ObIKFTParser::init_dict(const ObFTParserParam &param)
     // already logged.
   } else if (OB_FAIL(build_dict_from_cache(main_dict_desc, cache_main_, dict_main_))) {
   } else if (OB_FAIL(build_dict_from_cache(quan_dict_desc, cache_quan_, dict_quan_))) {
-  } else if (OB_FAIL(build_dict_from_cache(stopword_dict_desc, cache_stop_, dict_stop_))) {
   }
 
   return ret;

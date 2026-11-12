@@ -412,11 +412,31 @@ int ObFTRangeDict::find_first_char_range(const ObString &single_word, ObIFTDict 
       found = true;
     }
   }
-  for (int64_t i = 0; OB_SUCC(ret) && !found && i < range_cnt; ++i) {
-    if (ft_bin_cmp(range_dicts_[i].start_.get_word(), single_word) <= 0
-        && ft_bin_cmp(range_dicts_[i].end_.get_word(), single_word) >= 0) {
-      dict = range_dicts_[i].dict_;
-      last_range_idx_ = i;
+  // Ranges are built in dictionary order and split only at first-character
+  // boundaries, so range_dicts_ is sorted by start_ and the ranges are
+  // non-overlapping (start_{i+1} > end_i).  A character therefore belongs to at
+  // most one range: the rightmost range whose start_ <= single_word.  Binary
+  // search finds that candidate in O(log n) instead of scanning every range,
+  // then a single end_ check confirms membership.  This returns exactly the
+  // range the old linear scan would (or OB_ENTRY_NOT_EXIST), and sets
+  // last_range_idx_ to the same index, so matching is byte-identical.
+  if (!found) {
+    int64_t lo = 0;
+    int64_t hi = range_cnt - 1;
+    int64_t candidate = -1;
+    while (lo <= hi) {
+      const int64_t mid = lo + (hi - lo) / 2;
+      if (ft_bin_cmp(range_dicts_[mid].start_.get_word(), single_word) <= 0) {
+        candidate = mid;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    if (candidate >= 0
+        && ft_bin_cmp(range_dicts_[candidate].end_.get_word(), single_word) >= 0) {
+      dict = range_dicts_[candidate].dict_;
+      last_range_idx_ = candidate;
       found = true;
     }
   }
