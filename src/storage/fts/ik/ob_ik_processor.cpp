@@ -59,7 +59,7 @@ TokenizeContext::TokenizeContext(ObCollationType coll_type,
                                  int64_t fulltext_len,
                                  bool is_smart)
     : coll_type_(coll_type), fulltext_(fulltext), fulltext_len_(fulltext_len), cursor_(0),
-      next_char_len_(0), handle_size_(0), is_smart_(is_smart),
+      next_char_len_(0), next_char_unicode_(0), handle_size_(0), is_smart_(is_smart),
       is_utf8mb4_(CHARSET_UTF8MB4 == ObCharset::charset_type_by_coll(coll_type)),
       allocator_(allocator), token_list_(allocator), result_list_(allocator)
 {
@@ -147,7 +147,8 @@ int TokenizeContext::prepare_next_char()
     if (OB_FAIL(ObFTCharUtil::classify_first_char(coll_type_,
                                                   fulltext_ + cursor_,
                                                   next_char_len_,
-                                                  next_char_type_))) {
+                                                  next_char_type_,
+                                                  &next_char_unicode_))) {
     }
   }
   return ret;

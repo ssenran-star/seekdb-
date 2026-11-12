@@ -48,6 +48,11 @@ public:
   int current_char(const char *&ch, uint8_t &char_len);
   int current_char_type(ObFTCharUtil::CharType &type);
 
+  // Code point of the current character, decoded once by prepare_next_char().
+  // Processors reuse it instead of re-decoding the same bytes (quantifier number
+  // probe, letter connector probes).
+  ob_wc_t current_unicode() const { return next_char_unicode_; }
+
   // Decode and classify the character starting at `pos`.  Only the arbitrator's
   // keep_single()==true single-word output path calls this; the normal path walks
   // the arbitrator's ordered chains and never reaches it.  Recomputed on demand
@@ -92,6 +97,7 @@ private:
   int64_t cursor_;
   int64_t next_char_len_;
   ObFTCharUtil::CharType next_char_type_;
+  ob_wc_t next_char_unicode_;
 
   uint32_t handle_size_;
   bool is_smart_;
