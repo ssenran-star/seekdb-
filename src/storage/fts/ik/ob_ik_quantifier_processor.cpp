@@ -50,10 +50,18 @@ int ObIKQuantifierProcessor::process_CN_number(TokenizeContext &ctx,
   int ret = OB_SUCCESS;
   bool is_cn_number = false;
 
-  if (ObFTCharUtil::CharType::CHINESE == type
-      && OB_FAIL(ObFTCharUtil::check_cn_number_from_unicode(ctx.collation(),
-                                                            ctx.current_unicode(),
-                                                            is_cn_number))) {
+  if (ObFTCharUtil::CharType::CHINESE == type) {
+    if (ctx.is_utf8mb4()) {
+      // Same code point and predicate as check_cn_number_from_unicode(), minus
+      // the per-character charset dispatch.
+      is_cn_number = ObUnicodeBlockUtils::is_unicode_cn_number(ctx.current_unicode());
+    } else if (OB_FAIL(ObFTCharUtil::check_cn_number_from_unicode(ctx.collation(),
+                                                                  ctx.current_unicode(),
+                                                                  is_cn_number))) {
+    }
+  }
+
+  if (OB_FAIL(ret)) {
   } else if (start_ == -1 && end_ == -1) {
     if (is_cn_number) {
       start_ = ctx.get_cursor();

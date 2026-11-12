@@ -53,6 +53,11 @@ public:
   // probe, letter connector probes).
   ob_wc_t current_unicode() const { return next_char_unicode_; }
 
+  // True when the document collation is UTF8MB4.  Lets processors skip work that
+  // is provably impossible on that charset (surrogate pairs) or bypass the
+  // charset dispatch for code-point predicates.
+  bool is_utf8mb4() const { return is_utf8mb4_; }
+
   // Decode and classify the character starting at `pos`.  Only the arbitrator's
   // keep_single()==true single-word output path calls this; the normal path walks
   // the arbitrator's ordered chains and never reaches it.  Recomputed on demand

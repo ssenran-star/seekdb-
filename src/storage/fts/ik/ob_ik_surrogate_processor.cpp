@@ -30,6 +30,14 @@ int ObIKSurrogateProcessor::do_process(TokenizeContext &ctx,
                                        const ObFTCharUtil::CharType type)
 {
   int ret = OB_SUCCESS;
+  // UTF8MB4 classification never produces surrogate code points (do_classify
+  // compiles the surrogate checks out for UTF-8), and high_offset_ is only ever
+  // set on a SURROGATE_HIGH character.  So on that charset every branch below is
+  // a no-op and has_high() is always false; returning early is byte-identical
+  // while skipping the per-character branch chain.
+  if (ctx.is_utf8mb4()) {
+    return ret;
+  }
   if (ObFTCharUtil::CharType::SURROGATE_HIGH == type) {
     high_offset_ = ctx.get_cursor();
     low_offset_ = ctx.get_end_cursor();
