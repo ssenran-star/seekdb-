@@ -19,6 +19,9 @@
 #include "lib/charset/ob_charset_string_helper.h"
 #include "lib/utility/ob_macro_utils.h"
 
+#include <algorithm>
+#include <array>
+
 namespace oceanbase
 {
 namespace storage
@@ -173,12 +176,20 @@ bool ObUnicodeBlockUtils::is_unicode_cn_number(ob_wc_t unicode)
       OB_IK_GET_NUMBER_UNICODE("億"), OB_IK_GET_NUMBER_UNICODE("兆"),
       OB_IK_GET_NUMBER_UNICODE("卅"), OB_IK_GET_NUMBER_UNICODE("廿"),
   };
-  for (int i = 0; i < sizeof(cn_number_array) / sizeof(cn_number_array[0]); i++) {
-    if (unicode == cn_number_array[i]) {
-      return true;
+  // The quantifier probes this for every Chinese character, almost all of which
+  // are NOT numbers, so the old linear scan ran all 34 comparisons on the common
+  // case.  Sort the same code points once at static init and binary-search them:
+  // identical set membership (the duplicate 拾 is harmless), ~5 comparisons
+  // instead of 34 on the hot path.
+  static const std::array<ob_wc_t, sizeof(cn_number_array) / sizeof(cn_number_array[0])> sorted = []{
+    std::array<ob_wc_t, sizeof(cn_number_array) / sizeof(cn_number_array[0])> a;
+    for (size_t i = 0; i < a.size(); ++i) {
+      a[i] = cn_number_array[i];
     }
-  }
-  return false;
+    std::sort(a.begin(), a.end());
+    return a;
+  }();
+  return std::binary_search(sorted.begin(), sorted.end(), unicode);
 }
 
 } //  namespace storage
