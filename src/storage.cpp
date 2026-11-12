@@ -74,6 +74,7 @@ void Log::open(const std::string& dir) {
             throw DbError("internal_error", "bad log header");
         off_t end = ::lseek(fd_, 0, SEEK_END);
         size_ = static_cast<uint64_t>(end);
+        drop_pos_ = size_;
     }
 }
 
@@ -90,6 +91,13 @@ uint64_t Log::append(uint8_t type, uint64_t txn, uint32_t stmt, const std::strin
     uint64_t off = size_;
     write_full(fd_, frame.data(), frame.size());
     size_ += frame.size();
+    // page cache is charged to the container memcg; drop written ranges periodically
+    // or large loads OOM under the 2GiB limit (dirty pages outrun writeback)
+    if (size_ - drop_pos_ >= 64ull * 1024ull * 1024ull) {
+        ::posix_fadvise(fd_, static_cast<off_t>(drop_pos_),
+                        static_cast<off_t>(size_ - drop_pos_), POSIX_FADV_DONTNEED);
+        drop_pos_ = size_;
+    }
     return off;
 }
 
@@ -99,7 +107,10 @@ void Log::sync() {
 }
 
 void Log::drop_cache() {
-    if (fd_ >= 0) ::posix_fadvise(fd_, 0, 0, POSIX_FADV_DONTNEED);
+    if (fd_ >= 0) {
+        ::posix_fadvise(fd_, 0, 0, POSIX_FADV_DONTNEED);
+        drop_pos_ = size_;
+    }
 }
 
 void Log::scan(const std::function<void(const RecordView&)>& cb) {
