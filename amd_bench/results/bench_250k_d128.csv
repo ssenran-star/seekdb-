@@ -1,0 +1,20 @@
+# AMD CAGRA build benchmark - 250K x 128 float32, W7900D (gfx1100), ROCm 7.2.4
+# Dataset: amd_bench/gen_data.py --n 250000 --dim 128 --nq 100 (seed 1234, 2000 clusters, noise 0.30)
+# Ground truth: exact float64 top-10 (gt.i32, 100 queries x 10)
+# Probe: amd_bench/bridge_test.c (dlopen the bridge, call seekdb_cuvs_build / seekdb_cuvs_search directly)
+# niter/igdeg: nn_descent_niter / intermediate_graph_degree
+# recall: recall@10 against the exact top-10 ground truth
+# NOTE: the frozen baseline row is the V5 source compiled with official build.sh (niter=100, igdeg=256),
+#       NOT the .so shipped in the AMD image (that one is an older PoC: much faster, recall 0.43).
+config,niter,igdeg,build_ms,search_ms,ser_ms,deser_ms,snap_bytes,recall,recall_drop,build_speedup
+baseline_v5,100,256,41757.2,34.9,278.1,175.5,256001713,0.9980,0.0000,1.00
+sweep,100,128,30479.9,36.0,294.9,192.2,256001713,0.9980,0.0000,1.37
+sweep,30,256,17946.2,35.3,288.7,184.0,256001713,0.9930,0.0050,2.33
+sweep,30,128,12444.7,34.2,284.5,202.3,256001713,0.9960,0.0020,3.36
+sweep,20,256,14714.5,36.3,299.0,203.1,256001713,0.9980,0.0000,2.84
+sweep,20,128,9140.4,35.1,303.4,212.3,256001713,0.9970,0.0010,4.57
+sweep,10,256,11257.3,33.9,279.3,171.5,256001713,0.9800,0.0180,3.71
+sweep,10,128,6802.3,34.8,299.6,199.0,256001713,0.9890,0.0090,6.14
+sweep,5,256,8763.0,34.1,277.8,168.1,256001713,0.9540,0.0440,4.77
+sweep,5,128,4627.9,34.4,274.5,192.0,256001713,0.9760,0.0220,9.02
+submitted,20,128,9434.7,38.2,271.3,191.4,256001713,0.9980,0.0000,4.43
