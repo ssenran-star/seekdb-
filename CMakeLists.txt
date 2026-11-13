@@ -16,5 +16,5 @@ add_executable(minivectordb
   src/hnsw.cpp
 )
 target_include_directories(minivectordb PRIVATE third_party)
-target_compile_options(minivectordb PRIVATE -Wall -Wextra)
+target_compile_options(minivectordb PRIVATE -Wall -Wextra -march=x86-64-v3)
 target_link_options(minivectordb PRIVATE -static-libstdc++ -static-libgcc)

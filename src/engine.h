@@ -47,6 +47,7 @@ private:
             std::vector<int64_t> pks;
             std::vector<float> vecs;
             std::vector<Row> rows;
+            std::vector<std::vector<std::string>> vcols;
         };
         FastScan scan;
     };
