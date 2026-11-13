@@ -1,1 +1,162 @@
-Lyogc2Vla2RiIDwtPiBoaXBWUyBicmlkZ2U6IHBsYWluLUMgQ0FHUkEga05OOyBhbGwgY3VWUy9ST0NtIGRlcHMgbGl2ZSBoZXJlLiAqLwojaW5jbHVkZSAic2Vla2RiX2N1dnNfYnJpZGdlLmgiCiNpbmNsdWRlIDxjdXZzL2NvcmUvY19hcGkuaD4KI2luY2x1ZGUgPGN1dnMvbmVpZ2hib3JzL2NhZ3JhLmg+CiNpbmNsdWRlIDxkbHBhY2svZGxwYWNrLmg+CiNpZmRlZiBfX0hJUF9QTEFURk9STV9BTURfXwojaW5jbHVkZSA8Y3V2cy9jdWRhX3J1bnRpbWUuaD4KI2Vsc2UKI2luY2x1ZGUgPGN1ZGFfcnVudGltZS5oPgojZW5kaWYKI2luY2x1ZGUgPHN0ZGlvLmg+CiNpbmNsdWRlIDxzdGRsaWIuaD4KCnR5cGVkZWYgc3RydWN0IHsKICBjdXZzUmVzb3VyY2VzX3QgICAgICAgIHJlczsKICBjdXZzQ2FncmFJbmRleFBhcmFtc190IGlwOwogIGN1dnNDYWdyYUluZGV4X3QgICAgICAgaWR4OwogIGxvbmcgbiwgZGltOwp9IHNrX2N1dnNfaW5kZXg7Cgp2b2lkKiBzZWVrZGJfY3V2c19idWlsZChjb25zdCBmbG9hdCogYmFzZSwgbG9uZyBuLCBsb25nIGRpbSkKewogIHNrX2N1dnNfaW5kZXgqIGggPSAoc2tfY3V2c19pbmRleCopY2FsbG9jKDEsIHNpemVvZigqaCkpOwogIGlmICghaCkgcmV0dXJuIE5VTEw7CiAgaWYgKGN1dnNSZXNvdXJjZXNDcmVhdGUoJmgtPnJlcykgIT0gQ1VWU19TVUNDRVNTKSB7IGZyZWUoaCk7IHJldHVybiBOVUxMOyB9CgogIERMTWFuYWdlZFRlbnNvciBkc2V0OyBsb25nIGRzWzJdID0ge24sIGRpbX07CiAgZHNldC5kbF90ZW5zb3IuZGF0YSA9ICh2b2lkKiliYXNlOwogIGRzZXQuZGxfdGVuc29yLmRldmljZS5kZXZpY2VfdHlwZSA9IGtETENQVTsgZHNldC5kbF90ZW5zb3IuZGV2aWNlLmRldmljZV9pZCA9IDA7CiAgZHNldC5kbF90ZW5zb3IubmRpbSA9IDI7CiAgZHNldC5kbF90ZW5zb3IuZHR5cGUuY29kZSA9IGtETEZsb2F0OyBkc2V0LmRsX3RlbnNvci5kdHlwZS5iaXRzID0gMzI7IGRzZXQuZGxfdGVuc29yLmR0eXBlLmxhbmVzID0gMTsKICBkc2V0LmRsX3RlbnNvci5zaGFwZSA9IGRzOyBkc2V0LmRsX3RlbnNvci5zdHJpZGVzID0gMDsgZHNldC5kbF90ZW5zb3IuYnl0ZV9vZmZzZXQgPSAwOwoKICBpZiAoY3V2c0NhZ3JhSW5kZXhQYXJhbXNDcmVhdGUoJmgtPmlwKSAhPSBDVVZTX1NVQ0NFU1MpIGdvdG8gZmFpbF9yZXM7CiAgaC0+aXAtPmJ1aWxkX2FsZ28gPSBOTl9ERVNDRU5UOwogIHsKICAgIC8qIFRVTkFCTEU6IGVudiBvdmVycmlkZXMgZm9yIHBhcmFtZXRlciBzd2VlcCAoZGVmYXVsdHMgPSBmcm96ZW4gYmFzZWxpbmUpICovCiAgICBjb25zdCBjaGFyICplOwogICAgaC0+aXAtPmdyYXBoX2RlZ3JlZSA9IDEyODsKICAgIGgtPmlwLT5pbnRlcm1lZGlhdGVfZ3JhcGhfZGVncmVlID0gMjU2OwogICAgaC0+aXAtPm5uX2Rlc2NlbnRfbml0ZXIgPSAxMDA7CiAgICBpZiAoKGUgPSBnZXRlbnYoIkNBR1JBX0dERUciKSkgIT0gTlVMTCkgaC0+aXAtPmdyYXBoX2RlZ3JlZSA9IChzaXplX3QpYXRvaShlKTsKICAgIGlmICgoZSA9IGdldGVudigiQ0FHUkFfSUdERUciKSkgIT0gTlVMTCkgaC0+aXAtPmludGVybWVkaWF0ZV9ncmFwaF9kZWdyZWUgPSAoc2l6ZV90KWF0b2koZSk7CiAgICBpZiAoKGUgPSBnZXRlbnYoIkNBR1JBX05JVEVSIikpICE9IE5VTEwpIGgtPmlwLT5ubl9kZXNjZW50X25pdGVyID0gKHNpemVfdClhdG9pKGUpOwogIH0KICBpZiAoY3V2c0NhZ3JhSW5kZXhDcmVhdGUoJmgtPmlkeCkgICAgICAhPSBDVVZTX1NVQ0NFU1MpIGdvdG8gZmFpbF9pcDsKICBpZiAoY3V2c0NhZ3JhQnVpbGQoaC0+cmVzLCBoLT5pcCwgJmRzZXQsIGgtPmlkeCkgIT0gQ1VWU19TVUNDRVNTKSBnb3RvIGZhaWxfaWR4OwogIGgtPm4gPSBuOyBoLT5kaW0gPSBkaW07CiAgcmV0dXJuIGg7CgpmYWlsX2lkeDogY3V2c0NhZ3JhSW5kZXhEZXN0cm95KGgtPmlkeCk7CmZhaWxfaXA6ICBjdXZzQ2FncmFJbmRleFBhcmFtc0Rlc3Ryb3koaC0+aXApOwpmYWlsX3JlczogY3V2c1Jlc291cmNlc0Rlc3Ryb3koaC0+cmVzKTsgZnJlZShoKTsKICBmcHJpbnRmKHN0ZGVyciwgIltzZWVrZGJfY3V2c10gYnVpbGQgZmFpbGVkOiAlc1xuIiwgY3V2c0dldExhc3RFcnJvclRleHQoKSk7CiAgcmV0dXJuIE5VTEw7Cn0KCmludCBzZWVrZGJfY3V2c19zZWFyY2godm9pZCogaGFuZGxlLCBjb25zdCBmbG9hdCogcXVlcnksIGxvbmcgbnEsIGxvbmcgdG9waywKICAgICAgICAgICAgICAgICAgICAgICB1bnNpZ25lZCBpbnQqIG91dF9pZHMsIGZsb2F0KiBvdXRfZGlzdCkKewogIHNrX2N1dnNfaW5kZXgqIGggPSAoc2tfY3V2c19pbmRleCopaGFuZGxlOwogIGlmICghaCkgcmV0dXJuIDE7CiAgaW50IHJjID0gMDsKICBmbG9hdCogcWQgPSAwOyB1bnNpZ25lZCogbmQgPSAwOyBmbG9hdCogZGQgPSAwOyBjdXZzQ2FncmFTZWFyY2hQYXJhbXNfdCBzcCA9IDA7CiAgaWYgKGN1dnNSTU1BbGxvYyhoLT5yZXMsICh2b2lkKiopJnFkLCBzaXplb2YoZmxvYXQpKm5xKmgtPmRpbSkgICE9IENVVlNfU1VDQ0VTUykgeyByYz0xMDsgZ290byBkb25lOyB9CiAgaWYgKGN1dnNSTU1BbGxvYyhoLT5yZXMsICh2b2lkKiopJm5kLCBzaXplb2YodW5zaWduZWQpKm5xKnRvcGspICE9IENVVlNfU1VDQ0VTUykgeyByYz0xMTsgZ290byBkb25lOyB9CiAgaWYgKGN1dnNSTU1BbGxvYyhoLT5yZXMsICh2b2lkKiopJmRkLCBzaXplb2YoZmxvYXQpKm5xKnRvcGspICAgICE9IENVVlNfU1VDQ0VTUykgeyByYz0xMjsgZ290byBkb25lOyB9CiAgaWYgKGN1ZGFNZW1jcHkocWQsIHF1ZXJ5LCBzaXplb2YoZmxvYXQpKm5xKmgtPmRpbSwgY3VkYU1lbWNweURlZmF1bHQpICE9IGN1ZGFTdWNjZXNzKSB7IHJjPTEzOyBnb3RvIGRvbmU7IH0KICB7CiAgICBETE1hbmFnZWRUZW5zb3IgcXQsIG50LCBkdDsgbG9uZyBxc1syXT17bnEsaC0+ZGltfSwgbnNoWzJdPXtucSx0b3BrfSwgZHNoWzJdPXtucSx0b3BrfTsKICAgIHF0LmRsX3RlbnNvci5kYXRhPXFkOyBxdC5kbF90ZW5zb3IuZGV2aWNlLmRldmljZV90eXBlPWtETENVREE7IHF0LmRsX3RlbnNvci5kZXZpY2UuZGV2aWNlX2lkPTA7CiAgICBxdC5kbF90ZW5zb3IubmRpbT0yOyBxdC5kbF90ZW5zb3IuZHR5cGUuY29kZT1rRExGbG9hdDsgcXQuZGxfdGVuc29yLmR0eXBlLmJpdHM9MzI7IHF0LmRsX3RlbnNvci5kdHlwZS5sYW5lcz0xOwogICAgcXQuZGxfdGVuc29yLnNoYXBlPXFzOyBxdC5kbF90ZW5zb3Iuc3RyaWRlcz0wOyBxdC5kbF90ZW5zb3IuYnl0ZV9vZmZzZXQ9MDsKICAgIG50PXF0OyBudC5kbF90ZW5zb3IuZGF0YT1uZDsgbnQuZGxfdGVuc29yLmR0eXBlLmNvZGU9a0RMVUludDsgbnQuZGxfdGVuc29yLnNoYXBlPW5zaDsKICAgIGR0PXF0OyBkdC5kbF90ZW5zb3IuZGF0YT1kZDsgZHQuZGxfdGVuc29yLmR0eXBlLmNvZGU9a0RMRmxvYXQ7IGR0LmRsX3RlbnNvci5zaGFwZT1kc2g7CiAgICBpZiAoY3V2c0NhZ3JhU2VhcmNoUGFyYW1zQ3JlYXRlKCZzcCkgIT0gQ1VWU19TVUNDRVNTKSB7IHJjPTE0OyBnb3RvIGRvbmU7IH0KICAgIHsKICAgICAgc2l6ZV90IHJlcXVpcmVkX2l0b3BrID0gKHNpemVfdCl0b3BrICogNDsKICAgICAgaWYgKHJlcXVpcmVkX2l0b3BrIDwgNTEyKSByZXF1aXJlZF9pdG9wayA9IDUxMjsKICAgICAgaWYgKHNwLT5pdG9wa19zaXplIDwgcmVxdWlyZWRfaXRvcGspIHNwLT5pdG9wa19zaXplID0gcmVxdWlyZWRfaXRvcGs7CiAgICAgIHNwLT5zZWFyY2hfd2lkdGggPSA0OwogICAgfQogICAgY3V2c0ZpbHRlciBmOyBmLnR5cGU9Tk9fRklMVEVSOyBmLmFkZHI9KHVpbnRwdHJfdCkwOwogICAgaWYgKGN1dnNDYWdyYVNlYXJjaChoLT5yZXMsIHNwLCBoLT5pZHgsICZxdCwgJm50LCAmZHQsIGYpICE9IENVVlNfU1VDQ0VTUykgeyByYz0xNTsgZ290byBkb25lOyB9CiAgICBpZiAoY3VkYU1lbWNweShvdXRfaWRzLCBuZCwgc2l6ZW9mKHVuc2lnbmVkKSpucSp0b3BrLCBjdWRhTWVtY3B5RGVmYXVsdCkgIT0gY3VkYVN1Y2Nlc3MpIHsgcmM9MTY7IGdvdG8gZG9uZTsgfQogICAgaWYgKG91dF9kaXN0KSBjdWRhTWVtY3B5KG91dF9kaXN0LCBkZCwgc2l6ZW9mKGZsb2F0KSpucSp0b3BrLCBjdWRhTWVtY3B5RGVmYXVsdCk7CiAgfQpkb25lOgogIGlmIChzcCkgY3V2c0NhZ3JhU2VhcmNoUGFyYW1zRGVzdHJveShzcCk7CiAgaWYgKGRkKSBjdXZzUk1NRnJlZShoLT5yZXMsIGRkLCBzaXplb2YoZmxvYXQpKm5xKnRvcGspOwogIGlmIChuZCkgY3V2c1JNTUZyZWUoaC0+cmVzLCBuZCwgc2l6ZW9mKHVuc2lnbmVkKSpucSp0b3BrKTsKICBpZiAocWQpIGN1dnNSTU1GcmVlKGgtPnJlcywgcWQsIHNpemVvZihmbG9hdCkqbnEqaC0+ZGltKTsKICBpZiAocmMpIGZwcmludGYoc3RkZXJyLCAiW3NlZWtkYl9jdXZzXSBzZWFyY2ggcmM9JWQ6ICVzXG4iLCByYywgY3V2c0dldExhc3RFcnJvclRleHQoKSk7CiAgcmV0dXJuIHJjOwp9Cgp2b2lkIHNlZWtkYl9jdXZzX2ZyZWUodm9pZCogaGFuZGxlKQp7CiAgc2tfY3V2c19pbmRleCogaCA9IChza19jdXZzX2luZGV4KiloYW5kbGU7CiAgaWYgKCFoKSByZXR1cm47CiAgY3V2c0NhZ3JhSW5kZXhEZXN0cm95KGgtPmlkeCk7CiAgY3V2c0NhZ3JhSW5kZXhQYXJhbXNEZXN0cm95KGgtPmlwKTsKICBjdXZzUmVzb3VyY2VzRGVzdHJveShoLT5yZXMpOwogIGZyZWUoaCk7Cn0KCmludCBzZWVrZGJfY3V2c19zZXJpYWxpemUodm9pZCogaGFuZGxlLCBjb25zdCBjaGFyKiBmaWxlbmFtZSkKewogIHNrX2N1dnNfaW5kZXgqIGluZGV4ID0gKHNrX2N1dnNfaW5kZXgqKWhhbmRsZTsKICBpZiAoIWluZGV4IHx8ICFmaWxlbmFtZSkgcmV0dXJuIDE7CiAgaWYgKGN1dnNDYWdyYVNlcmlhbGl6ZShpbmRleC0+cmVzLCBmaWxlbmFtZSwgaW5kZXgtPmlkeCwgdHJ1ZSkgIT0gQ1VWU19TVUNDRVNTKSB7CiAgICBmcHJpbnRmKHN0ZGVyciwgIltzZWVrZGJfY3V2c10gc2VyaWFsaXplIGZhaWxlZDogJXNcbiIsIGN1dnNHZXRMYXN0RXJyb3JUZXh0KCkpOwogICAgcmV0dXJuIDE7CiAgfQogIHJldHVybiAwOwp9Cgp2b2lkKiBzZWVrZGJfY3V2c19kZXNlcmlhbGl6ZShjb25zdCBjaGFyKiBmaWxlbmFtZSwgbG9uZyBuLCBsb25nIGRpbSkKewogIGlmICghZmlsZW5hbWUgfHwgbiA8PSAwIHx8IGRpbSA8PSAwKSByZXR1cm4gTlVMTDsKICBza19jdXZzX2luZGV4KiBpbmRleCA9IChza19jdXZzX2luZGV4KiljYWxsb2MoMSwgc2l6ZW9mKCppbmRleCkpOwogIGlmICghaW5kZXgpIHJldHVybiBOVUxMOwogIGlmIChjdXZzUmVzb3VyY2VzQ3JlYXRlKCZpbmRleC0+cmVzKSAhPSBDVVZTX1NVQ0NFU1MpIGdvdG8gZmFpbDsKICBpZiAoY3V2c0NhZ3JhSW5kZXhQYXJhbXNDcmVhdGUoJmluZGV4LT5pcCkgIT0gQ1VWU19TVUNDRVNTKSBnb3RvIGZhaWxfcmVzOwogIGlmIChjdXZzQ2FncmFJbmRleENyZWF0ZSgmaW5kZXgtPmlkeCkgIT0gQ1VWU19TVUNDRVNTKSBnb3RvIGZhaWxfaXA7CiAgaWYgKGN1dnNDYWdyYURlc2VyaWFsaXplKGluZGV4LT5yZXMsIGZpbGVuYW1lLCBpbmRleC0+aWR4KSAhPSBDVVZTX1NVQ0NFU1MpIGdvdG8gZmFpbF9pZHg7CiAgewogICAgaW50NjRfdCBhY3R1YWxfbiA9IDA7CiAgICBpbnQ2NF90IGFjdHVhbF9kaW0gPSAwOwogICAgaWYgKGN1dnNDYWdyYUluZGV4R2V0U2l6ZShpbmRleC0+aWR4LCAmYWN0dWFsX24pICE9IENVVlNfU1VDQ0VTUyB8fAogICAgICAgIGN1dnNDYWdyYUluZGV4R2V0RGltcyhpbmRleC0+aWR4LCAmYWN0dWFsX2RpbSkgIT0gQ1VWU19TVUNDRVNTIHx8CiAgICAgICAgYWN0dWFsX24gIT0gbiB8fCBhY3R1YWxfZGltICE9IGRpbSkgewogICAgICBmcHJpbnRmKHN0ZGVyciwgIltzZWVrZGJfY3V2c10gc25hcHNob3Qgc2hhcGUgbWlzbWF0Y2g6ICVsZCB4ICVsZCwgZXhwZWN0ZWQgJWxkIHggJWxkXG4iLAogICAgICAgICAgICAgIChsb25nKWFjdHVhbF9uLCAobG9uZylhY3R1YWxfZGltLCBuLCBkaW0pOwogICAgICBnb3RvIGZhaWxfaWR4OwogICAgfQogIH0KICBpbmRleC0+biA9IG47CiAgaW5kZXgtPmRpbSA9IGRpbTsKICByZXR1cm4gaW5kZXg7CmZhaWxfaWR4OgogIGN1dnNDYWdyYUluZGV4RGVzdHJveShpbmRleC0+aWR4KTsKZmFpbF9pcDoKICBjdXZzQ2FncmFJbmRleFBhcmFtc0Rlc3Ryb3koaW5kZXgtPmlwKTsKZmFpbF9yZXM6CiAgY3V2c1Jlc291cmNlc0Rlc3Ryb3koaW5kZXgtPnJlcyk7CmZhaWw6CiAgZnByaW50ZihzdGRlcnIsICJbc2Vla2RiX2N1dnNdIGRlc2VyaWFsaXplIGZhaWxlZDogJXNcbiIsIGN1dnNHZXRMYXN0RXJyb3JUZXh0KCkpOwogIGZyZWUoaW5kZXgpOwogIHJldHVybiBOVUxMOwp9CgppbnQgc2Vla2RiX2N1dnNfY2FncmFfa25uKGNvbnN0IGZsb2F0KiBiYXNlLCBsb25nIG4sIGxvbmcgZGltLAogICAgICAgICAgICAgICAgICAgICAgICAgIGNvbnN0IGZsb2F0KiBxdWVyeSwgbG9uZyBucSwgbG9uZyB0b3BrLAogICAgICAgICAgICAgICAgICAgICAgICAgIHVuc2lnbmVkIGludCogb3V0X2lkcykKewogIHZvaWQqIGggPSBzZWVrZGJfY3V2c19idWlsZChiYXNlLCBuLCBkaW0pOwogIGlmICghaCkgcmV0dXJuIDEwOwogIGludCByYyA9IHNlZWtkYl9jdXZzX3NlYXJjaChoLCBxdWVyeSwgbnEsIHRvcGssIG91dF9pZHMsIE5VTEwpOwogIHNlZWtkYl9jdXZzX2ZyZWUoaCk7CiAgcmV0dXJuIHJjOwp9Cg==
+/* seekdb <-> hipVS bridge: plain-C CAGRA kNN; all cuVS/ROCm deps live here. */
+#include "seekdb_cuvs_bridge.h"
+#include <cuvs/core/c_api.h>
+#include <cuvs/neighbors/cagra.h>
+#include <dlpack/dlpack.h>
+#ifdef __HIP_PLATFORM_AMD__
+#include <cuvs/cuda_runtime.h>
+#else
+#include <cuda_runtime.h>
+#endif
+#include <stdio.h>
+#include <stdlib.h>
+
+typedef struct {
+  cuvsResources_t        res;
+  cuvsCagraIndexParams_t ip;
+  cuvsCagraIndex_t       idx;
+  long n, dim;
+} sk_cuvs_index;
+
+void* seekdb_cuvs_build(const float* base, long n, long dim)
+{
+  sk_cuvs_index* h = (sk_cuvs_index*)calloc(1, sizeof(*h));
+  if (!h) return NULL;
+  if (cuvsResourcesCreate(&h->res) != CUVS_SUCCESS) { free(h); return NULL; }
+
+  DLManagedTensor dset; long ds[2] = {n, dim};
+  dset.dl_tensor.data = (void*)base;
+  dset.dl_tensor.device.device_type = kDLCPU; dset.dl_tensor.device.device_id = 0;
+  dset.dl_tensor.ndim = 2;
+  dset.dl_tensor.dtype.code = kDLFloat; dset.dl_tensor.dtype.bits = 32; dset.dl_tensor.dtype.lanes = 1;
+  dset.dl_tensor.shape = ds; dset.dl_tensor.strides = 0; dset.dl_tensor.byte_offset = 0;
+
+  if (cuvsCagraIndexParamsCreate(&h->ip) != CUVS_SUCCESS) goto fail_res;
+  h->ip->build_algo = NN_DESCENT;
+  {
+    /* TUNABLE: env overrides for parameter sweep (defaults = frozen baseline) */
+    const char *e;
+    h->ip->graph_degree = 128;
+    h->ip->intermediate_graph_degree = 256;
+    h->ip->nn_descent_niter = 100;
+    if ((e = getenv("CAGRA_GDEG")) != NULL) h->ip->graph_degree = (size_t)atoi(e);
+    if ((e = getenv("CAGRA_IGDEG")) != NULL) h->ip->intermediate_graph_degree = (size_t)atoi(e);
+    if ((e = getenv("CAGRA_NITER")) != NULL) h->ip->nn_descent_niter = (size_t)atoi(e);
+  }
+  if (cuvsCagraIndexCreate(&h->idx)      != CUVS_SUCCESS) goto fail_ip;
+  if (cuvsCagraBuild(h->res, h->ip, &dset, h->idx) != CUVS_SUCCESS) goto fail_idx;
+  h->n = n; h->dim = dim;
+  return h;
+
+fail_idx: cuvsCagraIndexDestroy(h->idx);
+fail_ip:  cuvsCagraIndexParamsDestroy(h->ip);
+fail_res: cuvsResourcesDestroy(h->res); free(h);
+  fprintf(stderr, "[seekdb_cuvs] build failed: %s\n", cuvsGetLastErrorText());
+  return NULL;
+}
+
+int seekdb_cuvs_search(void* handle, const float* query, long nq, long topk,
+                       unsigned int* out_ids, float* out_dist)
+{
+  sk_cuvs_index* h = (sk_cuvs_index*)handle;
+  if (!h) return 1;
+  int rc = 0;
+  float* qd = 0; unsigned* nd = 0; float* dd = 0; cuvsCagraSearchParams_t sp = 0;
+  if (cuvsRMMAlloc(h->res, (void**)&qd, sizeof(float)*nq*h->dim)  != CUVS_SUCCESS) { rc=10; goto done; }
+  if (cuvsRMMAlloc(h->res, (void**)&nd, sizeof(unsigned)*nq*topk) != CUVS_SUCCESS) { rc=11; goto done; }
+  if (cuvsRMMAlloc(h->res, (void**)&dd, sizeof(float)*nq*topk)    != CUVS_SUCCESS) { rc=12; goto done; }
+  if (cudaMemcpy(qd, query, sizeof(float)*nq*h->dim, cudaMemcpyDefault) != cudaSuccess) { rc=13; goto done; }
+  {
+    DLManagedTensor qt, nt, dt; long qs[2]={nq,h->dim}, nsh[2]={nq,topk}, dsh[2]={nq,topk};
+    qt.dl_tensor.data=qd; qt.dl_tensor.device.device_type=kDLCUDA; qt.dl_tensor.device.device_id=0;
+    qt.dl_tensor.ndim=2; qt.dl_tensor.dtype.code=kDLFloat; qt.dl_tensor.dtype.bits=32; qt.dl_tensor.dtype.lanes=1;
+    qt.dl_tensor.shape=qs; qt.dl_tensor.strides=0; qt.dl_tensor.byte_offset=0;
+    nt=qt; nt.dl_tensor.data=nd; nt.dl_tensor.dtype.code=kDLUInt; nt.dl_tensor.shape=nsh;
+    dt=qt; dt.dl_tensor.data=dd; dt.dl_tensor.dtype.code=kDLFloat; dt.dl_tensor.shape=dsh;
+    if (cuvsCagraSearchParamsCreate(&sp) != CUVS_SUCCESS) { rc=14; goto done; }
+    {
+      size_t required_itopk = (size_t)topk * 4;
+      if (required_itopk < 512) required_itopk = 512;
+      if (sp->itopk_size < required_itopk) sp->itopk_size = required_itopk;
+      sp->search_width = 4;
+    }
+    cuvsFilter f; f.type=NO_FILTER; f.addr=(uintptr_t)0;
+    if (cuvsCagraSearch(h->res, sp, h->idx, &qt, &nt, &dt, f) != CUVS_SUCCESS) { rc=15; goto done; }
+    if (cudaMemcpy(out_ids, nd, sizeof(unsigned)*nq*topk, cudaMemcpyDefault) != cudaSuccess) { rc=16; goto done; }
+    if (out_dist) cudaMemcpy(out_dist, dd, sizeof(float)*nq*topk, cudaMemcpyDefault);
+  }
+done:
+  if (sp) cuvsCagraSearchParamsDestroy(sp);
+  if (dd) cuvsRMMFree(h->res, dd, sizeof(float)*nq*topk);
+  if (nd) cuvsRMMFree(h->res, nd, sizeof(unsigned)*nq*topk);
+  if (qd) cuvsRMMFree(h->res, qd, sizeof(float)*nq*h->dim);
+  if (rc) fprintf(stderr, "[seekdb_cuvs] search rc=%d: %s\n", rc, cuvsGetLastErrorText());
+  return rc;
+}
+
+void seekdb_cuvs_free(void* handle)
+{
+  sk_cuvs_index* h = (sk_cuvs_index*)handle;
+  if (!h) return;
+  cuvsCagraIndexDestroy(h->idx);
+  cuvsCagraIndexParamsDestroy(h->ip);
+  cuvsResourcesDestroy(h->res);
+  free(h);
+}
+
+int seekdb_cuvs_serialize(void* handle, const char* filename)
+{
+  sk_cuvs_index* index = (sk_cuvs_index*)handle;
+  if (!index || !filename) return 1;
+  if (cuvsCagraSerialize(index->res, filename, index->idx, true) != CUVS_SUCCESS) {
+    fprintf(stderr, "[seekdb_cuvs] serialize failed: %s\n", cuvsGetLastErrorText());
+    return 1;
+  }
+  return 0;
+}
+
+void* seekdb_cuvs_deserialize(const char* filename, long n, long dim)
+{
+  if (!filename || n <= 0 || dim <= 0) return NULL;
+  sk_cuvs_index* index = (sk_cuvs_index*)calloc(1, sizeof(*index));
+  if (!index) return NULL;
+  if (cuvsResourcesCreate(&index->res) != CUVS_SUCCESS) goto fail;
+  if (cuvsCagraIndexParamsCreate(&index->ip) != CUVS_SUCCESS) goto fail_res;
+  if (cuvsCagraIndexCreate(&index->idx) != CUVS_SUCCESS) goto fail_ip;
+  if (cuvsCagraDeserialize(index->res, filename, index->idx) != CUVS_SUCCESS) goto fail_idx;
+  {
+    int64_t actual_n = 0;
+    int64_t actual_dim = 0;
+    if (cuvsCagraIndexGetSize(index->idx, &actual_n) != CUVS_SUCCESS ||
+        cuvsCagraIndexGetDims(index->idx, &actual_dim) != CUVS_SUCCESS ||
+        actual_n != n || actual_dim != dim) {
+      fprintf(stderr, "[seekdb_cuvs] snapshot shape mismatch: %ld x %ld, expected %ld x %ld\n",
+              (long)actual_n, (long)actual_dim, n, dim);
+      goto fail_idx;
+    }
+  }
+  index->n = n;
+  index->dim = dim;
+  return index;
+fail_idx:
+  cuvsCagraIndexDestroy(index->idx);
+fail_ip:
+  cuvsCagraIndexParamsDestroy(index->ip);
+fail_res:
+  cuvsResourcesDestroy(index->res);
+fail:
+  fprintf(stderr, "[seekdb_cuvs] deserialize failed: %s\n", cuvsGetLastErrorText());
+  free(index);
+  return NULL;
+}
+
+int seekdb_cuvs_cagra_knn(const float* base, long n, long dim,
+                          const float* query, long nq, long topk,
+                          unsigned int* out_ids)
+{
+  void* h = seekdb_cuvs_build(base, n, dim);
+  if (!h) return 10;
+  int rc = seekdb_cuvs_search(h, query, nq, topk, out_ids, NULL);
+  seekdb_cuvs_free(h);
+  return rc;
+}
