@@ -90,6 +90,8 @@ def main():
     with open(os.path.join(args.out, "gt.i32"), "wb") as f:
         f.write(array.array("i", (i for row in gt for i in row)).tobytes())
 
+    with open(os.path.join(args.out, "dim.txt"), "w") as fh:
+        fh.write(str(dim))
     for name in ("base.f32", "query.f32", "gt.i32"):
         print("  %-10s %12d bytes" % (name, os.path.getsize(os.path.join(args.out, name))))
     print("  base = %d x %d, gt = %d x 10" % (n, dim, nq))
