@@ -1,1 +1,98 @@
-LyogRGlyZWN0IGJyaWRnZSBwcm9iZTogbWVhc3VyZSBDQUdSQSBidWlsZCB0aW1lIGFuZCByZWNhbGwgd2l0aG91dCBTUUwuCiAqIFVzYWdlOiAuL2JyaWRnZV90ZXN0IFtzb19wYXRoXSBbbl0gW2RpbV0gW25xXSBbdG9wa10KICogRW52OiAgIENBR1JBX05JVEVSIC8gQ0FHUkFfR0RFRyAvIENBR1JBX0lHREVHICAob25seSBob25vcmVkIGJ5IHRoZSB0dW5hYmxlIGJyaWRnZSkKICovCiNpbmNsdWRlIDxzdGRpby5oPgojaW5jbHVkZSA8c3RkbGliLmg+CiNpbmNsdWRlIDxzdHJpbmcuaD4KI2luY2x1ZGUgPHRpbWUuaD4KI2luY2x1ZGUgPGRsZmNuLmg+CgpzdGF0aWMgZG91YmxlIG5vd19tcyh2b2lkKSB7CiAgc3RydWN0IHRpbWVzcGVjIHQ7CiAgY2xvY2tfZ2V0dGltZShDTE9DS19NT05PVE9OSUMsICZ0KTsKICByZXR1cm4gdC50dl9zZWMgKiAxMDAwLjAgKyB0LnR2X25zZWMgLyAxZTY7Cn0KCmludCBtYWluKGludCBhcmdjLCBjaGFyICoqYXJndikgewogIGNvbnN0IGNoYXIgKnNvID0gYXJnYyA+IDEgPyBhcmd2WzFdIDogIi9zZWVrZGJfd29ya3NwYWNlL2JyaWRnZS9saWJzZWVrZGJfY3V2c19icmlkZ2Uuc28iOwogIGludCBuID0gYXJnYyA+IDIgPyBhdG9pKGFyZ3ZbMl0pIDogMTAwMDA7CiAgaW50IGRpbSA9IGFyZ2MgPiAzID8gYXRvaShhcmd2WzNdKSA6IDEyODsKICBpbnQgbnEgPSBhcmdjID4gNCA/IGF0b2koYXJndls0XSkgOiAxMDA7CiAgaW50IHRvcGsgPSBhcmdjID4gNSA/IGF0b2koYXJndls1XSkgOiAxMDsKICBjb25zdCBjaGFyICpiYXNlX3BhdGggPSBnZXRlbnYoIkJBU0VfRjMyIik7CiAgY29uc3QgY2hhciAqcXJ5X3BhdGggPSBnZXRlbnYoIlFVRVJZX0YzMiIpOwogIGNvbnN0IGNoYXIgKmd0X3BhdGggPSBnZXRlbnYoIkdUX0kzMiIpOwogIGlmICghYmFzZV9wYXRoKSBiYXNlX3BhdGggPSAiL3NlZWtkYl93b3Jrc3BhY2UvZGF0YXNldHMvYmFzZS5mMzIiOwogIGlmICghcXJ5X3BhdGgpIHFyeV9wYXRoID0gIi9zZWVrZGJfd29ya3NwYWNlL2RhdGFzZXRzL3F1ZXJ5LmYzMiI7CiAgaWYgKCFndF9wYXRoKSBndF9wYXRoID0gIi9zZWVrZGJfd29ya3NwYWNlL2RhdGFzZXRzL2d0XzEwMHgxMC5pMzIiOwoKICB2b2lkICpoID0gZGxvcGVuKHNvLCBSVExEX05PVyk7CiAgaWYgKCFoKSB7IGZwcmludGYoc3RkZXJyLCAiRExPUEVOX0ZBSUwgJXNcbiIsIGRsZXJyb3IoKSk7IHJldHVybiAyOyB9CgogIHZvaWQgKigqYnVpbGQpKGNvbnN0IGZsb2F0ICosIGxvbmcsIGxvbmcpID0gZGxzeW0oaCwgInNlZWtkYl9jdXZzX2J1aWxkIik7CiAgaW50ICgqc2VhcmNoKSh2b2lkICosIGNvbnN0IGZsb2F0ICosIGxvbmcsIGxvbmcsIHVuc2lnbmVkICosIGZsb2F0ICopID0KICAgICAgZGxzeW0oaCwgInNlZWtkYl9jdXZzX3NlYXJjaCIpOwogIHZvaWQgKCpmcmUpKHZvaWQgKikgPSBkbHN5bShoLCAic2Vla2RiX2N1dnNfZnJlZSIpOwogIGlmICghYnVpbGQgfHwgIXNlYXJjaCB8fCAhZnJlKSB7IGZwcmludGYoc3RkZXJyLCAiRExTWU1fRkFJTFxuIik7IHJldHVybiAzOyB9CgogIGZsb2F0ICpiYXNlID0gKGZsb2F0ICopbWFsbG9jKChzaXplX3QpbiAqIGRpbSAqIDQpOwogIGZsb2F0ICpxcnkgPSAoZmxvYXQgKiltYWxsb2MoKHNpemVfdClucSAqIGRpbSAqIDQpOwogIGlmICghYmFzZSB8fCAhcXJ5KSB7IGZwcmludGYoc3RkZXJyLCAiT09NXG4iKTsgcmV0dXJuIDQ7IH0KCiAgRklMRSAqZiA9IGZvcGVuKGJhc2VfcGF0aCwgInJiIik7CiAgaWYgKCFmKSB7IGZwcmludGYoc3RkZXJyLCAiTk9fQkFTRSAlc1xuIiwgYmFzZV9wYXRoKTsgcmV0dXJuIDU7IH0KICBpZiAoZnJlYWQoYmFzZSwgNCwgKHNpemVfdCluICogZGltLCBmKSAhPSAoc2l6ZV90KW4gKiBkaW0pIHsgZnByaW50ZihzdGRlcnIsICJCQVNFX1NIT1JUXG4iKTsgcmV0dXJuIDY7IH0KICBmY2xvc2UoZik7CgogIGYgPSBmb3BlbihxcnlfcGF0aCwgInJiIik7CiAgaWYgKCFmKSB7IGZwcmludGYoc3RkZXJyLCAiTk9fUVVFUlkgJXNcbiIsIHFyeV9wYXRoKTsgcmV0dXJuIDc7IH0KICBpZiAoZnJlYWQocXJ5LCA0LCAoc2l6ZV90KW5xICogZGltLCBmKSAhPSAoc2l6ZV90KW5xICogZGltKSB7IGZwcmludGYoc3RkZXJyLCAiUVVFUllfU0hPUlRcbiIpOyByZXR1cm4gODsgfQogIGZjbG9zZShmKTsKCiAgZG91YmxlIHQwID0gbm93X21zKCk7CiAgdm9pZCAqaWR4ID0gYnVpbGQoYmFzZSwgbiwgZGltKTsKICBkb3VibGUgYnVpbGRfbXMgPSBub3dfbXMoKSAtIHQwOwogIGlmICghaWR4KSB7IGZwcmludGYoc3RkZXJyLCAiQlVJTERfRkFJTFxuIik7IHJldHVybiA5OyB9CgogIHVuc2lnbmVkICppZHMgPSAodW5zaWduZWQgKiltYWxsb2MoKHNpemVfdClucSAqIHRvcGsgKiA0KTsKICBpZiAoIWlkcykgeyBmcHJpbnRmKHN0ZGVyciwgIk9PTTJcbiIpOyByZXR1cm4gMTA7IH0KCiAgdDAgPSBub3dfbXMoKTsKICBpbnQgcmMgPSBzZWFyY2goaWR4LCBxcnksIG5xLCB0b3BrLCBpZHMsIE5VTEwpOwogIGRvdWJsZSBzZWFyY2hfbXMgPSBub3dfbXMoKSAtIHQwOwogIGlmIChyYyAhPSAwKSB7IGZwcmludGYoc3RkZXJyLCAiU0VBUkNIX0ZBSUwgcmM9JWRcbiIsIHJjKTsgcmV0dXJuIDExOyB9CgogIGludCBndHEgPSAxMDAsIGd0ayA9IDEwOwogIGludCAqZ3QgPSAoaW50ICopbWFsbG9jKChzaXplX3QpZ3RxICogZ3RrICogNCk7CiAgaW50IG5yZWFkID0gMDsKICBmID0gZm9wZW4oZ3RfcGF0aCwgInJiIik7CiAgaWYgKGYpIHsKICAgIG5yZWFkID0gKGludClmcmVhZChndCwgNCwgKHNpemVfdClndHEgKiBndGssIGYpOwogICAgZmNsb3NlKGYpOwogIH0KCiAgZG91YmxlIGhpdCA9IDAsIHRvdCA9IDA7CiAgaWYgKG5yZWFkID09IGd0cSAqIGd0aykgewogICAgaW50IHFtYXggPSAobnEgPCBndHEpID8gbnEgOiBndHE7CiAgICBpbnQga21heCA9ICh0b3BrIDwgZ3RrKSA/IHRvcGsgOiBndGs7CiAgICBmb3IgKGludCBxID0gMDsgcSA8IHFtYXg7IHErKykgewogICAgICBmb3IgKGludCBrID0gMDsgayA8IGttYXg7IGsrKykgewogICAgICAgIHVuc2lnbmVkIHdhbnQgPSAodW5zaWduZWQpZ3RbcSAqIGd0ayArIGtdOwogICAgICAgIGludCBmb3VuZCA9IDA7CiAgICAgICAgZm9yIChpbnQgaiA9IDA7IGogPCB0b3BrOyBqKyspIHsKICAgICAgICAgIGlmIChpZHNbcSAqIHRvcGsgKyBqXSA9PSB3YW50KSB7IGZvdW5kID0gMTsgYnJlYWs7IH0KICAgICAgICB9CiAgICAgICAgaGl0ICs9IGZvdW5kOwogICAgICAgIHRvdCArPSAxOwogICAgICB9CiAgICB9CiAgfQoKICBwcmludGYoIkJVSUxEX01TPSUuMWYgU0VBUkNIX01TPSUuMWYgUkVDQUxMPSUuNGYgTj0lZCBESU09JWQgTlE9JWQgVE9QSz0lZCBHVD0lZFxuIiwKICAgICAgICAgYnVpbGRfbXMsIHNlYXJjaF9tcywgdG90ID4gMCA/IGhpdCAvIHRvdCA6IDAuMCwgbiwgZGltLCBucSwgdG9waywgbnJlYWQpOwoKICBmcmUoaWR4KTsKICBmcmVlKGJhc2UpOyBmcmVlKHFyeSk7IGZyZWUoaWRzKTsgZnJlZShndCk7CiAgcmV0dXJuIDA7Cn0K
+/* Direct bridge probe: measure CAGRA build time and recall without SQL.
+ * Usage: ./bridge_test [so_path] [n] [dim] [nq] [topk]
+ * Env:   CAGRA_NITER / CAGRA_GDEG / CAGRA_IGDEG  (only honored by the tunable bridge)
+ */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <dlfcn.h>
+
+static double now_ms(void) {
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return t.tv_sec * 1000.0 + t.tv_nsec / 1e6;
+}
+
+int main(int argc, char **argv) {
+  const char *so = argc > 1 ? argv[1] : "/seekdb_workspace/bridge/libseekdb_cuvs_bridge.so";
+  int n = argc > 2 ? atoi(argv[2]) : 10000;
+  int dim = argc > 3 ? atoi(argv[3]) : 128;
+  int nq = argc > 4 ? atoi(argv[4]) : 100;
+  int topk = argc > 5 ? atoi(argv[5]) : 10;
+  const char *base_path = getenv("BASE_F32");
+  const char *qry_path = getenv("QUERY_F32");
+  const char *gt_path = getenv("GT_I32");
+  if (!base_path) base_path = "/seekdb_workspace/datasets/base.f32";
+  if (!qry_path) qry_path = "/seekdb_workspace/datasets/query.f32";
+  if (!gt_path) gt_path = "/seekdb_workspace/datasets/gt_100x10.i32";
+
+  void *h = dlopen(so, RTLD_NOW);
+  if (!h) { fprintf(stderr, "DLOPEN_FAIL %s\n", dlerror()); return 2; }
+
+  void *(*build)(const float *, long, long) = dlsym(h, "seekdb_cuvs_build");
+  int (*search)(void *, const float *, long, long, unsigned *, float *) =
+      dlsym(h, "seekdb_cuvs_search");
+  void (*fre)(void *) = dlsym(h, "seekdb_cuvs_free");
+  if (!build || !search || !fre) { fprintf(stderr, "DLSYM_FAIL\n"); return 3; }
+
+  float *base = (float *)malloc((size_t)n * dim * 4);
+  float *qry = (float *)malloc((size_t)nq * dim * 4);
+  if (!base || !qry) { fprintf(stderr, "OOM\n"); return 4; }
+
+  FILE *f = fopen(base_path, "rb");
+  if (!f) { fprintf(stderr, "NO_BASE %s\n", base_path); return 5; }
+  if (fread(base, 4, (size_t)n * dim, f) != (size_t)n * dim) { fprintf(stderr, "BASE_SHORT\n"); return 6; }
+  fclose(f);
+
+  f = fopen(qry_path, "rb");
+  if (!f) { fprintf(stderr, "NO_QUERY %s\n", qry_path); return 7; }
+  if (fread(qry, 4, (size_t)nq * dim, f) != (size_t)nq * dim) { fprintf(stderr, "QUERY_SHORT\n"); return 8; }
+  fclose(f);
+
+  double t0 = now_ms();
+  void *idx = build(base, n, dim);
+  double build_ms = now_ms() - t0;
+  if (!idx) { fprintf(stderr, "BUILD_FAIL\n"); return 9; }
+
+  unsigned *ids = (unsigned *)malloc((size_t)nq * topk * 4);
+  if (!ids) { fprintf(stderr, "OOM2\n"); return 10; }
+
+  t0 = now_ms();
+  int rc = search(idx, qry, nq, topk, ids, NULL);
+  double search_ms = now_ms() - t0;
+  if (rc != 0) { fprintf(stderr, "SEARCH_FAIL rc=%d\n", rc); return 11; }
+
+  int gtq = 100, gtk = 10;
+  int *gt = (int *)malloc((size_t)gtq * gtk * 4);
+  int nread = 0;
+  f = fopen(gt_path, "rb");
+  if (f) {
+    nread = (int)fread(gt, 4, (size_t)gtq * gtk, f);
+    fclose(f);
+  }
+
+  double hit = 0, tot = 0;
+  if (nread == gtq * gtk) {
+    int qmax = (nq < gtq) ? nq : gtq;
+    int kmax = (topk < gtk) ? topk : gtk;
+    for (int q = 0; q < qmax; q++) {
+      for (int k = 0; k < kmax; k++) {
+        unsigned want = (unsigned)gt[q * gtk + k];
+        int found = 0;
+        for (int j = 0; j < topk; j++) {
+          if (ids[q * topk + j] == want) { found = 1; break; }
+        }
+        hit += found;
+        tot += 1;
+      }
+    }
+  }
+
+  printf("BUILD_MS=%.1f SEARCH_MS=%.1f RECALL=%.4f N=%d DIM=%d NQ=%d TOPK=%d GT=%d\n",
+         build_ms, search_ms, tot > 0 ? hit / tot : 0.0, n, dim, nq, topk, nread);
+
+  fre(idx);
+  free(base); free(qry); free(ids); free(gt);
+  return 0;
+}
