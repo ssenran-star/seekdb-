@@ -76,6 +76,28 @@ public:
   // interface for daat processing
   virtual int get_curr_score(double &score) const = 0;
   virtual int get_curr_id(const ObDatum *&datum) const = 0;
+  // Block-wise id access for the union fast path: get_id_batch exposes the
+  // buffered batch holding the current position (loading it when needed),
+  // advance_id_batch loads the following batch. pos is the index of the
+  // current unconsumed id within [0, count). set_id_batch_pos writes the
+  // consumer position back so the per-row interfaces stay consistent.
+  // Iterators without id buffering return OB_NOT_SUPPORTED and callers fall
+  // back to the per-row interface.
+  virtual int get_id_batch(const ObDocIdExt *&ids, int64_t &count, int64_t &pos)
+  {
+    UNUSED(ids);
+    UNUSED(count);
+    UNUSED(pos);
+    return OB_NOT_SUPPORTED;
+  }
+  virtual int advance_id_batch(const ObDocIdExt *&ids, int64_t &count, int64_t &pos)
+  {
+    UNUSED(ids);
+    UNUSED(count);
+    UNUSED(pos);
+    return OB_NOT_SUPPORTED;
+  }
+  virtual void set_id_batch_pos(const int64_t pos) { UNUSED(pos); }
   // interface for plain dynamic pruning algorithms such as WAND and MaxScore
   virtual int get_dim_max_score(double &score)
   {

@@ -39,9 +39,27 @@ public:
   void reset();
 
   int hash(uint64_t &hash_val) const;
-  const common::ObDatum &get_datum() const;
+  const common::ObDatum &get_datum() const { return datum_; }
   int from_datum(const common::ObDatum &datum);
   int from_obj(const common::ObObj &obj);
+
+  // Inlined from_datum for hot merge loops: identical deep-copy semantics,
+  // but the copy stays at the call site instead of an out-of-line call per
+  // posting row.
+  inline int fast_from_datum(const common::ObDatum &datum)
+  {
+    int ret = common::OB_SUCCESS;
+    datum_ = datum;
+    if (!datum_.is_null()) {
+      if (OB_UNLIKELY(datum_.len_ > OB_DOC_ID_EXT_SIZE)) {
+        ret = common::OB_BUF_NOT_ENOUGH;
+      } else {
+        MEMCPY(buf_, datum.ptr_, datum_.len_);
+        datum_.ptr_ = buf_;
+      }
+    }
+    return ret;
+  }
 
   ObDocIdExt &operator=(const ObDocIdExt &other);
   bool operator==(const ObDocIdExt &other) const;

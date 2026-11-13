@@ -474,11 +474,11 @@ void ObTextRetrievalDaaTTokenIter::reset()
 }
 
 // Sparse Retrieval Dimension Iter Interfaces
-int ObTextRetrievalDaaTTokenIter::get_next_row() {
+int ObTextRetrievalDaaTTokenIter::load_next_id_batch()
+{
   int ret = OB_SUCCESS;
   bool need_load = false;
-  if (OB_LIKELY((++cur_idx_) < count_)) {
-  } else if (!eval_ctx_->is_vectorized() && (OB_FAIL(token_iter_->get_next_row()))) {
+  if (!eval_ctx_->is_vectorized() && (OB_FAIL(token_iter_->get_next_row()))) {
     if (OB_UNLIKELY(OB_ITER_END != ret)) {
     }
   } else if (!eval_ctx_->is_vectorized() && FALSE_IT(count_ = 1)) {
@@ -501,6 +501,49 @@ int ObTextRetrievalDaaTTokenIter::get_next_row() {
   return ret;
 }
 
+int ObTextRetrievalDaaTTokenIter::get_next_row() {
+  int ret = OB_SUCCESS;
+  if (OB_LIKELY((++cur_idx_) < count_)) {
+  } else if (OB_FAIL(load_next_id_batch())) {
+    if (OB_UNLIKELY(OB_ITER_END != ret)) {
+    }
+  }
+  return ret;
+}
+
+int ObTextRetrievalDaaTTokenIter::get_id_batch(const ObDocIdExt *&ids, int64_t &count, int64_t &pos)
+{
+  int ret = OB_SUCCESS;
+  if (cur_idx_ < 0 || cur_idx_ >= count_) {
+    ret = load_next_id_batch();
+  }
+  if (OB_SUCC(ret)) {
+    ids = &doc_id_.at(0);
+    count = count_;
+    pos = cur_idx_;
+  }
+  return ret;
+}
+
+int ObTextRetrievalDaaTTokenIter::advance_id_batch(const ObDocIdExt *&ids, int64_t &count, int64_t &pos)
+{
+  int ret = load_next_id_batch();
+  if (OB_SUCC(ret)) {
+    ids = &doc_id_.at(0);
+    count = count_;
+    pos = cur_idx_;
+  }
+  return ret;
+}
+
+void ObTextRetrievalDaaTTokenIter::set_id_batch_pos(const int64_t pos)
+{
+  // pos is the next unconsumed index and get_id_batch resumes at cur_idx_,
+  // so store it verbatim. The block walk guarantees pos < count_ for every
+  // dimension that is not exhausted, keeping the batch valid (no reload).
+  cur_idx_ = pos;
+}
+
 int ObTextRetrievalDaaTTokenIter::save_relevances_and_docids()
 {
   int ret = OB_SUCCESS;
@@ -514,7 +557,7 @@ int ObTextRetrievalDaaTTokenIter::save_relevances_and_docids()
     for (int64_t i = 0; OB_SUCC(ret) && i < count_; ++i) {
       if (OB_LIKELY(!token_iter_->get_skip()->at(i))) {
         relevance_[i] = relevance_datum.at(i)->get_double();
-        if (OB_FAIL(doc_id_[i].from_datum(*doc_id_datum.at(i)))) {
+        if (OB_FAIL(doc_id_[i].fast_from_datum(*doc_id_datum.at(i)))) {
         }
       }
     }
@@ -532,7 +575,7 @@ int ObTextRetrievalDaaTTokenIter::save_docids()
     const ObDatumVector &doc_id_datum = inv_scan_domain_id_col_->locate_expr_datumvector(*eval_ctx_);
     for (int64_t i = 0; OB_SUCC(ret) && i < count_; ++i) {
       if (OB_LIKELY(!token_iter_->get_skip()->at(i))) {
-        if (OB_FAIL(doc_id_[i].from_datum(*doc_id_datum.at(i)))) {
+        if (OB_FAIL(doc_id_[i].fast_from_datum(*doc_id_datum.at(i)))) {
         };
       }
     }

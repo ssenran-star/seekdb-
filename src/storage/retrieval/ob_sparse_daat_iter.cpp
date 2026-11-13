@@ -382,45 +382,133 @@ int ObSRDaaTIterImpl::get_next_rows_of_union(const int64_t capacity, int64_t &co
       }
     }
   }
-  while (OB_SUCC(ret) && count < capacity) {
-    // Pick the smallest current document id among the non-exhausted dimensions.
-    // The comparison is inlined and dereferences the cached per-dimension datum
-    // pointers directly: going through the generic merge item / datum comparator
-    // here would cost a call per dimension per emitted document.
-    int64_t min_idx = -1;
-    const ObDatum *min_id = nullptr;
+  // Block-wise merge: walk the buffered id arrays directly so the steady
+  // state costs no virtual call per emitted document. Falls back to the
+  // per-row loop when a dimension iterator does not expose batches or when
+  // there are too many dimensions for the stack state.
+  static const int64_t MAX_BLOCK_DIMS = 16;
+  const ObDocIdExt *block_ids[MAX_BLOCK_DIMS];
+  int64_t block_cnt[MAX_BLOCK_DIMS];
+  int64_t block_pos[MAX_BLOCK_DIMS];
+  bool block_mode = OB_SUCC(ret) && dim_cnt <= MAX_BLOCK_DIMS;
+  if (block_mode) {
     for (int64_t i = 0; i < dim_cnt; ++i) {
+      block_ids[i] = nullptr;
+      block_cnt[i] = 0;
+      block_pos[i] = 0;
       if (union_dim_ended_[i]) {
         continue;
       }
-      const ObDatum *cur_id = iter_domain_ids_[i];
-      if (OB_ISNULL(cur_id)) {
-        ret = OB_ERR_UNEXPECTED;
+      const int rc = dim_iters_->at(i)->get_id_batch(block_ids[i], block_cnt[i], block_pos[i]);
+      if (OB_NOT_SUPPORTED == rc) {
+        block_mode = false;
         break;
-      } else if (-1 == min_idx) {
-        min_idx = i;
-        min_id = cur_id;
-      } else if (fast_binary_datum_cmp_inline(*cur_id, *min_id) < 0) {
-        min_idx = i;
-        min_id = cur_id;
+      } else if (OB_ITER_END == rc || (OB_SUCCESS == rc && 0 == block_cnt[i])) {
+        union_dim_ended_[i] = true;
+      } else if (OB_SUCCESS != rc) {
+        ret = rc;
+        break;
       }
     }
-    if (OB_FAIL(ret)) {
-    } else if (-1 == min_idx) {
-      ret = OB_ITER_END;
-    } else if (OB_FAIL(buffered_domain_ids_[count].from_datum(*min_id))) {
-    } else {
-      ++count;
-      ++output_row_cnt_;
-      // Every dimension sitting on the same document id advances together. The
-      // minimum dimension is advanced last because min_id points into its datum.
-      for (int64_t i = 0; OB_SUCC(ret) && i < dim_cnt; ++i) {
-        if (i != min_idx && !union_dim_ended_[i]
-            && 0 == fast_binary_datum_cmp_inline(*iter_domain_ids_[i], *min_id)
-            && OB_FAIL(advance_dim_iter(i))) {
+  }
+  if (OB_SUCC(ret) && block_mode) {
+    while (OB_SUCC(ret) && count < capacity) {
+      int64_t min_idx = -1;
+      const ObDatum *min_id = nullptr;
+      for (int64_t i = 0; i < dim_cnt; ++i) {
+        if (union_dim_ended_[i]) {
+          continue;
+        }
+        const ObDatum *cur_id = &block_ids[i][block_pos[i]].get_datum();
+        if (-1 == min_idx) {
+          min_idx = i;
+          min_id = cur_id;
+        } else if (fast_binary_datum_cmp_inline(*cur_id, *min_id) < 0) {
+          min_idx = i;
+          min_id = cur_id;
         }
       }
-      if (OB_SUCC(ret) && OB_FAIL(advance_dim_iter(min_idx))) {
+      if (-1 == min_idx) {
+        ret = OB_ITER_END;
+      } else if (OB_FAIL(buffered_domain_ids_[count].fast_from_datum(*min_id))) {
+      } else {
+        ++count;
+        ++output_row_cnt_;
+        // Every dimension sitting on the emitted id advances together. The
+        // minimum dimension goes last because min_id points into its batch.
+        for (int64_t i = 0; OB_SUCC(ret) && i < dim_cnt; ++i) {
+          if (i != min_idx && !union_dim_ended_[i]
+              && 0 == fast_binary_datum_cmp_inline(block_ids[i][block_pos[i]].get_datum(), *min_id)) {
+            if (++block_pos[i] >= block_cnt[i]) {
+              const int rc = dim_iters_->at(i)->advance_id_batch(block_ids[i], block_cnt[i], block_pos[i]);
+              if (OB_ITER_END == rc || (OB_SUCCESS == rc && 0 == block_cnt[i])) {
+                union_dim_ended_[i] = true;
+              } else if (OB_SUCCESS != rc) {
+                ret = rc;
+              }
+            }
+          }
+        }
+        if (OB_SUCC(ret) && ++block_pos[min_idx] >= block_cnt[min_idx]) {
+          const int rc = dim_iters_->at(min_idx)->advance_id_batch(
+              block_ids[min_idx], block_cnt[min_idx], block_pos[min_idx]);
+          if (OB_ITER_END == rc || (OB_SUCCESS == rc && 0 == block_cnt[min_idx])) {
+            union_dim_ended_[min_idx] = true;
+          } else if (OB_SUCCESS != rc) {
+            ret = rc;
+          }
+        }
+      }
+    }
+    // Publish the consumer positions so the per-row interfaces and the
+    // cached datum pointers stay consistent with the block walk.
+    for (int64_t i = 0; i < dim_cnt; ++i) {
+      if (!union_dim_ended_[i]) {
+        dim_iters_->at(i)->set_id_batch_pos(block_pos[i]);
+        iter_domain_ids_[i] = &block_ids[i][block_pos[i]].get_datum();
+      }
+    }
+  } else if (OB_SUCC(ret)) {
+    while (OB_SUCC(ret) && count < capacity) {
+      // Pick the smallest current document id among the non-exhausted dimensions.
+      // The comparison is inlined and dereferences the cached per-dimension datum
+      // pointers directly: going through the generic merge item / datum comparator
+      // here would cost a call per dimension per emitted document.
+      int64_t min_idx = -1;
+      const ObDatum *min_id = nullptr;
+      for (int64_t i = 0; i < dim_cnt; ++i) {
+        if (union_dim_ended_[i]) {
+          continue;
+        }
+        const ObDatum *cur_id = iter_domain_ids_[i];
+        if (OB_ISNULL(cur_id)) {
+          ret = OB_ERR_UNEXPECTED;
+          break;
+        } else if (-1 == min_idx) {
+          min_idx = i;
+          min_id = cur_id;
+        } else if (fast_binary_datum_cmp_inline(*cur_id, *min_id) < 0) {
+          min_idx = i;
+          min_id = cur_id;
+        }
+      }
+      if (OB_FAIL(ret)) {
+      } else if (-1 == min_idx) {
+        ret = OB_ITER_END;
+      } else if (OB_FAIL(buffered_domain_ids_[count].fast_from_datum(*min_id))) {
+      } else {
+        ++count;
+        ++output_row_cnt_;
+        // Every dimension sitting on the same document id advances together. The
+        // minimum dimension is advanced last because min_id points into its datum.
+        for (int64_t i = 0; OB_SUCC(ret) && i < dim_cnt; ++i) {
+          if (i != min_idx && !union_dim_ended_[i]
+              && 0 == fast_binary_datum_cmp_inline(*iter_domain_ids_[i], *min_id)
+              && OB_FAIL(advance_dim_iter(i))) {
+          }
+        }
+        if (OB_SUCC(ret) && OB_FAIL(advance_dim_iter(min_idx))) {
+        }
       }
     }
   }

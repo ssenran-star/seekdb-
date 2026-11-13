@@ -132,6 +132,9 @@ public:
   virtual int advance_to(const ObDatum &id_datum) override;
   virtual int get_curr_score(double &score) const override;
   virtual int get_curr_id(const ObDatum *&id_datum) const override;
+  virtual int get_id_batch(const ObDocIdExt *&ids, int64_t &count, int64_t &pos) override;
+  virtual int advance_id_batch(const ObDocIdExt *&ids, int64_t &count, int64_t &pos) override;
+  virtual void set_id_batch_pos(const int64_t pos) override;
 public:
   int get_token_doc_cnt(int64_t &token_doc_cnt) const { return token_iter_->get_token_doc_cnt(token_doc_cnt); }
   virtual int get_dim_max_score(double &score) override {
@@ -145,6 +148,7 @@ public:
 private:
   int save_relevances_and_docids();
   int save_docids();
+  int load_next_id_batch();
   OB_INLINE const common::ObDatum *curr_id_datum() const
   {
     return &doc_id_[cur_idx_].get_datum();
