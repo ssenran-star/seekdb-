@@ -124,6 +124,7 @@ private:
     int fd_ = -1;
     std::string path_;
     uint64_t size_ = 0;
+    uint64_t drop_pos_ = 0;
 };
 
 void sync_dir(const std::string& dir);
