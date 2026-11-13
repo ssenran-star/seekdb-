@@ -1,1 +1,103 @@
-IyBBTUQgQ0FHUkEg5p6E5bu65Yqg6YCfIOKAlCDln7rlh4bmtYvor5Xlt6XlhbcKCueUqOS6juWcqCBBTUQgUmFkZW9uIOWunuS+i+S4iioq55u05o6l5rWL6YePIENBR1JBIOW7uuWbvuiAl+aXtuS4juWPrOWbnioq77yM57uV5byAIFNRTCAvIExPQUQgREFUQSDlvIDplIDjgIIKCiMjIOS4uuS7gOS5iOS4jeeUqCBTUUwg5Z+65YeGCgror4TmtYvnmoTorqHml7bnqpflj6PmmK8gYENSRUFURSBWRUNUT1IgSU5ERVhgIOKGkiDnrKzkuIDmnaHmn6Xor6Lov5Tlm57jgILkvYbnlKggU1FMIOWkjeeOsOmcgOimge+8mgoKLSBgTE9BRCBEQVRBYCDlr7zlhaUgMjUwSyDooYzlkJHph4/vvIhIaWRkZW4yNTBLIOe6piAyNTYgTUIgVFNW77yJ4oaSIOWNleasoeaVsOWIhumSnwotIOavj+aNouS4gOe7hOWPguaVsOWwseimgSBEUk9QIElOREVYICsg6YeN5bu6CgrlnKggNCDlsI/ml7blrp7kvovpop3luqbkuIvkuI3njrDlrp7jgILmnKzlt6Xlhbfnm7TmjqUgYGRsb3BlbmAgYnJpZGdlIOeahCBDIEFCSe+8mgoKLSBgc2Vla2RiX2N1dnNfYnVpbGQoYmFzZSwgbiwgZGltKWAg4oaSIOWPqua1i+W7uuWbvgotIGBzZWVrZGJfY3V2c19zZWFyY2goaGFuZGxlLCBxdWVyeSwgbnEsIHRvcGssIGlkcywgTlVMTClgIOKGkiDmtYvmo4DntKLlubbnrpcgcmVjYWxsCgrljZXmrKHmtYvph48gPCAxIOenku+8jOWPr+S7pei/nue7reaJq+WHoOWNgee7hOWPguaVsOOAggoKIyMg5paH5Lu2Cgp8IOaWh+S7tiB8IOivtOaYjiB8CnwtLS18LS0tfAp8IGBicmlkZ2VfdGVzdC5jYCB8IOa1i+mHj+eoi+W6j+OAgmBkbG9wZW5gIGJyaWRnZe+8jOi+k+WHuiBgQlVJTERfTVMgLyBTRUFSQ0hfTVMgLyBSRUNBTExgIHwKfCBgc2Vla2RiX2N1dnNfYnJpZGdlX3R1bmFibGUuY2AgfCDlj6/osIPlj4LniYggYnJpZGdl77yaYENBR1JBX05JVEVSYCAvIGBDQUdSQV9HREVHYCAvIGBDQUdSQV9JR0RFR2Ag546v5aKD5Y+Y6YeP6KaG55uW5bu65Zu+5Y+C5pWw77yM6buY6K6k5YC8ID0g5Ya757uT5Z+657q/IHwKfCBgKi5iNjRgIHwgYmFzZTY0IOWNleihjOWwgeijhe+8jOeUqOS6juinhOmBvyBWUyBDb2RlIOe7iOerryBoZXJlZG9jIOeymOi0tOmXrumimCB8CgojIyDnlKjms5UKCiMjIyAxLiDmi4nlj5blubbnvJbor5HmtYvph4/nqIvluo8KCmBgYGJhc2gKbWtkaXIgLXAgL3dvcmtzcGFjZS93b3JrICYmIGNkIC93b3Jrc3BhY2Uvd29yawpjdXJsIC1mc1NMIC1vIGJ0LmI2NCBodHRwczovL3Jhdy5naXRodWJ1c2VyY29udGVudC5jb20vc3NlbnJhbi1zdGFyL3NlZWtkYi0vYW1kLWNhZ3JhLXN1Ym1pdC9hbWRfYmVuY2gvYnJpZGdlX3Rlc3QuYy5iNjQKYmFzZTY0IC1kIGJ0LmI2NCA+IGJyaWRnZV90ZXN0LmMKZ2NjIC1PMiAtbyBicmlkZ2VfdGVzdCBicmlkZ2VfdGVzdC5jIC1sZGwKYGBgCgojIyMgMi4g6LeR5Z+657q/77yI55So6ZWc5YOP6Ieq5bim55qE6aKE57yW6K+RIGJyaWRnZe+8iQoKYGBgYmFzaApleHBvcnQgTERfTElCUkFSWV9QQVRIPS9zZWVrZGJfd29ya3NwYWNlL2JyaWRnZTovb3B0L2hpcHZzL2xpYjovb3B0L3JvY20vbGliCi4vYnJpZGdlX3Rlc3QgL3NlZWtkYl93b3Jrc3BhY2UvYnJpZGdlL2xpYnNlZWtkYl9jdXZzX2JyaWRnZS5zbyAxMDAwMCAxMjggMTAwIDEwCmBgYAoK6L6T5Ye656S65L6L77yaCgpgYGAKQlVJTERfTVM9Li4uIFNFQVJDSF9NUz0uLi4gUkVDQUxMPS4uLiBOPTEwMDAwIERJTT0xMjggTlE9MTAwIFRPUEs9MTAgR1Q9MTAwMApgYGAKCiMjIyAzLiDnvJblj6/osIPlj4IgYnJpZGdl77yI6ZyAIGhpcGNj77yJCgpgYGBiYXNoCmN1cmwgLWZzU0wgLW8gdGIuYjY0IGh0dHBzOi8vcmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbS9zc2VucmFuLXN0YXIvc2Vla2RiLS9hbWQtY2FncmEtc3VibWl0L2FtZF9iZW5jaC9zZWVrZGJfY3V2c19icmlkZ2VfdHVuYWJsZS5jLmI2NApiYXNlNjQgLWQgdGIuYjY0ID4gc2Vla2RiX2N1dnNfYnJpZGdlX3R1bmFibGUuYwpjcCAvc2Vla2RiX3dvcmtzcGFjZS9icmlkZ2Uvc2Vla2RiX2N1dnNfYnJpZGdlLmggLiAgICMg6ZyA6KaB5aS05paH5Lu2CkhJUFZTX1JPT1Q9L29wdC9oaXB2cyBST0NNX1JPT1Q9L29wdC9yb2NtIFwKICAvb3B0L3JvY20vYmluL2hpcGNjIC1zaGFyZWQgLWZQSUMgLU8yIC1EX19ISVBfUExBVEZPUk1fQU1EX18gXAogIC1JL29wdC9oaXB2cy9pbmNsdWRlIC1JL29wdC9yb2NtL2luY2x1ZGUgXAogIHNlZWtkYl9jdXZzX2JyaWRnZV90dW5hYmxlLmMgLUwvb3B0L2hpcHZzL2xpYiBcCiAgLVdsLC1ycGF0aCwvb3B0L2hpcHZzL2xpYjovb3B0L3JvY20vbGliIC1sY3V2c19jIFwKICAtbyBsaWJzZWVrZGJfY3V2c19icmlkZ2VfdHVuYWJsZS5zbwpgYGAKCiMjIyA0LiDmiavlj4LmlbAKCmBgYGJhc2gKZXhwb3J0IExEX0xJQlJBUllfUEFUSD0vd29ya3NwYWNlL3dvcms6L29wdC9oaXB2cy9saWI6L29wdC9yb2NtL2xpYgpmb3Igbml0ZXIgaW4gMTAwIDgwIDYwIDQwIDMwIDIwIDE1IDEwOyBkbwogIGVjaG8gLW4gIm5pdGVyPSRuaXRlciAgIgogIENBR1JBX05JVEVSPSRuaXRlciAuL2JyaWRnZV90ZXN0IC93b3Jrc3BhY2Uvd29yay9saWJzZWVrZGJfY3V2c19icmlkZ2VfdHVuYWJsZS5zbyAxMDAwMCAxMjggMTAwIDEwCmRvbmUKYGBgCgojIyDnrZvpgInop4TliJnvvIjnoazpl6jmp5vvvIkKCuWPgui1m+eJiOacrOW/hemhu+WQjOaXtua7oei2s++8mgoKLSBSZWNhbGxAMTAg55u45a+5Kirlhrvnu5Pln7rnur8qKuS4i+mZjSDiiaQgMC4wMDXvvIjmr5Tnu53lr7npl6jmp5sgMC45NSDmm7TkuKXvvIkKLSBTSUZUMjUwSyBSZWNhbGxAMTAvMTAwIOKJpSAwLjk1Ci0gSGlkZGVuMjUwSyBSZWNhbGxAMTAg4omlIDAuOTDjgIFSZWNhbGxAMTAwIOKJpSAwLjg1Ci0g5q+P5p2h5p+l6K+i6L+U5ZueIGsg5LiqKirkupLkuI3ph43lpI0qKueahCBJRAoKIyMg5pWw5o2u6ZuGCgrplZzlg4/oh6rluKbvvIhgL3NlZWtkYl93b3Jrc3BhY2UvZGF0YXNldHMvYO+8ie+8mgoKfCDmlofku7YgfCDlhoXlrrkgfAp8LS0tfC0tLXwKfCBgYmFzZS5mMzJgIHwgMTAwMDAgw5cgMTI4IOe7tCBmbG9hdDMyIHwKfCBgcXVlcnkuZjMyYCB8IDEwMDAgw5cgMTI4IOe7tCBmbG9hdDMyIHwKfCBgZ3RfMTAweDEwLmkzMmAgfCAxMDAg5p+l6K+iIMOXIDEwIOi/kemCu+ecn+WAvCB8CgoqKuazqOaEj++8mjEwSyDop4TmqKHkuI3nrYnkuo7or4TmtYvnmoQgMjUwS+OAgioqIGBubl9kZXNjZW50X25pdGVyYCDnmoTlvbHlk43pmo/op4TmqKHlj5jljJbvvIwKMTBLIOS4iueahOWKoOmAn+avlOS8mioq6auY5LywKiogMjUwSyDkuIrnmoTooajnjrDjgILnrZvpgInml7bku6UgMTBLIOS9nOS4uuWIneetm++8jArmnIDnu4jlv4Xpobvlm57liLAgMjUwSyDop4TmqKHlpI3mtYvjgIIKCueUn+aIkOabtOWkp+inhOaooeaVsOaNruWPr+eUqCBgQkFTRV9GMzJgIC8gYFFVRVJZX0YzMmAgLyBgR1RfSTMyYCDnjq/looPlj5jph4/mjIflrprot6/lvoTvvJoKCmBgYGJhc2gKQkFTRV9GMzI9L3dvcmtzcGFjZS9kYXRhL2Jhc2UyNTBrLmYzMiBRVUVSWV9GMzI9L3dvcmtzcGFjZS9kYXRhL3EuZjMyIFwKICBHVF9JMzI9L3dvcmtzcGFjZS9kYXRhL2d0LmkzMiAuL2JyaWRnZV90ZXN0IC4uLgpgYGAK
+# AMD CAGRA 构建加速 — 基准测试工具
+
+用于在 AMD Radeon 实例上**直接测量 CAGRA 建图耗时与召回**，绕开 SQL / LOAD DATA 开销。
+
+## 为什么不用 SQL 基准
+
+评测的计时窗口是 `CREATE VECTOR INDEX` → 第一条查询返回。但用 SQL 复现需要：
+
+- `LOAD DATA` 导入 250K 行向量（Hidden250K 约 256 MB TSV）→ 单次数分钟
+- 每换一组参数就要 DROP INDEX + 重建
+
+在 4 小时实例额度下不现实。本工具直接 `dlopen` bridge 的 C ABI：
+
+- `seekdb_cuvs_build(base, n, dim)` → 只测建图
+- `seekdb_cuvs_search(handle, query, nq, topk, ids, NULL)` → 测检索并算 recall
+
+单次测量 < 1 秒，可以连续扫几十组参数。
+
+## 文件
+
+| 文件 | 说明 |
+|---|---|
+| `bridge_test.c` | 测量程序。`dlopen` bridge，输出 `BUILD_MS / SEARCH_MS / RECALL` |
+| `seekdb_cuvs_bridge_tunable.c` | 可调参版 bridge：`CAGRA_NITER` / `CAGRA_GDEG` / `CAGRA_IGDEG` 环境变量覆盖建图参数，默认值 = 冻结基线 |
+| `*.b64` | base64 单行封装，用于规避 VS Code 终端 heredoc 粘贴问题 |
+
+## 用法
+
+### 1. 拉取并编译测量程序
+
+```bash
+mkdir -p /workspace/work && cd /workspace/work
+curl -fsSL -o bt.b64 https://raw.githubusercontent.com/ssenran-star/seekdb-/amd-cagra-submit/amd_bench/bridge_test.c.b64
+base64 -d bt.b64 > bridge_test.c
+gcc -O2 -o bridge_test bridge_test.c -ldl
+```
+
+### 2. 跑基线（用镜像自带的预编译 bridge）
+
+```bash
+export LD_LIBRARY_PATH=/seekdb_workspace/bridge:/opt/hipvs/lib:/opt/rocm/lib
+./bridge_test /seekdb_workspace/bridge/libseekdb_cuvs_bridge.so 10000 128 100 10
+```
+
+输出示例：
+
+```
+BUILD_MS=... SEARCH_MS=... RECALL=... N=10000 DIM=128 NQ=100 TOPK=10 GT=1000
+```
+
+### 3. 编可调参 bridge（需 hipcc）
+
+```bash
+curl -fsSL -o tb.b64 https://raw.githubusercontent.com/ssenran-star/seekdb-/amd-cagra-submit/amd_bench/seekdb_cuvs_bridge_tunable.c.b64
+base64 -d tb.b64 > seekdb_cuvs_bridge_tunable.c
+cp /seekdb_workspace/bridge/seekdb_cuvs_bridge.h .   # 需要头文件
+HIPVS_ROOT=/opt/hipvs ROCM_ROOT=/opt/rocm \
+  /opt/rocm/bin/hipcc -shared -fPIC -O2 -D__HIP_PLATFORM_AMD__ \
+  -I/opt/hipvs/include -I/opt/rocm/include \
+  seekdb_cuvs_bridge_tunable.c -L/opt/hipvs/lib \
+  -Wl,-rpath,/opt/hipvs/lib:/opt/rocm/lib -lcuvs_c \
+  -o libseekdb_cuvs_bridge_tunable.so
+```
+
+### 4. 扫参数
+
+```bash
+export LD_LIBRARY_PATH=/workspace/work:/opt/hipvs/lib:/opt/rocm/lib
+for niter in 100 80 60 40 30 20 15 10; do
+  echo -n "niter=$niter  "
+  CAGRA_NITER=$niter ./bridge_test /workspace/work/libseekdb_cuvs_bridge_tunable.so 10000 128 100 10
+done
+```
+
+## 筛选规则（硬门槛）
+
+参赛版本必须同时满足：
+
+- Recall@10 相对**冻结基线**下降 ≤ 0.005（比绝对门槛 0.95 更严）
+- SIFT250K Recall@10/100 ≥ 0.95
+- Hidden250K Recall@10 ≥ 0.90、Recall@100 ≥ 0.85
+- 每条查询返回 k 个**互不重复**的 ID
+
+## 数据集
+
+镜像自带（`/seekdb_workspace/datasets/`）：
+
+| 文件 | 内容 |
+|---|---|
+| `base.f32` | 10000 × 128 维 float32 |
+| `query.f32` | 1000 × 128 维 float32 |
+| `gt_100x10.i32` | 100 查询 × 10 近邻真值 |
+
+**注意：10K 规模不等于评测的 250K。** `nn_descent_niter` 的影响随规模变化，
+10K 上的加速比会**高估** 250K 上的表现。筛选时以 10K 作为初筛，
+最终必须回到 250K 规模复测。
+
+生成更大规模数据可用 `BASE_F32` / `QUERY_F32` / `GT_I32` 环境变量指定路径：
+
+```bash
+BASE_F32=/workspace/data/base250k.f32 QUERY_F32=/workspace/data/q.f32 \
+  GT_I32=/workspace/data/gt.i32 ./bridge_test ...
+```
