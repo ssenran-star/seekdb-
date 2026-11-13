@@ -1,0 +1,4 @@
+sha256  996e1d18549e7ce2c2c5c09b5f56e4d0496940fd00e1d2d5221f65193be4e5eb
+size    11944 bytes
+built   by tools/hipvs_bridge/build.sh on W7900D (ROCm 7.2.4)
+note    contains the tuned CAGRA defaults: niter=20, gdeg=128, igdeg=128
