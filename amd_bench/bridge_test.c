@@ -34,6 +34,8 @@ int main(int argc, char **argv) {
   int (*search)(void *, const float *, long, long, unsigned *, float *) =
       dlsym(h, "seekdb_cuvs_search");
   void (*fre)(void *) = dlsym(h, "seekdb_cuvs_free");
+  int (*serialize)(void *, const char *) = dlsym(h, "seekdb_cuvs_serialize");
+  void *(*deserialize)(const char *, long, long) = dlsym(h, "seekdb_cuvs_deserialize");
   if (!build || !search || !fre) { fprintf(stderr, "DLSYM_FAIL\n"); return 3; }
 
   float *base = (float *)malloc((size_t)n * dim * 4);
@@ -89,8 +91,35 @@ int main(int argc, char **argv) {
     }
   }
 
-  printf("BUILD_MS=%.1f SEARCH_MS=%.1f RECALL=%.4f N=%d DIM=%d NQ=%d TOPK=%d GT=%d\n",
-         build_ms, search_ms, tot > 0 ? hit / tot : 0.0, n, dim, nq, topk, nread);
+  /* Snapshot round-trip: the contest timer includes persisting the CAGRA
+   * graph to storage, so measure serialize (and optionally reload) here. */
+  double ser_ms = -1.0, deser_ms = -1.0;
+  long long snap_bytes = -1;
+  if (serialize) {
+    const char *snap = getenv("SNAP_PATH");
+    if (!snap) snap = "/tmp/seekdb_probe_snapshot.bin";
+    t0 = now_ms();
+    int src = serialize(idx, snap);
+    ser_ms = now_ms() - t0;
+    if (src != 0) {
+      fprintf(stderr, "SERIALIZE_FAIL rc=%d\n", src);
+    } else {
+      FILE *sf = fopen(snap, "rb");
+      if (sf) { fseek(sf, 0, SEEK_END); snap_bytes = ftell(sf); fclose(sf); }
+      if (deserialize) {
+        t0 = now_ms();
+        void *h2 = deserialize(snap, n, dim);
+        deser_ms = now_ms() - t0;
+        if (h2) fre(h2);
+        else fprintf(stderr, "DESERIALIZE_FAIL\n");
+      }
+    }
+  }
+
+  printf("BUILD_MS=%.1f SEARCH_MS=%.1f SER_MS=%.1f DESER_MS=%.1f SNAP_BYTES=%lld "
+         "RECALL=%.4f N=%d DIM=%d NQ=%d TOPK=%d GT=%d\n",
+         build_ms, search_ms, ser_ms, deser_ms, snap_bytes,
+         tot > 0 ? hit / tot : 0.0, n, dim, nq, topk, nread);
 
   fre(idx);
   free(base); free(qry); free(ids); free(gt);
