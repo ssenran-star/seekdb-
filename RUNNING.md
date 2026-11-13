@@ -23,7 +23,7 @@ docker run --rm -i \
   minivectordb:latest
 ```
 
-- 入口：`/app/minivectordb --data-dir /data`（数据目录可用 `--data-dir` 覆盖）。
+- 入口：`/app/minivectordb --data-dir /data`。数据目录解析顺序：`--data-dir` 参数 > `VECTORDB_DATA_DIR` 环境变量（官方驱动约定）> `/data` 默认。
 - 程序前台运行，通过 stdin/stdout 的 JSONL 协议与测试驱动通信（见 `STDIO_PROTOCOL.md`）：启动完成恢复后主动输出 `{"type":"ready"}`；随后逐行处理 `execute` / `shutdown` 请求；日志只写 stderr。
 - 不监听任何网络端口，无需 EXPOSE。
 

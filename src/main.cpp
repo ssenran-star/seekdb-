@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include <iostream>
 #include <string>
 
@@ -20,6 +21,8 @@ json cell_to_json(const mvdb::Cell& c) {
 
 int main(int argc, char** argv) {
     std::string data_dir = "/data";
+    // official driver (_transport.py) passes the data dir via VECTORDB_DATA_DIR
+    if (const char* e = std::getenv("VECTORDB_DATA_DIR"); e && *e) data_dir = e;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--data-dir" && i + 1 < argc) data_dir = argv[++i];

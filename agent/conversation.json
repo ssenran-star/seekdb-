@@ -214,9 +214,18 @@
       "command": "python3 tests/e4_overmemory.py minivectordb:latest（Docker --memory=2g --memory-swap=2g --read-only --network=none）；排查工具：dmesg、cgroup memory.stat、fincore、findmnt",
       "output": "首轮（数据目录默认 /tmp）：~1.9M 行时 OOM（dmesg: CONSTRAINT_MEMCG，进程 anon-rss 仅 83MB）。加每 64MB fadvise DONTNEED 后仍 OOM。探针：fadvise rc=0 但 fincore 显示整文件驻留；findmnt 证实 /tmp 是 tmpfs。测试改 ext4（/root）重跑：LOAD OK 155.7s log=2.16GB；RESTART ready 8.8s maxid=1999999；TOPK 2M 行 19.20s 结果正确；事务中强杀→未提交回滚、已提交完整；E4 PASS。",
       "interpretation": "根因是测试环境而非产品：tmpfs 的 shmem 页计入 memcg 且无 swap 不可回收；正式平台用真实数据设备（B 指标读 io.stat）。fadvise 修复保留：限制磁盘页缓存、降低 memory.peak（M 指标）。排查链：OOM→页缓存假设→修复→仍失败→fincore+返回值探针→文件系统核查→根因→纠正测试→通过。教训：下产品结论前先核验测试环境本身（文件系统/计量口径）。"
+    },
+    {
+      "id": "E14",
+      "status": "executed",
+      "executor": "student+agent",
+      "hypothesis": "学生提供他队踩坑文档后对照发现：官方驱动用 VECTORDB_DATA_DIR 环境变量传数据目录（_transport.py:71），我们只认 --data-dir，疑似第 3 次提测「执行失败」根因；修复后全量回归应通过。",
+      "command": "main.cpp 三级回退（argv>env>/data）；VM 实测：环境变量专项探针 + crash/edge/e5 形态探针 + protocol_check 全量 + bench；Docker 镜像重建 + 镜像全量 + 超内存 e4 复验",
+      "output": "ENV VAR OK（日志正确写入环境变量指定目录）；CRASH TESTS PASS；EDGE TESTS PASS；E5 FORMS PASS（多行 CREATE/列名定义大小写/DESC 距离/无 LIMIT/LIMIT 0/事务内向量检索 exact+ann/UPDATE 原子性/嵌套 BEGIN 共 8 探针）；公开 20/20；bench 写 0.497s 查 0.692s recall 0.985（VM 性能已恢复）。镜像重建 BUILD:0，handshake PASS，镜像公开 20/20；e4 超内存：LOAD 110.1s log=2.16GB，RESTART ready 12.4s，TOPK 2M 行 15.99s 结果正确，事务中强杀回滚 OK，E4 PASS。",
+      "interpretation": "学生提供他队踩坑文档并要求吸取教训（线索来源）；agent 对照官方驱动源码证实环境变量机制并修复。他队第 7 次提测补上该变量后从 0 分变为仅 2 例失败——强证据。教训：提交协议不止报文格式，还包括数据目录等运行约定；对照他人失败案例是高效诊断捷径；每次提测前必须先跑免费预检。"
     }
   ],
-  "retrospective": "初始会话由 agent 主导实现，学生贡献集中在流程约束（编译门槛、进度板留痕）与技术选型（C++）。首次正式提测：性能与 Agent 评测均完成（按规则推断 MySQL case 准入全过），Agent 原始分 2.0，性能 E=1628.165077（平台显示口径与文档 0~1 公式不符，待确认）。反馈后验证会话：学生预测提交后强杀会部分保留（E9 被否证），拒绝理论解释、要求虚拟机实证（E10 日志解剖），未对 ann 实验作预测（E11 为 agent 演示）。已验证：编译通过、20 公开用例全过（本地进程与 Docker 镜像双形态）、崩溃恢复与边界自测过、Recall@10=0.985、精确查询 0.694s/1000、20k 行恢复中反复强杀零丢失。教训：(1) 公开样例的 ORDER BY 非投影列这类基础语义容易在解析器里漏掉，必须逐条对照 .result；(2) ANN 参数不能凭感觉，要用基准脚本量化召回；(3) 性能优化先量化瓶颈（拷贝/排序）再动手；(4) Dockerfile 构建脚本必须在容器环境实际跑通；(5) 多候选实现先同基准实测再决策，优化对准正式口径（exact）；重写分支前备份 archive + force-with-lease；(6) Agent 评分只认学生自身证据：预测被否证+要求实证是有效实例，但机制解释若由 agent 代述则不计学生理解——后续需要学生自己复述与迁移；(7) 第二次提测证实证据→得分换算：Agent 2.0→3.0 与新增实例吻合；代码未变时 E 波动 +14.4% 属测量方差，跨提交比较看排名而非单次 E 值；(8) 超内存 OOM 排查最终定位到测试环境（/tmp=tmpfs，shmem 不可回收）：下产品结论前先核验测试环境本身的文件系统与计量口径；fadvise 页缓存释放保留为 M 指标优化，2.1GB 数据集全量验证通过。",
+  "retrospective": "初始会话由 agent 主导实现，学生贡献集中在流程约束（编译门槛、进度板留痕）与技术选型（C++）。首次正式提测：性能与 Agent 评测均完成（按规则推断 MySQL case 准入全过），Agent 原始分 2.0，性能 E=1628.165077（平台显示口径与文档 0~1 公式不符，待确认）。反馈后验证会话：学生预测提交后强杀会部分保留（E9 被否证），拒绝理论解释、要求虚拟机实证（E10 日志解剖），未对 ann 实验作预测（E11 为 agent 演示）。已验证：编译通过、20 公开用例全过（本地进程与 Docker 镜像双形态）、崩溃恢复与边界自测过、Recall@10=0.985、精确查询 0.694s/1000、20k 行恢复中反复强杀零丢失。教训：(1) 公开样例的 ORDER BY 非投影列这类基础语义容易在解析器里漏掉，必须逐条对照 .result；(2) ANN 参数不能凭感觉，要用基准脚本量化召回；(3) 性能优化先量化瓶颈（拷贝/排序）再动手；(4) Dockerfile 构建脚本必须在容器环境实际跑通；(5) 多候选实现先同基准实测再决策，优化对准正式口径（exact）；重写分支前备份 archive + force-with-lease；(6) Agent 评分只认学生自身证据：预测被否证+要求实证是有效实例，但机制解释若由 agent 代述则不计学生理解——后续需要学生自己复述与迁移；(7) 第二次提测证实证据→得分换算：Agent 2.0→3.0 与新增实例吻合；代码未变时 E 波动 +14.4% 属测量方差，跨提交比较看排名而非单次 E 值；(8) 超内存 OOM 排查最终定位到测试环境（/tmp=tmpfs，shmem 不可回收）：下产品结论前先核验测试环境本身的文件系统与计量口径；fadvise 页缓存释放保留为 M 指标优化，2.1GB 数据集全量验证通过；(9) 提交协议不止报文格式，还包括数据目录等运行约定（官方驱动用 VECTORDB_DATA_DIR 环境变量）；他人踩坑文档是高效诊断来源——学生提供文档后对照官方源码定位并修复了疑似执行失败根因。",
   "limitations": [
     "学生证据仍有限：E9 含学生预测与被否证后的实证要求（有效实例），但机制解释为 agent 产出；学生尚未用自己的话复述/迁移，1.5 及以上档位证据缺失，如实标注。",
     "日志无 compaction，频繁更新场景文件与恢复扫描量会增长。",
