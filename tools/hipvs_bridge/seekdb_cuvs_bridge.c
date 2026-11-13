@@ -53,28 +53,24 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
    * rebuilding the bridge. The evaluation environment sets none of them, so the
    * tuned defaults are what get built.
    *
-   * Measured on W7900D, 250K float32 (median of repeated runs):
-   *   niter=100 igdeg=256 -> 40705 ms  recall@10 0.9980   (frozen baseline)
-   *   niter=100 igdeg=128 -> 31092 ms  recall@10 0.9980
-   *   niter=30  igdeg=256 -> 18357 ms  recall@10 0.9960
-   *   niter=30  igdeg=128 -> 12024 ms  recall@10 0.9970
-   *   niter=20  igdeg=256 -> 15445 ms  recall@10 0.9970   (selected)
-   *   niter=20  igdeg=128 ->  9228 ms  recall@10 0.9950
-   *   niter=10  igdeg=256 -> 10517 ms  recall@10 0.9710
-   *   niter=10  igdeg=128 ->  7178 ms  recall@10 0.9870
+   * The frozen V5 baseline uses nn_descent_niter=100, graph_degree=128 and
+   * intermediate_graph_degree=256. Those values are kept unchanged here:
+   * shrinking any of them trades graph quality for build time, and the
+   * contest explicitly forbids "trading down Recall for performance"
+   * (section 11). Two earlier revisions lowered nn_descent_niter to 20 and
+   * were rejected by the hard gate with
+   * "hidden250k:recall@10_baseline_delta" and
+   * "hidden250k:recall@100_baseline_delta".
    *
-   * The contest allows at most a 0.005 recall drop versus the frozen
-   * baseline and gates on recall@10 AND recall@100. Shrinking
-   * intermediate_graph_degree reduces build time but measurably weakens the
-   * graph, and that penalty shows up much more strongly at recall@100 than at
-   * recall@10. An earlier revision used niter=20 / igdeg=128 and was rejected
-   * by the contest gate with "hidden250k:recall@100_baseline_delta".
+   * The way to speed up construction without touching graph quality is to
+   * build a graph that is at least as good in fewer iterations, or to remove
+   * the surrounding overhead (host-to-device copy, snapshot persistence) so
+   * that it overlaps with the build itself.
    *
-   * niter=20 with the baseline intermediate_graph_degree keeps recall@10
-   * within 0.001 of the baseline while still removing ~62% of the build time,
-   * which leaves room for the recall@100 penalty to stay inside the gate.
-   */
-  h->ip->nn_descent_niter = 20;
+   * The env overrides below exist so amd_bench/sweep.sh can reproduce
+   * measurements without rebuilding the bridge. The evaluation environment
+   * sets none of them, so these defaults are what get compiled.   */
+  h->ip->nn_descent_niter = 100;
   {
     const char *env_v;
     if ((env_v = getenv("CAGRA_NITER")) != NULL) {
