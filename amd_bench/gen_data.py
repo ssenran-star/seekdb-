@@ -93,6 +93,8 @@ def main():
     gt.astype(np.int32).tofile(os.path.join(args.out, "gt.i32"))
 
     print("wrote:")
+    with open(os.path.join(args.out, "dim.txt"), "w") as fh:
+        fh.write(str(dim))
     for f in ("base.f32", "query.f32", "gt.i32"):
         p = os.path.join(args.out, f)
         print("  %-10s %12d bytes" % (f, os.path.getsize(p)))
