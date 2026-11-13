@@ -33,8 +33,16 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
 
   if (cuvsCagraIndexParamsCreate(&h->ip) != CUVS_SUCCESS) goto fail_res;
   h->ip->build_algo = NN_DESCENT;
+  /*
+   * graph_degree is the degree of the FINAL graph and is left at the frozen
+   * baseline value of 128: lowering it was measured to buy no build time at
+   * all while costing recall.
+   *
+   * intermediate_graph_degree only sizes the intermediate graph NN_DESCENT
+   * works on, so it can be lowered without weakening the final index.
+   */
   h->ip->graph_degree = 128;
-  h->ip->intermediate_graph_degree = 256;
+  h->ip->intermediate_graph_degree = 128;
   /*
    * nn_descent_niter drives the dominant cost of CAGRA construction: every
    * iteration is a full-graph nearest-neighbour search, so the build time is
@@ -44,8 +52,18 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
    * so the parameter sweep in amd_bench/ can reproduce the measurement without
    * rebuilding the bridge. The evaluation environment sets none of them, so the
    * tuned defaults are what get built.
+   *
+   * Measured on W7900D, 250K x 128 float32, median of repeated runs:
+   *   niter=100 igdeg=256 -> 41757 ms  recall 0.9980   (frozen baseline)
+   *   niter=100 igdeg=128 -> 30480 ms  recall 0.9980
+   *   niter=30  igdeg=128 -> 12445 ms  recall 0.9960
+   *   niter=20  igdeg=128 ->  9140 ms  recall 0.9970   (selected)
+   *   niter=10  igdeg=128 ->  6802 ms  recall 0.9890   (rejected: recall drop)
+   * The contest allows at most a 0.005 recall drop versus the frozen
+   * baseline, so niter=20 / igdeg=128 is the fastest setting that stays
+   * inside that budget with margin.
    */
-  h->ip->nn_descent_niter = 30;
+  h->ip->nn_descent_niter = 20;
   {
     const char *env_v;
     if ((env_v = getenv("CAGRA_NITER")) != NULL) {
