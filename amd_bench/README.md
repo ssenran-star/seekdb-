@@ -26,13 +26,26 @@
 
 ## 用法
 
-### 1. 拉取并编译测量程序
+### 1. 一行完成：取文件 + 编译 + 运行
+
+实例上 `raw.githubusercontent.com` 不可达（`SSL_ERROR_SYSCALL`），必须走 `api.github.com`。
+**不要用 heredoc** —— VS Code 终端会吞掉 `<<`，导致 shell 进入续行状态（提示符变成 `>` / `>>>`）。
+**不要用 `export`** —— 终端偶尔吞掉命令开头几个字符，直接给命令加 `LD_LIBRARY_PATH=` 前缀。
 
 ```bash
-mkdir -p /workspace/work && cd /workspace/work
-curl -fsSL -o bt.b64 https://raw.githubusercontent.com/ssenran-star/seekdb-/amd-cagra-submit/amd_bench/bridge_test.c.b64
-base64 -d bt.b64 > bridge_test.c
-gcc -O2 -o bridge_test bridge_test.c -ldl
+cd /workspace && mkdir -p work && cd work && \
+curl -fsSL -H "Authorization: Bearer $TOKEN" \
+  "https://api.github.com/repos/ssenran-star/seekdb-/contents/amd_bench/bridge_test.c?ref=amd-cagra-submit" \
+| python3 -c "import sys,json,base64;open('bridge_test.c','wb').write(base64.b64decode(json.load(sys.stdin)['content']))" \
+&& gcc -O2 -o bridge_test bridge_test.c -ldl \
+&& LD_LIBRARY_PATH=/seekdb_workspace/bridge:/opt/hipvs/lib:/opt/rocm/lib \
+   ./bridge_test /seekdb_workspace/bridge/libseekdb_cuvs_bridge.so 10000 128 100 10
+```
+
+`$TOKEN` 为只读 fine-grained PAT。输出形如：
+
+```
+BUILD_MS=... SEARCH_MS=... RECALL=... N=10000 DIM=128 NQ=100 TOPK=10 GT=1000
 ```
 
 ### 2. 跑基线（用镜像自带的预编译 bridge）
