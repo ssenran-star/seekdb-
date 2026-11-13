@@ -40,6 +40,15 @@ private:
         std::unique_ptr<Hnsw> ann;
         uint64_t create_txn = 0;
         uint64_t index_txn = 0;
+        struct FastScan {
+            uint64_t epoch = 0;
+            int64_t n = 0;
+            int dim = 0;
+            std::vector<int64_t> pks;
+            std::vector<float> vecs;
+            std::vector<Row> rows;
+        };
+        FastScan scan;
     };
 
     Table& get_table(const std::string& name);
@@ -50,6 +59,9 @@ private:
     void append_commit(uint64_t txn);
     uint64_t statement_txn(bool& is_autocommit);
     void rebuild_ann(Table& t);
+    void build_fast_scan(Table& t);
+    struct Cand { float dsq; int64_t pk; int32_t idx; };
+    std::vector<Cand> cands_;
 
     ExecResult exec_create_table(const Statement& st);
     ExecResult exec_create_index(const Statement& st);

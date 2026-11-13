@@ -4,6 +4,8 @@
 #include <cctype>
 #include <queue>
 
+#include "simd.h"
+
 namespace mvdb {
 
 namespace {
@@ -415,6 +417,33 @@ ExecResult Engine::exec_delete(const Statement& st) {
     return r;
 }
 
+void Engine::build_fast_scan(Table& t) {
+    auto& sc = t.scan;
+    if (sc.epoch == cache_epoch_) return;
+    int dim = t.schema.vector_index >= 0 ? static_cast<int>(t.schema.cols[t.schema.vector_index].len) : 0;
+    int64_t n = static_cast<int64_t>(t.latest.size());
+    sc.pks.clear(); sc.vecs.clear(); sc.rows.clear();
+    sc.dim = dim;
+    if (n > 500000 || (dim > 0 && n * dim * 4 > 512LL * 1024 * 1024)) {
+        sc.n = 0; sc.epoch = cache_epoch_;
+        return;
+    }
+    sc.pks.reserve(n); sc.rows.reserve(n);
+    if (dim > 0) sc.vecs.reserve(static_cast<size_t>(n) * dim);
+    for (auto& [pk, off] : t.latest) {
+        const Row* row = resolve_row(t, pk);
+        if (!row) continue;
+        sc.pks.push_back(pk);
+        if (dim > 0) {
+            const auto& v = (*row)[t.schema.vector_index].v;
+            sc.vecs.insert(sc.vecs.end(), v.begin(), v.end());
+        }
+        sc.rows.push_back(*row);
+    }
+    sc.n = static_cast<int64_t>(sc.pks.size());
+    sc.epoch = cache_epoch_;
+}
+
 ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
     Table& t = get_table(st.table);
     const TableSchema& s = t.schema;
@@ -514,71 +543,83 @@ ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
             }
         }
     }
-    bool topk_done = false;
-    if (!use_ann && st.has_order && st.has_limit && st.limit > 0) {
-        struct Key {
-            double d = 0;
-            int64_t i = 0;
-            std::string s;
-            int64_t pk = 0;
-        };
-        auto better = [&](const Key& a, const Key& b) {
-            int ord;
-            if (order_dist) {
-                ord = (a.d > b.d) - (a.d < b.d);
-            } else if (s.cols[order_col].type == ValType::BIGINT) {
-                ord = (a.i > b.i) - (a.i < b.i);
-            } else {
-                ord = a.s.compare(b.s);
-                ord = (ord > 0) - (ord < 0);
+    bool fast_done = false;
+    if (!use_ann) {
+        build_fast_scan(t);
+        auto& sc = t.scan;
+        if (sc.n > 0) {
+            cands_.clear();
+            int dim = sc.dim;
+            const float* qvec = order_dist ? item_qvec[order_item].data() : nullptr;
+            for (int64_t i = 0; i < sc.n; i++) {
+                if (!row_matches(sc.rows[i], where)) continue;
+                Cand c;
+                c.pk = sc.pks[i];
+                c.idx = static_cast<int32_t>(i);
+                c.dsq = order_dist ? l2_sq_fast(&sc.vecs[i * dim], qvec, dim) : 0.0f;
+                cands_.push_back(c);
             }
-            if (st.order_desc) ord = -ord;
-            if (ord != 0) return ord < 0;
-            return a.pk < b.pk;
-        };
-        std::priority_queue<Key, std::vector<Key>, decltype(better)> pq(better);
-        size_t K = static_cast<size_t>(st.limit);
-        for (auto& [pk, off] : t.latest) {
-            const Row* row = resolve_row(t, pk);
-            if (!row || !row_matches(*row, where)) continue;
-            Key k;
-            k.pk = pk;
-            if (order_dist)
-                k.d = l2_distance((*row)[item_col[order_item]].v, item_qvec[order_item]);
-            else if (s.cols[order_col].type == ValType::BIGINT)
-                k.i = (*row)[order_col].i;
+            auto cand_less = [&](const Cand& a, const Cand& b) {
+                if (st.has_order) {
+                    int ord = 0;
+                    if (order_dist) {
+                        ord = (a.dsq > b.dsq) - (a.dsq < b.dsq);
+                    } else if (s.cols[order_col].type == ValType::BIGINT) {
+                        int64_t va = sc.rows[a.idx][order_col].i, vb = sc.rows[b.idx][order_col].i;
+                        ord = (va > vb) - (va < vb);
+                    } else {
+                        ord = sc.rows[a.idx][order_col].s.compare(sc.rows[b.idx][order_col].s);
+                        ord = (ord > 0) - (ord < 0);
+                    }
+                    if (st.order_desc) ord = -ord;
+                    if (ord != 0) return ord < 0;
+                }
+                return a.pk < b.pk;
+            };
+            size_t K = st.has_limit ? static_cast<size_t>(st.limit) : cands_.size();
+            size_t Ksel = std::min(K + 16, cands_.size());
+            if (Ksel < cands_.size())
+                std::partial_sort(cands_.begin(), cands_.begin() + Ksel, cands_.end(), cand_less);
             else
-                k.s = (*row)[order_col].s;
-            if (pq.size() < K) {
-                pq.push(std::move(k));
-            } else if (better(k, pq.top())) {
-                pq.pop();
-                pq.push(std::move(k));
+                std::sort(cands_.begin(), cands_.end(), cand_less);
+            cands_.resize(Ksel);
+            if (order_dist) {
+                std::sort(cands_.begin(), cands_.end(), [&](const Cand& a, const Cand& b) {
+                    double da = l2_distance(sc.rows[a.idx][item_col[order_item]].v, item_qvec[order_item]);
+                    double db = l2_distance(sc.rows[b.idx][item_col[order_item]].v, item_qvec[order_item]);
+                    int ord = (da > db) - (da < db);
+                    if (st.order_desc) ord = -ord;
+                    if (ord != 0) return ord < 0;
+                    return a.pk < b.pk;
+                });
             }
+            if (K < cands_.size()) cands_.resize(K);
+            for (auto& c : cands_) {
+                const Row& row = sc.rows[c.idx];
+                OutRow o;
+                o.pk = c.pk;
+                o.cells.reserve(items.size());
+                for (size_t k = 0; k < items.size(); ++k) {
+                    if (items[k].is_distance) {
+                        Cell cell;
+                        cell.kind = Cell::REAL;
+                        cell.d = l2_distance(row[item_col[k]].v, item_qvec[k]);
+                        o.cells.push_back(std::move(cell));
+                    } else {
+                        o.cells.push_back(to_cell(row[item_col[k]]));
+                    }
+                }
+                out.push_back(std::move(o));
+            }
+            fast_done = true;
         }
-        std::vector<Key> keys;
-        keys.reserve(pq.size());
-        while (!pq.empty()) {
-            keys.push_back(pq.top());
-            pq.pop();
-        }
-        std::sort(keys.begin(), keys.end(), better);
-        for (auto& k : keys) {
-            const Row* row = resolve_row(t, k.pk);
-            if (row) out.push_back(collect(k.pk, *row));
-        }
-        topk_done = true;
     }
-    if (!use_ann && !topk_done) {
-        out.clear();
+    if (!use_ann && !fast_done) {
         for (auto& [pk, off] : t.latest) {
             const Row* row = resolve_row(t, pk);
             if (!row || !row_matches(*row, where)) continue;
             out.push_back(collect(pk, *row));
         }
-    }
-
-    if (!topk_done) {
         std::sort(out.begin(), out.end(), [&](const OutRow& a, const OutRow& b) {
             if (st.has_order) {
                 int ord = 0;
