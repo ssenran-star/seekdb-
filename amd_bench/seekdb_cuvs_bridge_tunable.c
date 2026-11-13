@@ -1,5 +1,16 @@
 /* seekdb <-> hipVS bridge: plain-C CAGRA kNN; all cuVS/ROCm deps live here. */
-#include "seekdb_cuvs_bridge.h"
+/* Self-contained: header inlined so the instance needs no extra files. */
+extern "C" {
+int seekdb_cuvs_cagra_knn(const float* base, long n, long dim,
+                           const float* query, long nq, long topk,
+                           unsigned int* out_ids);
+void* seekdb_cuvs_build(const float* base, long n, long dim);
+int   seekdb_cuvs_search(void* handle, const float* query, long nq, long topk,
+                         unsigned int* out_ids, float* out_dist);
+void  seekdb_cuvs_free(void* handle);
+int seekdb_cuvs_serialize(void* handle, const char* filename);
+void* seekdb_cuvs_deserialize(const char* filename, long n, long dim);
+}
 #include <cuvs/core/c_api.h>
 #include <cuvs/neighbors/cagra.h>
 #include <dlpack/dlpack.h>
