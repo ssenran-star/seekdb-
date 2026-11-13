@@ -1,6 +1,10 @@
 /* seekdb <-> hipVS bridge: plain-C CAGRA kNN; all cuVS/ROCm deps live here. */
-/* Self-contained: header inlined so the instance needs no extra files. */
+/* Self-contained: header inlined so the instance needs no extra files.
+ * The build driver may compile this as C++ (hipcc clang++), so guard the
+ * extern "C" block: it is a syntax error in plain C. */
+#ifdef __cplusplus
 extern "C" {
+#endif
 int seekdb_cuvs_cagra_knn(const float* base, long n, long dim,
                            const float* query, long nq, long topk,
                            unsigned int* out_ids);
@@ -10,7 +14,9 @@ int   seekdb_cuvs_search(void* handle, const float* query, long nq, long topk,
 void  seekdb_cuvs_free(void* handle);
 int seekdb_cuvs_serialize(void* handle, const char* filename);
 void* seekdb_cuvs_deserialize(const char* filename, long n, long dim);
+#ifdef __cplusplus
 }
+#endif
 #include <cuvs/core/c_api.h>
 #include <cuvs/neighbors/cagra.h>
 #include <dlpack/dlpack.h>
