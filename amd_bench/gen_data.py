@@ -33,7 +33,7 @@ def make_base(n, dim, n_clusters, noise, rng):
     return base
 
 
-def exact_topk(base, queries, k=10, chunk=6000):
+def exact_topk(base, queries, k=100, chunk=6000):
     """Brute-force exact L2 top-k. float64 distances for stability, chunked over base rows."""
     n = base.shape[0]
     nq = queries.shape[0]
@@ -64,6 +64,8 @@ def main():
     ap.add_argument("--n", type=int, default=250000)
     ap.add_argument("--dim", type=int, default=128)
     ap.add_argument("--nq", type=int, default=100)
+    ap.add_argument("--topk", type=int, default=100,
+                    help="ground-truth neighbours per query (use 100 to gate recall@100)")
     ap.add_argument("--clusters", type=int, default=2000)
     ap.add_argument("--noise", type=float, default=0.30)
     ap.add_argument("--seed", type=int, default=1234)
@@ -85,8 +87,8 @@ def main():
     query = (base[qi] + rng.standard_normal((nq, dim)).astype(np.float32) * 0.05).astype(np.float32)
     query /= np.maximum(np.linalg.norm(query, axis=1, keepdims=True), 1e-8)
 
-    print("computing exact top-10 ground truth ...", flush=True)
-    gt = exact_topk(base, query, k=10)
+    print("computing exact top-%d ground truth ..." % args.topk, flush=True)
+    gt = exact_topk(base, query, k=args.topk)
 
     base.tofile(os.path.join(args.out, "base.f32"))
     query.tofile(os.path.join(args.out, "query.f32"))
@@ -100,7 +102,7 @@ def main():
         print("  %-10s %12d bytes" % (f, os.path.getsize(p)))
     print("  base  = %d x %d float32" % (n, dim))
     print("  query = %d x %d float32" % (nq, dim))
-    print("  gt    = %d x 10 int32 (row offsets)" % nq)
+    print("  gt    = %d x %d int32 (row offsets)" % (nq, args.topk))
 
 
 if __name__ == "__main__":
