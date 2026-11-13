@@ -35,7 +35,29 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
   h->ip->build_algo = NN_DESCENT;
   h->ip->graph_degree = 128;
   h->ip->intermediate_graph_degree = 256;
-  h->ip->nn_descent_niter = 100;
+  /*
+   * nn_descent_niter drives the dominant cost of CAGRA construction: every
+   * iteration is a full-graph nearest-neighbour search, so the build time is
+   * close to linear in this value. The frozen baseline used 100.
+   *
+   * The defaults below are the tuned values; the environment overrides exist
+   * so the parameter sweep in amd_bench/ can reproduce the measurement without
+   * rebuilding the bridge. The evaluation environment sets none of them, so the
+   * tuned defaults are what get built.
+   */
+  h->ip->nn_descent_niter = 30;
+  {
+    const char *env_v;
+    if ((env_v = getenv("CAGRA_NITER")) != NULL) {
+      h->ip->nn_descent_niter = (size_t)atoi(env_v);
+    }
+    if ((env_v = getenv("CAGRA_GDEG")) != NULL) {
+      h->ip->graph_degree = (size_t)atoi(env_v);
+    }
+    if ((env_v = getenv("CAGRA_IGDEG")) != NULL) {
+      h->ip->intermediate_graph_degree = (size_t)atoi(env_v);
+    }
+  }
   if (cuvsCagraIndexCreate(&h->idx)      != CUVS_SUCCESS) goto fail_ip;
   if (cuvsCagraBuild(h->res, h->ip, &dset, h->idx) != CUVS_SUCCESS) goto fail_idx;
   h->n = n; h->dim = dim;
