@@ -1069,9 +1069,9 @@ int ObFtsIndexBuilderUtil::decide_parallelism(
               config::px_workers_per_cpu_quota());
           decided_parallelism = MIN(decided_parallelism,
                                     MAX(px_pool_target / 4, 1L));
-          // lower bound: ensure parallel tokenize+insert even when table_dop=1
-          const int64_t min_floor = MIN(static_cast<int64_t>(4), px_pool_target / 4);
-          decided_parallelism = MAX(decided_parallelism, MAX(min_floor, 1L));
+        // lower bound: ensure parallel tokenize+insert even when table_dop=1
+        const int64_t min_floor = MIN(static_cast<int64_t>(16), px_pool_target / 4);
+        decided_parallelism = MAX(decided_parallelism, MAX(min_floor, 1L));
         }
         break;
       case share::schema::ObIndexType::INDEX_TYPE_NORMAL_MULTIVALUE_LOCAL:
