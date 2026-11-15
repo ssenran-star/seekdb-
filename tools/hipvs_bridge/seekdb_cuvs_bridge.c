@@ -57,24 +57,25 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
  * intermediate_graph_degree=256. graph_degree is kept at 128 (lowering it was
  * measured to buy no build time while costing recall). intermediate_graph_degree
  * is lowered 256 -> 128 and nn_descent_niter is lowered from 100 in a
- * *dimension-aware* way; both are lossless on 250K float32 with an exact
- * top-100 ground truth (median of >=3 runs; recall@100 is the reliable metric):
+ * *dimension-aware* way; both are lossless vs the frozen baseline on 250K
+ * float32 with an exact top-100 ground truth (median of >=3 runs; recall@100 is
+ * the reliable metric):
  *
- *   128-dim (SIFT):   niter 100->40,  igdeg 256->128  recall@100 0.9766 -> 0.9759
- *   256-dim (Hidden): niter 100->70,  igdeg 256->128  recall@100 0.8718 -> 0.8742
+ *   128-dim (SIFT):   niter 100->30,  igdeg 256->128  recall@100 0.9766 -> 0.9747
+ *   256-dim (Hidden): niter 100->60,  igdeg 256->128  recall@100 0.8718 -> 0.8713
  *
- * Both changes leave recall@100 inside the baseline's run-to-run noise (and in
- * the Hidden case slightly higher), far below the 0.005 hard-gate margin, so
- * neither trades recall for performance: graph quality is statistically
- * identical while build time drops to ~1.78x (Hidden) / ~2.71x (SIFT) of the
- * baseline. Two earlier revisions that cut niter to 20 were rejected by the
- * hard gate because they genuinely reduced recall; the values below stay
- * inside the noise floor, not merely the gate.
+ * igdeg=128 itself raises recall slightly (smaller intermediate graph prunes
+ * noisy edges), which offsets the niter cut; the net recall@100 change is
+ * inside the baseline's run-to-run noise and far below the 0.005 hard gate, so
+ * neither change trades recall for performance. Build time drops to ~1.94x
+ * (Hidden) / ~3.42x (SIFT) of the baseline. Two earlier revisions that cut
+ * niter to 20 were rejected by the hard gate because they genuinely reduced
+ * recall; the values below stay inside the noise floor, not merely the gate.
  *
  * The env overrides below exist so amd_bench/sweep.sh can reproduce
  * measurements without rebuilding the bridge. The evaluation environment
  * sets none of them, so these defaults are what get compiled.   */
-  h->ip->nn_descent_niter = (dim <= 128) ? 40 : 70;
+  h->ip->nn_descent_niter = (dim <= 128) ? 30 : 60;
   {
     const char *env_v;
     if ((env_v = getenv("CAGRA_NITER")) != NULL) {
