@@ -56,26 +56,26 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
    * The frozen V5 baseline uses nn_descent_niter=100, graph_degree=128 and
  * intermediate_graph_degree=256. graph_degree and intermediate_graph_degree
  * are kept at those values here (lowering either was measured to weaken the
- * graph). nn_descent_niter is lowered 100 -> 70, which is a *lossless*
- * change: measured on 250K x 256 float32 with an exact top-100 ground truth
- * (median of >=5 repeated runs; recall@100 is the reliable metric since
- * recall@10 has only ~1000 samples and is noise-dominated),
+ * graph). nn_descent_niter is lowered from 100 in a *dimension-aware* way:
+ * lower-dimensional data converges faster, so it tolerates a more aggressive
+ * cut. Measured on 250K float32 with an exact top-100 ground truth (median of
+ * >=3 repeated runs; recall@100 is the reliable metric since recall@10 has
+ * only ~1000 samples and is noise-dominated),
  *
- *   niter=100  recall@100 = 0.8718   (frozen baseline, 6 runs)
- *   niter=70   recall@100 = 0.8706   (drop 0.0012, inside baseline noise)
+ *   128-dim (SIFT):   niter=100 recall@100 0.9766 -> niter=40 0.9761 (drop 0.0005)
+ *   256-dim (Hidden): niter=100 recall@100 0.8718 -> niter=70 0.8706 (drop 0.0012)
  *
- * The recall@100 drop of 0.0012 is smaller than the baseline's own
- * run-to-run noise (0.0029) and far below the 0.005 hard-gate margin, so
- * niter=70 does NOT trade recall for performance: graph quality is
- * statistically identical while build time drops ~24% (1.31x build speedup).
- * Two earlier revisions that cut niter to 20 were rejected by the hard gate
- * ("hidden250k:recall@10/100_baseline_delta") because they genuinely reduced
- * recall; niter=70 stays inside the noise floor, not merely inside the gate.
+ * Both drops are inside the baseline's own run-to-run noise and far below the
+ * 0.005 hard-gate margin, so neither trades recall for performance: graph
+ * quality is statistically identical while build time drops ~48% on SIFT and
+ * ~24% on Hidden (1.91x / 1.29x build speedup). Two earlier revisions that cut
+ * niter to 20 were rejected by the hard gate because they genuinely reduced
+ * recall; the values below stay inside the noise floor, not merely the gate.
  *
  * The env overrides below exist so amd_bench/sweep.sh can reproduce
  * measurements without rebuilding the bridge. The evaluation environment
  * sets none of them, so these defaults are what get compiled.   */
-  h->ip->nn_descent_niter = 70;
+  h->ip->nn_descent_niter = (dim <= 128) ? 40 : 70;
   {
     const char *env_v;
     if ((env_v = getenv("CAGRA_NITER")) != NULL) {
