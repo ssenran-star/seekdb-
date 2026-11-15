@@ -50,8 +50,18 @@ int ObIKQuantifierProcessor::process_CN_number(TokenizeContext &ctx,
   int ret = OB_SUCCESS;
   bool is_cn_number = false;
 
-  if (ObFTCharUtil::CharType::CHINESE == type
-      && OB_FAIL(ObFTCharUtil::check_cn_number(ctx.collation(), ch, char_len, is_cn_number))) {
+  if (ObFTCharUtil::CharType::CHINESE == type) {
+    if (ctx.is_utf8mb4()) {
+      // Same code point and predicate as check_cn_number_from_unicode(), minus
+      // the per-character charset dispatch.
+      is_cn_number = ObUnicodeBlockUtils::is_unicode_cn_number(ctx.current_unicode());
+    } else if (OB_FAIL(ObFTCharUtil::check_cn_number_from_unicode(ctx.collation(),
+                                                                  ctx.current_unicode(),
+                                                                  is_cn_number))) {
+    }
+  }
+
+  if (OB_FAIL(ret)) {
   } else if (start_ == -1 && end_ == -1) {
     if (is_cn_number) {
       start_ = ctx.get_cursor();
@@ -94,7 +104,10 @@ int ObIKQuantifierProcessor::process_CN_count(TokenizeContext &ctx,
     if (ObFTCharUtil::CharType::CHINESE == type) {
       // handle existing
       if (!count_hits_.empty()) {
-        for (ObDATrieHit &hit : count_hits_) {
+        for (ObList<ObDATrieHit, ObIAllocator>::iterator iter = count_hits_.begin();
+             iter != count_hits_.end();
+             ++iter) {
+          ObDATrieHit &hit = *iter;
           if (OB_FAIL(ret)) {
             break;
           } else if (OB_FAIL(quan_dict_.match({char_len, ch}, hit))) {
@@ -110,7 +123,9 @@ int ObIKQuantifierProcessor::process_CN_count(TokenizeContext &ctx,
           } else if (hit.is_prefix()) {
             // wait another match
           } else if (hit.is_unmatch()) {
-            count_hits_.erase(hit);
+            // O(1) iterator erase; the by-value form rescanned from begin().
+            // Arena free() is a no-op, so iter++ after the unlink is unchanged.
+            count_hits_.erase(iter);
           } else {
             ret = OB_UNEXPECT_INTERNAL_ERROR;
             LOG_WARN("Reached an imposible state.");

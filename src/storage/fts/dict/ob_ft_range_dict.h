@@ -27,6 +27,7 @@
 #include "storage/fts/dict/ob_ft_dict.h"
 #include "storage/fts/dict/ob_ft_dict_def.h"
 #include "storage/fts/dict/ob_ft_dict_iterator.h"
+#include <atomic>
 
 namespace oceanbase
 {
@@ -109,7 +110,9 @@ private:
   ObFTCacheRangeContainer *range_container_; // only used to read cache
   // Ranges are ordered by their start word and text keeps using the same leading
   // characters, so the range that matched the previous token is tried first.
-  mutable int64_t last_range_idx_;
+  // Relaxed atomic: the range dict may be shared read-only across parser
+  // threads; the hint is advisory (a stale value only costs a binary search).
+  mutable std::atomic<int64_t> last_range_idx_;
 
 private:
   DISALLOW_COPY_AND_ASSIGN(ObFTRangeDict);

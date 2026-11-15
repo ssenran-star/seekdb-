@@ -64,8 +64,15 @@ int ObIKArbitrator::process(TokenizeContext &ctx)
                                     judge_result))) {
         } else if (OB_FAIL(add_chain(judge_result))) {
         } else {
-          // add best chain and delete origin chain
-          OB_DELETEx(ObIKTokenChain, &alloc_, chain_need_arbitrate);
+          // add best chain; the origin chain is overwritten by a fresh OB_NEWx
+          // in the "start a new chain" block just below.  alloc_ is an
+          // ObArenaAllocator whose free() is a no-op, so the old
+          // OB_DELETEx(chain_need_arbitrate) only ran ~ObIKTokenChain ->
+          // ObList::clear(), an O(n) walk of token nodes calling a no-op free
+          // that reclaimed nothing (the arena reclaims it on reset() either
+          // way).  optimize() never stored the origin pointer in
+          // ordered_chains_, so dropping it here is byte-identical and skips
+          // that clear loop.  On failure the tail cleanup still frees it once.
         }
 
         // start a new chain
@@ -110,6 +117,40 @@ int ObIKArbitrator::process(TokenizeContext &ctx)
 int ObIKArbitrator::output_result(TokenizeContext &ctx)
 {
   int ret = OB_SUCCESS;
+
+  // keep_single() is false for this parser, so the full N-position scan below
+  // only ever emits tokens belonging to an accepted chain: every other position
+  // is a get_refactored() miss whose single word is dropped.  add_chain()
+  // appends those accepted chains in strictly increasing document order
+  // (process()/optimize() build disjoint chains that start on character
+  // boundaries), so walking ordered_chains_ directly emits the identical token
+  // sequence with zero hashmap probes and zero char_info_at() decodes.
+  //
+  // frontier mirrors the scan's "current = last token end" jump.  A chain whose
+  // min_offset() lies before the frontier would be skipped by the scan as well
+  // (the scan already advanced past it), so skipping it here keeps the two
+  // paths byte-identical even for an unexpected overlapping chain.  Under the
+  // proven regular case no chain is ever skipped by this guard.
+  if (!keep_single()) {
+    int64_t frontier = 0;
+    for (int64_t i = 0; OB_SUCC(ret) && i < ordered_chains_.size(); ++i) {
+      ObIKTokenChain *chain = ordered_chains_.at(i);
+      if (OB_ISNULL(chain) || chain->min_offset() < frontier) {
+        continue;
+      }
+      for (ObList<ObIKToken, ObIAllocator>::const_iterator iter =
+               chain->list().tokens().begin();
+           OB_SUCC(ret) && iter != chain->list().tokens().end();
+           ++iter) {
+        const ObIKToken &token = *iter;
+        if (OB_FAIL(ctx.result_list().push_back(token))) {
+        } else {
+          frontier = token.offset_ + token.length_;
+        }
+      }
+    }
+    return ret;
+  }
 
   int64_t char_len = 0;
   ObIKTokenChain *chain = nullptr;
@@ -232,7 +273,14 @@ int ObIKArbitrator::optimize(TokenizeContext &ctx,
       if (OB_FAIL(remove_conflict(*iter, option))) {
       } else if (OB_FAIL(try_add_next_words(chain, iter, option, false, conflict_stack))) {
       } else if (option->better_than(*best)) {
-        OB_DELETEx(ObIKTokenChain, &alloc_, best);
+        // alloc_ is an ObArenaAllocator whose free() is a no-op, so the old
+        // OB_DELETEx(best) did not reclaim the chain or its token nodes: it only
+        // ran ~ObIKTokenChain -> ObList::clear(), walking every token node and
+        // calling that no-op free.  The abandoned storage is reclaimed by the
+        // arena on reset() either way, so dropping the pointer here is
+        // byte-for-byte equivalent while skipping that O(n) clear loop on every
+        // improving DFS step.  On OB_NEWx failure `best` still points at the
+        // previous chain, which the failure path below frees exactly once.
         if (OB_ISNULL(best = OB_NEWx(ObIKTokenChain, &alloc_, alloc_))) {
           ret = OB_ALLOCATE_MEMORY_FAILED;
           LOG_WARN("Alloc memory failed");
@@ -294,10 +342,13 @@ int ObIKArbitrator::prepare(TokenizeContext &ctx)
 {
   int ret = OB_SUCCESS;
 
-  int cal_bucket_num = MAX(ctx.fulltext_len() / 100, 10);
-  cal_bucket_num = MIN(cal_bucket_num, 100);
-  if (OB_FAIL(chains_.create(cal_bucket_num, ObMemAttr("IK ARBITRATE")))) {
-  }
+  ordered_chains_.reset();
+  // chains_ is never read: keep_single() is hardwired false, so output_result()
+  // walks ordered_chains_ directly and the only get_refactored() caller sits in
+  // the dead keep_single()==true branch.  Skip building the per-batch hashmap
+  // (create here + per-chain set_refactored in add_chain); the destructor's
+  // destroy() is a documented no-op on a never-created map.
+  (void)ctx;
   return ret;
 }
 
@@ -310,7 +361,11 @@ int ObIKArbitrator::add_chain(ObIKTokenChain *chain)
     ret = OB_INVALID_ARGUMENT;
   } else if (chain->list().is_empty()) {
     // no need to add empty chain
-  } else if (OB_FAIL(chains_.set_refactored(chain->min_offset(), chain))) {
+  } else if (OB_FAIL(ordered_chains_.push_back(chain))) {
+    // Keep the chain in document order for output_result()'s direct walk.
+    // process() consumes tokens in document order and only starts a new chain
+    // on conflict with the previous one, so each accepted chain here follows
+    // the last; no sort is needed and the emitted order is unchanged.
   }
   return ret;
 }

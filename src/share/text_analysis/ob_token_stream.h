@@ -76,11 +76,24 @@ protected:
   INHERIT_TO_STRING_KV("ObTextTokenizer", ObTextTokenizer, K_(trav_pos), KP_(curr_token_ptr));
 private:
   bool found_delimiter();
+  // Character length at p, with a fast path for ASCII bytes.  For every
+  // ASCII-compatible charset (utf8mb4 included) ob_mbcharlen()==1 for all
+  // bytes < 0x80, which inner_open() proves once per charset; on that path we
+  // skip the indirect cs->cset->mbcharlen() call taken by ob_mbcharlen_ptr().
+  int64_t char_len_at(const char *p, const char *end) const;
   const char *get_trav_ptr() { return input_doc_->ptr_ + trav_pos_; }
   uint32_t get_input_buf_len() { return input_doc_->len_; }
 private:
   const char *curr_token_ptr_;
   int64_t trav_pos_;
+  // Single-byte delimiter classification, built lazily once per charset.  These
+  // fields are deliberately NOT cleared by reset()/reuse(): the tokenizer
+  // instance and its charset live for the analyzer's whole lifetime, so
+  // rebuilding 256 entries for every document would cost more than it saves.
+  uint8_t delim_table_[256];
+  const ObCharsetInfo *delim_cs_;
+  bool delim_table_ready_;
+  bool ascii_single_byte_;
 };
 
 class ObTokenNormalizer : public ObITokenStream

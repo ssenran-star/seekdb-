@@ -48,10 +48,21 @@ public:
   int current_char(const char *&ch, uint8_t &char_len);
   int current_char_type(ObFTCharUtil::CharType &type);
 
-  // Returns the byte length and the character class of the character that
-  // starts at `pos`.  The first pass over the document already decoded every
-  // position, so the arbiter can read the cached answer instead of decoding and
-  // classifying the same character a second time.
+  // Code point of the current character, decoded once by prepare_next_char().
+  // Processors reuse it instead of re-decoding the same bytes (quantifier number
+  // probe, letter connector probes).
+  ob_wc_t current_unicode() const { return next_char_unicode_; }
+
+  // True when the document collation is UTF8MB4.  Lets processors skip work that
+  // is provably impossible on that charset (surrogate pairs) or bypass the
+  // charset dispatch for code-point predicates.
+  bool is_utf8mb4() const { return is_utf8mb4_; }
+
+  // Decode and classify the character starting at `pos`.  Only the arbitrator's
+  // keep_single()==true single-word output path calls this; the normal path walks
+  // the arbitrator's ordered chains and never reaches it.  Recomputed on demand
+  // rather than served from a per-byte cache, which was write-only dead work on
+  // the live (keep_single()==false) path.
   int char_info_at(const int64_t pos,
                    int64_t &char_len,
                    ObFTCharUtil::CharType &type);
@@ -83,7 +94,6 @@ public:
 
 private:
   int prepare_next_char();
-  int init_char_cache();
 
   ObCollationType coll_type_;
   const char *fulltext_;
@@ -92,16 +102,16 @@ private:
   int64_t cursor_;
   int64_t next_char_len_;
   ObFTCharUtil::CharType next_char_type_;
+  ob_wc_t next_char_unicode_;
 
   uint32_t handle_size_;
   bool is_smart_;
+  // Cached once from the document collation.  When true, ASCII bytes and
+  // 3-byte CJK sequences can be measured directly instead of dispatching
+  // through cset->well_formed_len() on every character.
+  bool is_utf8mb4_;
 
-  // Decode cache, one slot per byte position of the document.  A zero length
-  // means "not decoded yet"; the type is only meaningful when the length is set.
   ObIAllocator &allocator_;
-  uint8_t *char_lens_;
-  int8_t *char_types_;
-
   ObFTSortList token_list_;
   ObList<ObIKToken, ObIAllocator> result_list_;
 

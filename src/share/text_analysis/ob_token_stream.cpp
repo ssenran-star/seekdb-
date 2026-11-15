@@ -66,7 +66,11 @@ int ObTextTokenizer::open(const ObDatum &document, const ObCharsetInfo *cs)
 ObTextWhitespaceTokenizer::ObTextWhitespaceTokenizer()
   : ObTextTokenizer(),
     curr_token_ptr_(nullptr),
-    trav_pos_(0)
+    trav_pos_(0),
+    delim_table_(),
+    delim_cs_(nullptr),
+    delim_table_ready_(false),
+    ascii_single_byte_(false)
 {
 }
 
@@ -82,6 +86,26 @@ int ObTextWhitespaceTokenizer::inner_open(const ObDatum &document, const ObChars
   int ret = OB_SUCCESS;
   curr_token_ptr_ = nullptr;
   trav_pos_ = 0;
+  // Built once per charset, not once per document: reuse()/reset() run for every
+  // analyze() call, but the tokenizer instance and its charset do not change.
+  if (!delim_table_ready_ || delim_cs_ != cs) {
+    for (int32_t i = 0; i < 256; ++i) {
+      const unsigned char c = static_cast<unsigned char>(i);
+      delim_table_[i] =
+          static_cast<uint8_t>(ob_isspace(cs, c) || ob_iscntrl(cs, c) || ob_ispunct(cs, c));
+    }
+    // Prove from ob_mbcharlen() itself that every ASCII byte is a single-byte
+    // character, so char_len_at() may skip ob_mbcharlen_ptr()'s indirect dispatch.
+    ascii_single_byte_ = true;
+    for (int32_t i = 0; i < 0x80; ++i) {
+      if (1 != ob_mbcharlen(cs, static_cast<unsigned char>(i))) {
+        ascii_single_byte_ = false;
+        break;
+      }
+    }
+    delim_cs_ = cs;
+    delim_table_ready_ = true;
+  }
   return ret;
 }
 
@@ -98,7 +122,7 @@ int ObTextWhitespaceTokenizer::get_next(ObDatum &next_token, int64_t &token_freq
     int64_t token_len = 0;
     // to next non-whitespace pos
     while (OB_SUCC(ret) && found_delimiter()) {
-      const int64_t c_len = ob_mbcharlen_ptr(cs_, doc + trav_pos_, doc + doc_len);
+      const int64_t c_len = char_len_at(doc + trav_pos_, doc + doc_len);
       trav_pos_ += c_len;
       if (trav_pos_ >= doc_len || 0 == c_len) {// if char is invalid, just skip the rest of document
         iter_end_ = true;
@@ -112,7 +136,7 @@ int ObTextWhitespaceTokenizer::get_next(ObDatum &next_token, int64_t &token_freq
 
     // to next whitespace pos
     while (OB_SUCC(ret) && !found_delimiter()) {
-      const int64_t c_len = ob_mbcharlen_ptr(cs_, doc + trav_pos_, doc + doc_len);
+      const int64_t c_len = char_len_at(doc + trav_pos_, doc + doc_len);
       trav_pos_ += c_len;
       token_len += c_len;
       if (trav_pos_ >= doc_len || 0 == c_len) {
@@ -136,10 +160,22 @@ int ObTextWhitespaceTokenizer::get_next(ObDatum &next_token, int64_t &token_freq
 
 bool ObTextWhitespaceTokenizer::found_delimiter()
 {
-  bool found = false;
+  // Byte-identical to (ob_isspace || ob_iscntrl || ob_ispunct): delim_table_ is
+  // populated from those exact macros for this tokenizer's charset.  Collapses
+  // three ctype loads + masks + a short-circuit chain into a single table load
+  // on the per-byte tokenization hot loop.
   const char *curr_char = input_doc_->ptr_ + trav_pos_;
-  found = ob_isspace(cs_, *curr_char) || ob_iscntrl(cs_, *curr_char) || ob_ispunct(cs_, *curr_char);
-  return found;
+  return 0 != delim_table_[static_cast<unsigned char>(*curr_char)];
+}
+
+int64_t ObTextWhitespaceTokenizer::char_len_at(const char *p, const char *end) const
+{
+  // ascii_single_byte_ is proven in inner_open() from ob_mbcharlen() itself, so
+  // for ASCII bytes this equals ob_mbcharlen_ptr()'s result while skipping its
+  // indirect cs->cset->mbcharlen() call.
+  return (ascii_single_byte_ && static_cast<unsigned char>(*p) < 0x80)
+             ? 1
+             : static_cast<int64_t>(ob_mbcharlen_ptr(cs_, p, end));
 }
 
 ObTokenNormalizer::ObTokenNormalizer()
@@ -294,10 +330,33 @@ int ObBasicEnglishNormalizer::get_next(ObDatum &next_token, int64_t &token_freq)
       ret = OB_ERR_UNEXPECTED;
     } else {
       ObString norm_alnum_token(norm_token_len, norm_token_ptr);
-      ObString norm_lower_token;
-      if (OB_FAIL(ObCharset::tolower(cs_, norm_alnum_token, norm_lower_token, norm_allocator_))) {
+      // ObCharset::tolower always allocates a fresh copy into norm_allocator_
+      // (which is reused on the next get_next call).  For an all-lowercase
+      // ASCII token the folded bytes are byte-for-byte identical to the
+      // trimmed input, which already points into the caller's document buffer
+      // and outlives free_token_iter -- so the copy is pure overhead on the
+      // dominant case (English lowercase words).  Detect that case in one
+      // pass and return the original slice directly.
+      //
+      // Be conservative: any non-ASCII byte stays on the tolower path, because
+      // general_ci / UCA case folding can rewrite it even with no ASCII
+      // uppercase present (e.g. U+00C0 'À' -> U+00E0 'à', U+00DF 'ß' -> 's').
+      // Only [A-Z] and bytes >= 0x80 can possibly change, so everything else
+      // is provably a no-op for the identity case tables wired in this tree.
+      bool need_lower = false;
+      for (uint32_t i = 0; OB_SUCC(ret) && !need_lower && i < norm_token_len; ++i) {
+        const unsigned char c = static_cast<unsigned char>(norm_token_ptr[i]);
+        need_lower = (c >= 0x80 || (c >= 'A' && c <= 'Z'));
+      }
+      if (OB_FAIL(ret)) {
+      } else if (!need_lower) {
+        next_token.set_string(norm_alnum_token);
       } else {
-        next_token.set_string(norm_lower_token);
+        ObString norm_lower_token;
+        if (OB_FAIL(ObCharset::tolower(cs_, norm_alnum_token, norm_lower_token, norm_allocator_))) {
+        } else {
+          next_token.set_string(norm_lower_token);
+        }
       }
     }
   }

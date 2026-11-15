@@ -167,7 +167,10 @@ template <typename DataType = void>
 class ObFTDATReader
 {
 public:
-  ObFTDATReader(ObFTDAT *dat) : dat_(dat) {}
+  ObFTDATReader(ObFTDAT *dat)
+      : dat_(dat), memo_len_(-1), memo_code_(0), memo_found_(false)
+  {
+  }
 
   // Match single word with hit.
   int match_with_hit(const ObString &single_word,
@@ -176,6 +179,21 @@ public:
 
 private:
   ObFTDAT *dat_;
+
+  // One-entry memo for the single-character word->code lookup.  The IK CJK
+  // segmenter probes the same character once per active prefix hit plus once
+  // to start a new hit (see ObIKCJKProcessor::do_process), so the DAT map is
+  // looked up H+1 times for identical bytes.  This reader is thread-confined
+  // (one ObFTCacheDict is built per parser in build_dict_from_cache()) and the
+  // ObFTDAT block is immutable for the reader's lifetime, so caching the last
+  // answer is safe and returns exactly what find() would.  The bytes are
+  // copied, never referenced, so document-buffer reuse cannot invalidate it.
+  // This does NOT change the map size, so the dictionary's cache footprint is
+  // identical to the official-best 380ef0d59 baseline.
+  mutable char memo_word_[8];
+  mutable int32_t memo_len_;
+  mutable ObFTWordCode memo_code_;
+  mutable bool memo_found_;
 
 private:
   DISALLOW_COPY_AND_ASSIGN(ObFTDATReader);
