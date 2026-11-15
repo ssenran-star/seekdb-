@@ -16,15 +16,6 @@ typedef struct {
   cuvsCagraIndexParams_t ip;
   cuvsCagraIndex_t       idx;
   long n, dim;
-  /* Reusable per-query device buffers + search params. The caller serializes
-   * single and batched search under g_ob_cuvs_mu, so caching these on the
-   * handle is thread-safe and removes 3 device alloc/free + a params
-   * create/destroy on every one of the ~4096 per-query calls. This only
-   * removes overhead: graph, algorithm and recall are unchanged. */
-  float*    sb_qd; size_t sb_qd_n;
-  unsigned* sb_nd; size_t sb_nd_n;
-  float*    sb_dd; size_t sb_dd_n;
-  cuvsCagraSearchParams_t sb_sp;
 } sk_cuvs_index;
 
 void* seekdb_cuvs_build(const float* base, long n, long dim)
@@ -115,48 +106,35 @@ int seekdb_cuvs_search(void* handle, const float* query, long nq, long topk,
   sk_cuvs_index* h = (sk_cuvs_index*)handle;
   if (!h) return 1;
   int rc = 0;
-  size_t qd_n = (size_t)nq * (size_t)h->dim;
-  size_t nd_n = (size_t)nq * (size_t)topk;
-
-  /* grow-on-demand reusable device buffers (replaced only when they shrink) */
-  if (h->sb_qd_n < qd_n) {
-    if (h->sb_qd) cuvsRMMFree(h->res, h->sb_qd, sizeof(float) * h->sb_qd_n);
-    if (cuvsRMMAlloc(h->res, (void**)&h->sb_qd, sizeof(float) * qd_n) != CUVS_SUCCESS) return 10;
-    h->sb_qd_n = qd_n;
-  }
-  if (h->sb_nd_n < nd_n) {
-    if (h->sb_nd) cuvsRMMFree(h->res, h->sb_nd, sizeof(unsigned) * h->sb_nd_n);
-    if (cuvsRMMAlloc(h->res, (void**)&h->sb_nd, sizeof(unsigned) * nd_n) != CUVS_SUCCESS) return 11;
-    h->sb_nd_n = nd_n;
-  }
-  if (h->sb_dd_n < nd_n) {
-    if (h->sb_dd) cuvsRMMFree(h->res, h->sb_dd, sizeof(float) * h->sb_dd_n);
-    if (cuvsRMMAlloc(h->res, (void**)&h->sb_dd, sizeof(float) * nd_n) != CUVS_SUCCESS) return 12;
-    h->sb_dd_n = nd_n;
-  }
-  if (h->sb_sp == 0) {
-    if (cuvsCagraSearchParamsCreate(&h->sb_sp) != CUVS_SUCCESS) return 14;
-  }
-  if (cudaMemcpy(h->sb_qd, query, sizeof(float)*nq*h->dim, cudaMemcpyDefault) != cudaSuccess) return 13;
+  float* qd = 0; unsigned* nd = 0; float* dd = 0; cuvsCagraSearchParams_t sp = 0;
+  if (cuvsRMMAlloc(h->res, (void**)&qd, sizeof(float)*nq*h->dim)  != CUVS_SUCCESS) { rc=10; goto done; }
+  if (cuvsRMMAlloc(h->res, (void**)&nd, sizeof(unsigned)*nq*topk) != CUVS_SUCCESS) { rc=11; goto done; }
+  if (cuvsRMMAlloc(h->res, (void**)&dd, sizeof(float)*nq*topk)    != CUVS_SUCCESS) { rc=12; goto done; }
+  if (cudaMemcpy(qd, query, sizeof(float)*nq*h->dim, cudaMemcpyDefault) != cudaSuccess) { rc=13; goto done; }
   {
     DLManagedTensor qt, nt, dt; long qs[2]={nq,h->dim}, nsh[2]={nq,topk}, dsh[2]={nq,topk};
-    qt.dl_tensor.data=h->sb_qd; qt.dl_tensor.device.device_type=kDLCUDA; qt.dl_tensor.device.device_id=0;
+    qt.dl_tensor.data=qd; qt.dl_tensor.device.device_type=kDLCUDA; qt.dl_tensor.device.device_id=0;
     qt.dl_tensor.ndim=2; qt.dl_tensor.dtype.code=kDLFloat; qt.dl_tensor.dtype.bits=32; qt.dl_tensor.dtype.lanes=1;
     qt.dl_tensor.shape=qs; qt.dl_tensor.strides=0; qt.dl_tensor.byte_offset=0;
-    nt=qt; nt.dl_tensor.data=h->sb_nd; nt.dl_tensor.dtype.code=kDLUInt; nt.dl_tensor.shape=nsh;
-    dt=qt; dt.dl_tensor.data=h->sb_dd; dt.dl_tensor.dtype.code=kDLFloat; dt.dl_tensor.shape=dsh;
+    nt=qt; nt.dl_tensor.data=nd; nt.dl_tensor.dtype.code=kDLUInt; nt.dl_tensor.shape=nsh;
+    dt=qt; dt.dl_tensor.data=dd; dt.dl_tensor.dtype.code=kDLFloat; dt.dl_tensor.shape=dsh;
+    if (cuvsCagraSearchParamsCreate(&sp) != CUVS_SUCCESS) { rc=14; goto done; }
     {
       size_t required_itopk = (size_t)topk * 4;
       if (required_itopk < 512) required_itopk = 512;
-      if (h->sb_sp->itopk_size < required_itopk) h->sb_sp->itopk_size = required_itopk;
-      h->sb_sp->search_width = 4;
+      if (sp->itopk_size < required_itopk) sp->itopk_size = required_itopk;
+      sp->search_width = 4;
     }
     cuvsFilter f; f.type=NO_FILTER; f.addr=(uintptr_t)0;
-    if (cuvsCagraSearch(h->res, h->sb_sp, h->idx, &qt, &nt, &dt, f) != CUVS_SUCCESS) { rc=15; goto done; }
-    if (cudaMemcpy(out_ids, h->sb_nd, sizeof(unsigned)*nq*topk, cudaMemcpyDefault) != cudaSuccess) { rc=16; goto done; }
-    if (out_dist) cudaMemcpy(out_dist, h->sb_dd, sizeof(float)*nq*topk, cudaMemcpyDefault);
+    if (cuvsCagraSearch(h->res, sp, h->idx, &qt, &nt, &dt, f) != CUVS_SUCCESS) { rc=15; goto done; }
+    if (cudaMemcpy(out_ids, nd, sizeof(unsigned)*nq*topk, cudaMemcpyDefault) != cudaSuccess) { rc=16; goto done; }
+    if (out_dist) cudaMemcpy(out_dist, dd, sizeof(float)*nq*topk, cudaMemcpyDefault);
   }
 done:
+  if (sp) cuvsCagraSearchParamsDestroy(sp);
+  if (dd) cuvsRMMFree(h->res, dd, sizeof(float)*nq*topk);
+  if (nd) cuvsRMMFree(h->res, nd, sizeof(unsigned)*nq*topk);
+  if (qd) cuvsRMMFree(h->res, qd, sizeof(float)*nq*h->dim);
   if (rc) fprintf(stderr, "[seekdb_cuvs] search rc=%d: %s\n", rc, cuvsGetLastErrorText());
   return rc;
 }
@@ -165,10 +143,6 @@ void seekdb_cuvs_free(void* handle)
 {
   sk_cuvs_index* h = (sk_cuvs_index*)handle;
   if (!h) return;
-  if (h->sb_sp) cuvsCagraSearchParamsDestroy(h->sb_sp);
-  if (h->sb_qd) cuvsRMMFree(h->res, h->sb_qd, sizeof(float) * h->sb_qd_n);
-  if (h->sb_nd) cuvsRMMFree(h->res, h->sb_nd, sizeof(unsigned) * h->sb_nd_n);
-  if (h->sb_dd) cuvsRMMFree(h->res, h->sb_dd, sizeof(float) * h->sb_dd_n);
   cuvsCagraIndexDestroy(h->idx);
   cuvsCagraIndexParamsDestroy(h->ip);
   cuvsResourcesDestroy(h->res);
