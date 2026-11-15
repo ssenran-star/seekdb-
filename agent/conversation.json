@@ -96,6 +96,11 @@
       "id": "C14",
       "role": "student",
       "content": "学生告知平台特性（逐字）：「平台不会给任何错误提示，只能自己试」。策略调整：不再向平台索取反馈明细，一切问题诊断靠本地复现；提测前本地验证套件必须跑全（含超内存场景 E13）。"
+    },
+    {
+      "id": "C15",
+      "role": "student",
+      "content": "WAL 可见性迁移验证（学生逐字）：agent 解释机制后，学生做出迁移预测：「查不到，因为这是唯一的」。实验证实（kill before COMMIT → 0 rows visible）后，学生解释结果：「重启时引擎扫日志这三行所属的十五没有commitid所以查不到」（十五为事务的输入误差，commitid 指 COMMIT 标记）。核心逻辑正确：引擎按事务整体判定可见性，无完整标记则全部行不可见。"
     }
   ],
   "experiments": [
@@ -242,6 +247,15 @@
       "command": "src/simd.h（AVX2 FMA 平方距离 + 运行时 CPU 检测回退 SSE2）；engine.h/cpp（epoch 门控 FastScan 连续向量缓存 + 零分配 Cand 缓冲 + partial_sort TopK + 精确 double 重排保证排序一致）；VM 全量回归 + bench；干净克隆无缓存构建 + 镜像全量",
       "output": "T_query_exact: 0.692s→0.421s（-39%）；T_write 0.478s 不变；recall 0.985 不变；crash/edge/e5/公开 20/20 全过；干净克隆 docker build --no-cache BUILD:0 + handshake PASS + 镜像 20/20。commit 79dc6e527e5d800fcf8fd884d8d1ca4f4d1a7344 推送核验一致。",
       "interpretation": "SIMD 距离 + 连续内存访问 + 消除逐行堆分配是查询性能三杠杆。39% 提升为第一步；进一步方向：预过滤索引（跳过 90% 行）、mmap 直接访问（消除 FastScan 拷贝）、AVX-512。性能优化不产生学生证据（agent 主导），Agent 提分仍需学生独立参与。"
+    },
+    {
+      "id": "E17",
+      "status": "executed",
+      "executor": "student+agent",
+      "hypothesis": "学生迁移预测（C15）：写完 3 行数据但未写 COMMIT 标记时 kill -9，重启后这 3 行不可见。",
+      "command": "VM 实测：CREATE TABLE → BEGIN → INSERT 3 rows → kill -9（无 COMMIT）→ 重启 → SELECT",
+      "output": "3 rows inserted in open transaction, NO commit sent / process killed with SIGKILL (before COMMIT marker) / after restart SELECT: {\"columns\": [\"id\", \"v\"], \"id\": 1, \"ok\": true, \"rows\": []} / RESULT: 0 rows visible — prediction CONFIRMED",
+      "interpretation": "学生预测正确并用自己的话解释了原因（事务无 COMMIT 标记→不在已提交集合→全部行不可见）。证据链：agent 解释机制→学生迁移预测→实验证实→学生解释结果。覆盖维度：技术理解与迁移（将规则应用到新场景）+ 实验与反馈迭代（预测→验证→确认）。学生解释为自身产出（非 agent 代述），计为学生证据。"
     }
   ],
   "retrospective": "初始会话由 agent 主导实现，学生贡献集中在流程约束（编译门槛、进度板留痕）与技术选型（C++）。首次正式提测：性能与 Agent 评测均完成（按规则推断 MySQL case 准入全过），Agent 原始分 2.0，性能 E=1628.165077（平台显示口径与文档 0~1 公式不符，待确认）。反馈后验证会话：学生预测提交后强杀会部分保留（E9 被否证），拒绝理论解释、要求虚拟机实证（E10 日志解剖），未对 ann 实验作预测（E11 为 agent 演示）。已验证：编译通过、20 公开用例全过（本地进程与 Docker 镜像双形态）、崩溃恢复与边界自测过、Recall@10=0.985、精确查询 0.694s/1000、20k 行恢复中反复强杀零丢失。教训：(1) 公开样例的 ORDER BY 非投影列这类基础语义容易在解析器里漏掉，必须逐条对照 .result；(2) ANN 参数不能凭感觉，要用基准脚本量化召回；(3) 性能优化先量化瓶颈（拷贝/排序）再动手；(4) Dockerfile 构建脚本必须在容器环境实际跑通；(5) 多候选实现先同基准实测再决策，优化对准正式口径（exact）；重写分支前备份 archive + force-with-lease；(6) Agent 评分只认学生自身证据：预测被否证+要求实证是有效实例，但机制解释若由 agent 代述则不计学生理解——后续需要学生自己复述与迁移；(7) 第二次提测证实证据→得分换算：Agent 2.0→3.0 与新增实例吻合；代码未变时 E 波动 +14.4% 属测量方差，跨提交比较看排名而非单次 E 值；(8) 超内存 OOM 排查最终定位到测试环境（/tmp=tmpfs，shmem 不可回收）：下产品结论前先核验测试环境本身的文件系统与计量口径；fadvise 页缓存释放保留为 M 指标优化，2.1GB 数据集全量验证通过；(9) 提交协议不止报文格式，还包括数据目录等运行约定（官方驱动用 VECTORDB_DATA_DIR 环境变量）；他人踩坑文档是高效诊断来源——学生提供文档后对照官方源码定位并修复了疑似执行失败根因；(10) 第 3/4 次执行失败真根因＝漏提交 storage.h（git add 遗漏）：工作树全绿≠提交完整，Docker 从工作树构建也绿，唯有干净克隆+无缓存构建能复现平台路径——提交后必须做此验证，git add 后核对 git status 全部变更。",
