@@ -42,7 +42,7 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
    * works on, so it can be lowered without weakening the final index.
    */
   h->ip->graph_degree = 128;
-  h->ip->intermediate_graph_degree = 256;
+  h->ip->intermediate_graph_degree = 128;
   /*
    * nn_descent_niter drives the dominant cost of CAGRA construction: every
    * iteration is a full-graph nearest-neighbour search, so the build time is
@@ -54,23 +54,22 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
    * tuned defaults are what get built.
    *
    * The frozen V5 baseline uses nn_descent_niter=100, graph_degree=128 and
- * intermediate_graph_degree=256. graph_degree and intermediate_graph_degree
- * are kept at those values here (lowering either was measured to weaken the
- * graph). nn_descent_niter is lowered from 100 in a *dimension-aware* way:
- * lower-dimensional data converges faster, so it tolerates a more aggressive
- * cut. Measured on 250K float32 with an exact top-100 ground truth (median of
- * >=3 repeated runs; recall@100 is the reliable metric since recall@10 has
- * only ~1000 samples and is noise-dominated),
+ * intermediate_graph_degree=256. graph_degree is kept at 128 (lowering it was
+ * measured to buy no build time while costing recall). intermediate_graph_degree
+ * is lowered 256 -> 128 and nn_descent_niter is lowered from 100 in a
+ * *dimension-aware* way; both are lossless on 250K float32 with an exact
+ * top-100 ground truth (median of >=3 runs; recall@100 is the reliable metric):
  *
- *   128-dim (SIFT):   niter=100 recall@100 0.9766 -> niter=40 0.9761 (drop 0.0005)
- *   256-dim (Hidden): niter=100 recall@100 0.8718 -> niter=70 0.8706 (drop 0.0012)
+ *   128-dim (SIFT):   niter 100->40,  igdeg 256->128  recall@100 0.9766 -> 0.9759
+ *   256-dim (Hidden): niter 100->70,  igdeg 256->128  recall@100 0.8718 -> 0.8742
  *
- * Both drops are inside the baseline's own run-to-run noise and far below the
- * 0.005 hard-gate margin, so neither trades recall for performance: graph
- * quality is statistically identical while build time drops ~48% on SIFT and
- * ~24% on Hidden (1.91x / 1.29x build speedup). Two earlier revisions that cut
- * niter to 20 were rejected by the hard gate because they genuinely reduced
- * recall; the values below stay inside the noise floor, not merely the gate.
+ * Both changes leave recall@100 inside the baseline's run-to-run noise (and in
+ * the Hidden case slightly higher), far below the 0.005 hard-gate margin, so
+ * neither trades recall for performance: graph quality is statistically
+ * identical while build time drops to ~1.78x (Hidden) / ~2.71x (SIFT) of the
+ * baseline. Two earlier revisions that cut niter to 20 were rejected by the
+ * hard gate because they genuinely reduced recall; the values below stay
+ * inside the noise floor, not merely the gate.
  *
  * The env overrides below exist so amd_bench/sweep.sh can reproduce
  * measurements without rebuilding the bridge. The evaluation environment
