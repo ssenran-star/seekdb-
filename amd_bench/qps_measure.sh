@@ -23,7 +23,11 @@ BASE=/seekdb_workspace/datasets/base.f32
 QUERY=/seekdb_workspace/datasets/query.f32
 [ "$DIM" = 256 ] && { BASE=$WORK/d256/base.f32; QUERY=$WORK/d256/query.f32; }
 
-echo "=== 0. check index exists in $DB.items (n=$N dim=$DIM) ==="
+echo "=== 0. ensure observer is up + index exists in $DB.items (n=$N dim=$DIM) ==="
+if ! timeout 1 bash -c 'echo > /dev/tcp/127.0.0.1/2881' 2>/dev/null; then
+  echo "2881 not listening; trying start_seekdb.sh ..."
+  bash "$WORK/start_seekdb.sh" || exit 1
+fi
 $MYSQL -e "use $DB; show index from items;" | head -5 || {
   echo "run e2e_measure.sh first (creates table + loads data + builds index)"; exit 1; }
 
