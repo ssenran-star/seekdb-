@@ -1052,7 +1052,7 @@ int ObFtsIndexBuilderUtil::decide_parallelism(
         break;
       case share::schema::ObIndexType::INDEX_TYPE_FTS_INDEX_LOCAL:
       case share::schema::ObIndexType::INDEX_TYPE_FTS_DOC_WORD_LOCAL:
-        decided_parallelism = MAX(original_parallelism / 3, 1L);
+        decided_parallelism = MAX(original_parallelism / 3, 5L);
         // A fulltext index build fans out into four concurrent aux-table
         // INSERT /*+ parallel(N) */ ... SELECT jobs (rowkey_doc, doc_rowkey,
         // fts_index_aux, fts_doc_word), each deep-copying the parallelism
