@@ -430,3 +430,26 @@ dense-graph 检查被 sed bug 吞了（label 含 `/`），已修。
 判定标准：SELF_HIT≈1.0（dtype 正确）；RECALL ≥ legacy（128d 0.973 / 256d 0.868）；
 BF_BUILD+SEARCH+FROMARGS 总时长 < legacy（10.5s / 18s）。全过则 bf 成为新默认，
 快照改用主机图格式（下一 commit），查询侧再评估 itopk 降档。
+
+---
+
+## 14. exp_delta 同场次校准：nd 判负，全面回退 legacy
+
+| 维度 | 配置 | recall@100 | Δ vs 同场冻结基线 | 判定 |
+|---|---|---|---|---|
+| 128d | frozen(100/256) | 0.9763 | — | 40849ms |
+| 128d | current(25/50) | 0.9741 | **0.0022** | OK |
+| 128d | nd(default) | 0.9711 | **0.0052** | **OVER** |
+| 256d | frozen(100/256) | 0.8716 | — | 42030ms |
+| 256d | current(25/50) | 0.8703 | **0.0013** | OK |
+| 256d | nd(default) | 0.8664 | **0.0052** | **OVER** |
+
+**裁决**：FromArgs（无 RobustPrune）管线在两个维度都压线超门槛，nd 不可提交。
+默认已回退 legacy 25/50（即 c683c70dd 的已过门槛配置），nd 仅保留
+`CAGRA_BUILD_MODE=nd` 实验开关。跨场次绝对值与同场次 delta 的教训：
+**召回判定必须同场次对冻结基线，跨场次数字会被 ~0.002 方差带偏。**
+
+bf 首跑输出为空（疑似某阶段崩溃）：bf_test.c 已加阶段打印 + 退出码上报。
+e2e 报 error 1235 `lib is not supported`：实例跑的是镜像原装 seekdb（不带
+CUVS 支持），SQL 端到端必须先 `build_seekdb.sh`（tarball 拉源码 + 赛题固定
+cmake 流程）再 `start_seekdb.sh`（已改为优先启动自编译 observer）。
