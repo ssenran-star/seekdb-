@@ -27,8 +27,8 @@ fetch() {  # fetch <api-path> <local-path> [force]
 }
 
 echo "=== 1. fetch bench tools (anonymous, repo is public) ==="
-for f in exp_build_matrix.sh exp_query.sh qps_measure.sh e2e_measure.sh \
-         bridge_test.c query_bench.c gen_data.py seekdb_cuvs_bridge_algo.c; do
+for f in exp_build_matrix.sh exp_query.sh exp_delta.sh probe_api.sh qps_measure.sh \
+         e2e_measure.sh bridge_test.c query_bench.c gen_data.py seekdb_cuvs_bridge_algo.c; do
   fetch "amd_bench/$f" "$WORK/$f" || exit 1
 done
 # bridge source always refreshes: it is the artifact that changes between rounds
