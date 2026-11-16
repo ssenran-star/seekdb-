@@ -599,6 +599,9 @@ protected:
   ObMonitorNode op_monitor_info_;
   // exec feedback info
   int64_t fb_node_idx_;
+  // whether the accumulated operator cpu time of this operator is observable,
+  // i.e. whether the plan records plan info.  See begin_cpu_time_counting.
+  bool need_op_cpu_time_;
 
   ObIOEventObserver io_event_observer_;
   // batch rows struct for get_next_row result.
@@ -611,18 +614,37 @@ protected:
   int64_t stash_rows_cnt_ = 0;
   int64_t stash_rows_idx_ = 0;
 
+  // The accumulated operator time is only ever read back through the execution
+  // feedback node (ObOperator::setup_op_feedback_info), which is fed to the
+  // plan info recorder; nothing else consumes total_time_.  rdtsc is not free:
+  // it is serializing, it is taken twice per batch pull, and it is taken by
+  // *every* operator of the chain because cpu_begin_level_ is a per operator
+  // counter, so a plan with a dozen operators pays two dozen rdtsc for a single
+  // batch.  On virtualized hosts rdtsc additionally traps to the hypervisor,
+  // which makes the sampling cost dwarf the work it is supposed to measure on
+  // row-at-a-time paths such as the fulltext index build.  Skip the accounting
+  // whenever the result cannot be read back, i.e. when the plan does not record
+  // plan info or when the statement is an inner one issued by the server.
+  inline bool is_op_cpu_time_needed() const
+  {
+    return need_op_cpu_time_;
+  }
   inline void begin_cpu_time_counting()
   {
-    if (cpu_begin_level_ == 0) {
-      cpu_begin_time_ = rdtsc();
+    if (is_op_cpu_time_needed()) {
+      if (cpu_begin_level_ == 0) {
+        cpu_begin_time_ = rdtsc();
+      }
+      ++cpu_begin_level_;
     }
-    ++cpu_begin_level_;
   }
   inline void end_cpu_time_counting()
   {
-    --cpu_begin_level_;
-    if (cpu_begin_level_ == 0) {
-      total_time_ += (rdtsc() - cpu_begin_time_);
+    if (is_op_cpu_time_needed()) {
+      --cpu_begin_level_;
+      if (cpu_begin_level_ == 0) {
+        total_time_ += (rdtsc() - cpu_begin_time_);
+      }
     }
   }
   #ifdef ENABLE_DEBUG_LOG

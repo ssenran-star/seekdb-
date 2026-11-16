@@ -20,6 +20,7 @@
 #include "ob_operator_factory.h"
 #include "query/runtime/ob_query_runtime_environment.h"
 #include "sql/engine/expr/ob_array_expr_utils.h"
+#include "sql/session/ob_sql_session_info.h"
 
 namespace oceanbase
 {
@@ -447,6 +448,7 @@ ObOperator::ObOperator(ObExecContext &exec_ctx, const ObOpSpec &spec, ObOpInput 
     got_first_row_(false),
     need_init_before_get_row_(true),
     fb_node_idx_(OB_INVALID_INDEX),
+    need_op_cpu_time_(false),
     io_event_observer_(op_monitor_info_),
     cpu_begin_time_(0),
     cpu_begin_level_(0),
@@ -586,6 +588,16 @@ int ObOperator::output_expr_decint_datum_len_check_batch()
 int ObOperator::open()
 {
   int ret = OB_SUCCESS;
+  // Operator cpu time is only observable through the execution feedback node,
+  // which is only handed to the plan info recorder.  A statement issued by the
+  // server itself (the INSERT ... SELECT that builds an index, for example) is
+  // executed exactly once and never becomes a plan management candidate, so
+  // the per batch rdtsc that feeds that recorder buys nothing there.  Resolve
+  // the answer once here instead of paying it on every batch pull, which is
+  // what ObOperator::begin_cpu_time_counting would otherwise do.
+  ObSQLSessionInfo *session = ctx_.get_my_session();
+  need_op_cpu_time_ = (nullptr != spec_.plan_ && spec_.plan_->need_record_plan_info()
+                       && nullptr != session && !session->is_inner());
   if (OB_FAIL(check_stack_overflow())) {
   } else {
     OperatorOpenOrder open_order = get_operator_open_order();
