@@ -46,9 +46,14 @@ gcc -O2 -o "$WORK/bridge_test" "$WORK/bridge_test.c" -ldl && echo GCC_OK || { ec
 gcc -O2 -o "$WORK/query_bench" "$WORK/query_bench.c" -ldl && echo QGCC_OK
 
 echo ""
-echo "=== 3. run the decisive build matrix (nd early-stop vs legacy) ==="
-echo "    (generates d128/d256 250K datasets on first run; ~40-60 min)"
-bash "$WORK/exp_build_matrix.sh"
+echo "=== 3. optional: full build matrix (heavy; set RUN_MATRIX=1 to enable) ==="
+if [ "${RUN_MATRIX:-0}" = "1" ]; then
+  echo "    (generates d128/d256 250K datasets on first run; ~40-60 min)"
+  bash "$WORK/exp_build_matrix.sh"
+else
+  echo "    skipped. run once per instance if needed:  bash $WORK/exp_build_matrix.sh"
+  echo "    (datasets d128/d256 are generated on first use by any exp script)"
+fi
 echo ""
 echo "=== next steps (in $WORK) ==="
 echo "  bash exp_bf.sh                   # ★ brute-force exact kNN build (recall+time)"
