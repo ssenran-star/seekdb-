@@ -403,3 +403,8 @@ size_t ObArrayHashMap::estimate_capacity(size_t word_num)
 {
   constexpr size_t MIN_CAPACITY = 101;                   // prime
   
+  size_t capacity = MAX(word_num * 4 / 3, MIN_CAPACITY); // 75%
+  return capacity;
+}
+} //  namespace storage
+} //  namespace oceanbase
