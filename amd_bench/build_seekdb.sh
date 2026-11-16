@@ -12,14 +12,21 @@ WORK=/workspace/work
 SRC=/workspace/seekdb-src
 REF=${REF:-amd-cagra-submit}
 JOBS=${JOBS:-64}
+# token for api.github.com (anonymous rate limit is 60/h per IP and the
+# tarball is one of the heavier calls); override with GITHUB_TOKEN=...
+GITHUB_TOKEN=${GITHUB_TOKEN:-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}
 
 mkdir -p "$WORK"
 if [ ! -f "$SRC/CMakeLists.txt" ]; then
   echo "=== 1. fetch source tarball (ref=$REF) ==="
-  rm -rf "$SRC" "$WORK"/ssenran-star--seekdb-*
-  curl -fsSL "https://api.github.com/repos/ssenran-star/seekdb-/tarball/$REF" \
-    | tar xz -C "$WORK"
-  mv "$WORK"/ssenran-star--seekdb-* "$SRC"
+  rm -rf "$SRC"
+  mkdir -p "$SRC"
+  AUTH=()
+  [ -n "${GITHUB_TOKEN:-}" ] && AUTH=(-H "Authorization: Bearer $GITHUB_TOKEN")
+  # tarball root dir is "<owner>-<repo>-<sha>" and the repo name ends in '-',
+  # so extract straight into $SRC instead of globbing the directory name
+  curl -fsSL "${AUTH[@]}" "https://api.github.com/repos/ssenran-star/seekdb-/tarball/$REF" \
+    | tar xz -C "$SRC" --strip-components=1
   echo "source at $SRC ($(find "$SRC" -name '*.cpp' | wc -l) cpp files)"
 fi
 

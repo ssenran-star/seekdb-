@@ -22,11 +22,28 @@ if port_busy; then
   fi
   echo "port 2881 is held by another observer (likely the stock image one,"
   echo "which rejects lib=cuvs). Stopping it..."
-  pids=$(ss -ltnp 2>/dev/null | awk '/:2881 /{print $NF}' | grep -oE '[0-9]+' | sort -u)
-  [ -z "$pids" ] && pids=$(fuser 2881/tcp 2>/dev/null | tr -s ' ')
-  for p in $pids; do kill "$p" 2>/dev/null; done
+  pids=""
+  if command -v lsof >/dev/null 2>&1; then
+    pids=$(lsof -ti:2881 2>/dev/null | tr '\n' ' ')
+  fi
+  if [ -z "$pids" ]; then
+    pids=$(ss -ltnp 2>/dev/null | grep ':2881 ' | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u | tr '\n' ' ')
+  fi
+  if [ -z "$pids" ] && command -v fuser >/dev/null 2>&1; then
+    pids=$(fuser 2881/tcp 2>/dev/null | tr -s ' ')
+  fi
+  if [ -z "$pids" ]; then
+    pids=$(pgrep -x seekdb 2>/dev/null | tr '\n' ' ')
+  fi
+  echo "pids on 2881: ${pids:-none found}"
+  for p in $pids; do kill "$p" 2>/dev/null || true; done
   for i in $(seq 1 15); do port_busy || break; sleep 1; done
-  port_busy && { echo "failed to free 2881 (pids: $pids)"; exit 1; }
+  if port_busy; then
+    echo "still busy, escalating to kill -9 ..."
+    for p in $pids; do kill -9 "$p" 2>/dev/null || true; done
+    sleep 2
+  fi
+  port_busy && { echo "failed to free 2881 (pids: ${pids:-?})"; exit 1; }
 fi
 
 if [ -x "$BIN" ]; then

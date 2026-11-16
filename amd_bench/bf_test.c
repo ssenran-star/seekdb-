@@ -74,7 +74,12 @@ int main(int argc, char **argv) {
   if (cuvsBruteForceIndexCreate(&bf) != CUVS_SUCCESS) { fprintf(stderr, "BF_INDEX_FAIL\n"); return 6; }
   double t0 = now_ms();
   if (cuvsBruteForceBuild(res, &dataset, L2Expanded, 0.f, bf) != CUVS_SUCCESS) {
-    fprintf(stderr, "BF_BUILD_FAIL: %s\n", cuvsGetLastErrorText()); return 7;
+    fprintf(stderr, "BF_BUILD_FAIL(metric_arg=0.f): %s\n", cuvsGetLastErrorText());
+    fprintf(stderr, "retrying with metric_arg=2.0f ...\n");
+    if (cuvsBruteForceBuild(res, &dataset, L2Expanded, 2.0f, bf) != CUVS_SUCCESS) {
+      fprintf(stderr, "BF_BUILD_FAIL(metric_arg=2.0f): %s\n", cuvsGetLastErrorText());
+      return 7;
+    }
   }
   double bf_build_ms = now_ms() - t0;
   printf("stage: bf_build OK (%.0f ms); bf_self_search ...\n", bf_build_ms);
