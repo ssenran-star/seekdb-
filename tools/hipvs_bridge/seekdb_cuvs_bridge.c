@@ -256,15 +256,13 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
     if (mode == NULL || mode[0] == '\0') mode = "auto";
     int done = 0;
     if (strcmp(mode, "legacy") != 0) {
-      /* auto: nd only for dim<=128. The two matrix runs (250K, exact top-100
-       * GT) show 256-dim has NO nd point that is both faster and within the
-       * recall budget: FromArgs skips CAGRA's RobustPrune (~0.002 recall) and
-       * build-to-build variance is ~0.0015, so the fastest in-gate-looking
-       * config (mi=50/th=1e-3, 11% faster) sits at synthetic delta ~0.0055
-       * versus the frozen baseline -- at/over the 0.005 hard gate. 256-dim
-       * therefore keeps the legacy pipeline (mi=50 legacy, delta ~0.0027).
-       * Explicit CAGRA_BUILD_MODE=nd still forces nd for experiments. */
-      const int try_nd = (strcmp(mode, "nd") == 0) || (dim <= 128);
+      /* auto: nd disabled by default. Same-session calibration
+       * (amd_bench/exp_delta.sh, frozen baseline measured in the same run)
+       * puts nd's FromArgs-without-optimise pipeline at delta 0.0052 on
+       * BOTH dims -- over the 0.005 hard gate -- while legacy 25/50 sits at
+       * 0.0022 / 0.0013. nd remains available for experiments via
+       * CAGRA_BUILD_MODE=nd and is the template for the brute-force path. */
+      const int try_nd = (strcmp(mode, "nd") == 0);
       if (try_nd && build_nd(h, &dset, dim) == 0) { done = 1; }
       else if (strcmp(mode, "nd") == 0) {
         fprintf(stderr, "[seekdb_cuvs] nd build failed: %s\n", cuvsGetLastErrorText());

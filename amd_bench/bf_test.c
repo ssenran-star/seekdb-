@@ -68,6 +68,8 @@ int main(int argc, char **argv) {
   dataset.dl_tensor.shape = ds;
 
   /* ---- 1. brute-force build (attach dataset) ---- */
+  setbuf(stdout, NULL); setbuf(stderr, NULL);
+  printf("stage: bf_build ...\n");
   cuvsBruteForceIndex_t bf = 0;
   if (cuvsBruteForceIndexCreate(&bf) != CUVS_SUCCESS) { fprintf(stderr, "BF_INDEX_FAIL\n"); return 6; }
   double t0 = now_ms();
@@ -75,6 +77,7 @@ int main(int argc, char **argv) {
     fprintf(stderr, "BF_BUILD_FAIL: %s\n", cuvsGetLastErrorText()); return 7;
   }
   double bf_build_ms = now_ms() - t0;
+  printf("stage: bf_build OK (%.0f ms); bf_self_search ...\n", bf_build_ms);
 
   /* ---- 2. self-search exact top-gdeg ---- */
   long nn[2] = {n, gdeg};
@@ -99,6 +102,7 @@ int main(int argc, char **argv) {
     fprintf(stderr, "BF_SEARCH_FAIL: %s\n", cuvsGetLastErrorText()); return 8;
   }
   double bf_search_ms = now_ms() - t0;
+  printf("stage: bf_self_search OK (%.0f ms); convert+fromargs ...\n", bf_search_ms);
 
   /* self-hit sanity: row i's top-1 neighbour must be i */
   long self_hit = 0;
@@ -128,6 +132,7 @@ int main(int argc, char **argv) {
     fprintf(stderr, "FROMARGS_FAIL: %s\n", cuvsGetLastErrorText()); return 10;
   }
   double fromargs_ms = now_ms() - t0;
+  printf("stage: fromargs OK (%.0f ms); cagra_search+recall ...\n", fromargs_ms);
 
   /* ---- 4. CAGRA search + recall ---- */
   unsigned *ids = malloc((size_t)nq * topk * 4);

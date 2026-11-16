@@ -26,12 +26,14 @@ for dim in ${DIMS:-128 256}; do
   for i in $(seq 1 "$RUNS"); do
     env BASE_F32="$data/base.f32" QUERY_F32="$data/query.f32" GT_I32="$data/gt.i32" \
         GT_Q=100 GT_K=100 NEIGHBOR_BITS=64 \
-        ./bf_test 250000 "$dim" 128 2>&1 | tail -1
+        ./bf_test 250000 "$dim" 128 2>&1 | tail -6
+    echo "  (exit=${PIPESTATUS[0]})"
   done
   echo "--- dtype fallback check (NEIGHBOR_BITS=32, 1 run) ---"
   env BASE_F32="$data/base.f32" QUERY_F32="$data/query.f32" GT_I32="$data/gt.i32" \
       GT_Q=100 GT_K=100 NEIGHBOR_BITS=32 \
-      ./bf_test 250000 "$dim" 128 2>&1 | tail -1
+      ./bf_test 250000 "$dim" 128 2>&1 | tail -6
+  echo "  (exit=${PIPESTATUS[0]})"
 done
 echo ""
 echo "=== reading the output ==="
