@@ -56,6 +56,27 @@ inline std::string trim(const std::string& s) {
     return s.substr(b, e - b + 1);
 }
 
+inline float fast_parse_float(const char* s, const char** end) {
+    const char* p = s;
+    float sign = 1.0f;
+    if (*p == '-') { sign = -1.0f; p++; }
+    else if (*p == '+') p++;
+    if (!(*p >= '0' && *p <= '9') && *p != '.') { *end = s; return 0; }
+    float val = 0;
+    while (*p >= '0' && *p <= '9') { val = val * 10.0f + (*p - '0'); p++; }
+    if (*p == '.') {
+        p++;
+        float frac = 0.1f;
+        while (*p >= '0' && *p <= '9') { val += (*p - '0') * frac; frac *= 0.1f; p++; }
+    }
+    if (*p == 'e' || *p == 'E' || *p == 'x' || *p == 'X' ||
+        (*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z')) {
+        *end = s; return 0;
+    }
+    *end = p;
+    return sign * val;
+}
+
 inline Vector parse_vector_literal(const std::string& raw, uint32_t dim) {
     std::string t = trim(raw);
     if (t.size() < 2 || t.front() != '[' || t.back() != ']')
@@ -71,17 +92,26 @@ inline Vector parse_vector_literal(const std::string& raw, uint32_t dim) {
         size_t comma = body.find(',', pos);
         std::string tok = trim(body.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos));
         if (tok.empty()) throw DbError("invalid_vector", "empty vector element");
-        errno = 0;
-        char* end = nullptr;
-        double d = std::strtod(tok.c_str(), &end);
-        if (end == tok.c_str() || *end != '\0')
+        const char* endp = nullptr;
+        float f = fast_parse_float(tok.c_str(), &endp);
+        if (endp == tok.c_str()) {
+            errno = 0;
+            char* end2 = nullptr;
+            double d = std::strtod(tok.c_str(), &end2);
+            if (end2 == tok.c_str() || *end2 != '\0')
+                throw DbError("invalid_vector", "non-numeric vector element: " + tok);
+            if (std::isnan(d) || std::isinf(d))
+                throw DbError("invalid_vector", "NaN/Infinity not allowed");
+            if (d > std::numeric_limits<float>::max() || d < -std::numeric_limits<float>::max())
+                throw DbError("invalid_vector", "float32 overflow");
+            f = static_cast<float>(d);
+            if (std::isinf(f)) throw DbError("invalid_vector", "float32 overflow");
+        } else if (*endp != '\0') {
             throw DbError("invalid_vector", "non-numeric vector element: " + tok);
-        if (std::isnan(d) || std::isinf(d))
-            throw DbError("invalid_vector", "NaN/Infinity not allowed");
-        if (d > std::numeric_limits<float>::max() || d < -std::numeric_limits<float>::max())
-            throw DbError("invalid_vector", "float32 overflow");
-        float f = static_cast<float>(d);
-        if (std::isinf(f)) throw DbError("invalid_vector", "float32 overflow");
+        } else {
+            if (std::isnan(f) || std::isinf(f))
+                throw DbError("invalid_vector", "NaN/Infinity not allowed");
+        }
         out.push_back(f);
         if (comma == std::string::npos) break;
         pos = comma + 1;
