@@ -381,6 +381,71 @@ static int ob_strnncollsp_utf8mb4(const ObCharsetInfo *cs,
   ob_wc_t src_wc = 0, dst_wc = 0;
   const unsigned char *se= src + srclen, *te= dst + dstlen;
   ObUnicaseInfo *uni_plane= cs->caseinfo;
+
+  // Fast path for pure ASCII operands, which is what the vast majority of the
+  // strings compared under this collation actually are.
+  //
+  // For an input byte below 0x80 ob_mb_wc_utf8mb4 yields the byte itself as the
+  // code point and consumes exactly one byte, and ob_tosort_unicode turns that
+  // code point into a single lookup in the first page of the weight table.  So
+  // over pure ASCII the general collation is a byte by byte comparison of five
+  // bit weights, and running the generic loop only buys us a decoder call, a two
+  // level page table walk and a function call per character.
+  //
+  // The result is identical to the loop below.  When every compared byte is
+  // ASCII the two implementations agree on the first differing weight; when one
+  // operand runs out first the loop below would only reach the trailing space
+  // rules of ob_strnncollsp_utf8mb4_help, which is exactly what this path calls
+  // once it has consumed the common prefix.  Note that src, dst, se and te are
+  // left untouched unless the hand off happens, so the fallback still starts
+  // from the original operands.
+  {
+    const ObUnicaseInfoChar *ascii_page = NULL;
+    if (OB_LIKELY(NULL != uni_plane) && OB_LIKELY(uni_plane->maxchar >= 0x7F)) {
+      ascii_page = uni_plane->page[0];
+    }
+    if (OB_LIKELY(NULL != ascii_page)) {
+      const bool lower_sort = (0 != (cs->state & OB_CS_LOWER_SORT));
+      const unsigned char *s = src;
+      const unsigned char *t = dst;
+      // Compare only the bytes both operands have.  The lengths have to drive
+      // this, not the end pointers, which live in unrelated buffers.
+      const unsigned char *s_stop = src + (srclen < dstlen ? srclen : dstlen);
+      while (s < s_stop) {
+        const unsigned char a = *s;
+        const unsigned char b = *t;
+        if (OB_UNLIKELY(a >= 0x80) || OB_UNLIKELY(b >= 0x80)) {
+          ascii_page = NULL;
+          break;
+        }
+        const uint32 wa = lower_sort ? ascii_page[a].tolower : ascii_page[a].sort;
+        const uint32 wb = lower_sort ? ascii_page[b].tolower : ascii_page[b].sort;
+        if (wa != wb) {
+          return wa > wb ? 1 : -1;
+        }
+        ++s;
+        ++t;
+      }
+      if (OB_LIKELY(NULL != ascii_page)) {
+        if (srclen == dstlen) {
+          return 0;
+        }
+        src = s;
+        dst = t;
+        srclen = (size_t) (se - src);
+        dstlen = (size_t) (te - dst);
+        res = 0;
+        int has_returned = 0;
+        int tmp = ob_strnncollsp_utf8mb4_help(
+            &src, srclen,
+            &dst, dstlen,
+            &se, &te,
+            diff_if_only_endspace_difference, &has_returned, &res);
+        return has_returned ? tmp : res;
+      }
+    }
+  }
+
   while ( src < se && dst < te ) {
     int s_res= ob_mb_wc_utf8mb4(cs, &src_wc, src, se);
     int t_res= ob_mb_wc_utf8mb4(cs, &dst_wc, dst, te);
