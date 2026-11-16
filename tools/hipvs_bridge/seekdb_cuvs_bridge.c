@@ -47,6 +47,25 @@
 
 #define SK_SP_CACHE 2
 
+/* hipVS's cuda_runtime shim maps cudaMemcpy etc. but not the host-pinned
+ * allocators; use the HIP names on AMD and the CUDA names elsewhere. */
+static int sk_host_alloc(void** p, size_t bytes)
+{
+#ifdef __HIP_PLATFORM_AMD__
+  return hipHostAlloc(p, bytes, hipHostAllocDefault) == hipSuccess ? 0 : -1;
+#else
+  return cudaHostAlloc(p, bytes, cudaHostAllocDefault) == cudaSuccess ? 0 : -1;
+#endif
+}
+static void sk_host_free(void* p)
+{
+#ifdef __HIP_PLATFORM_AMD__
+  hipFreeHost(p);
+#else
+  cudaFreeHost(p);
+#endif
+}
+
 typedef struct {
   cuvsResources_t        res;
   cuvsCagraIndexParams_t ip;    /* created on every path (destroy-safe) */
@@ -257,7 +276,7 @@ static void sk_free_search_resources(sk_cuvs_index* h)
   if (h->ddev)  { cuvsRMMFree(h->res, h->ddev, h->ddev_cap); h->ddev = 0; }
   if (h->ndev)  { cuvsRMMFree(h->res, h->ndev, h->ndev_cap); h->ndev = 0; }
   if (h->qd)    { cuvsRMMFree(h->res, h->qd, h->qd_cap); h->qd = 0; }
-  if (h->hpinned) { cudaFreeHost(h->hpinned); h->hpinned = 0; }
+  if (h->hpinned) { sk_host_free(h->hpinned); h->hpinned = 0; }
   h->qd_cap = h->ndev_cap = h->ddev_cap = h->hpinned_cap = 0;
   h->sp_itopk[0] = h->sp_itopk[1] = 0;
 }
@@ -271,8 +290,8 @@ static int sk_search_ensure(sk_cuvs_index* h, long nq, long topk, size_t itopk, 
     h->qd = 0; h->qd_cap = 0;
     if (cuvsRMMAlloc(h->res, (void**)&h->qd, q_bytes) != CUVS_SUCCESS) return 10;
     h->qd_cap = q_bytes;
-    if (h->hpinned) { cudaFreeHost(h->hpinned); h->hpinned = 0; h->hpinned_cap = 0; }
-    if (cudaHostAlloc((void**)&h->hpinned, q_bytes, cudaHostAllocDefault) != cudaSuccess) {
+    if (h->hpinned) { sk_host_free(h->hpinned); h->hpinned = 0; h->hpinned_cap = 0; }
+    if (sk_host_alloc((void**)&h->hpinned, q_bytes) != 0) {
       h->hpinned = 0; /* pageable fallback: memcpy still works from caller ptr */
     } else {
       h->hpinned_cap = q_bytes;

@@ -18,9 +18,9 @@ API=https://api.github.com/repos/ssenran-star/seekdb-/contents
 mkdir -p "$WORK/hipvs_bridge"
 cd "$WORK"
 
-fetch() {  # fetch <api-path> <local-path>
-  local src="$1" dst="$2"
-  if [ -s "$dst" ]; then echo "have  $dst"; return 0; fi
+fetch() {  # fetch <api-path> <local-path> [force]
+  local src="$1" dst="$2" force="${3:-}"
+  if [ -z "$force" ] && [ -s "$dst" ]; then echo "have  $dst"; return 0; fi
   curl -fsSL "$API/$src?ref=$REF" \
     | python3 -c "import sys,json,base64;open('$dst','wb').write(base64.b64decode(json.load(sys.stdin)['content']))" \
     && echo "got   $dst" || { echo "FETCH_FAIL $src"; return 1; }
@@ -31,8 +31,9 @@ for f in exp_build_matrix.sh exp_query.sh qps_measure.sh e2e_measure.sh \
          bridge_test.c query_bench.c gen_data.py seekdb_cuvs_bridge_algo.c; do
   fetch "amd_bench/$f" "$WORK/$f" || exit 1
 done
+# bridge source always refreshes: it is the artifact that changes between rounds
 for f in seekdb_cuvs_bridge.c seekdb_cuvs_bridge.h build.sh; do
-  fetch "tools/hipvs_bridge/$f" "$WORK/hipvs_bridge/$f" || exit 1
+  fetch "tools/hipvs_bridge/$f" "$WORK/hipvs_bridge/$f" force || exit 1
 done
 chmod +x "$WORK"/*.sh
 
