@@ -8,6 +8,7 @@
 #
 # Usage: bash build_seekdb.sh        (~30-60 min, 64 cores)
 set -euo pipefail
+echo "build_seekdb.sh v3 (2026-11-16 22:40) -- strip-components tarball"
 WORK=/workspace/work
 SRC=/workspace/seekdb-src
 REF=${REF:-amd-cagra-submit}

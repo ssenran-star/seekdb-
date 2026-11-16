@@ -6,6 +6,7 @@
 # Usage: bash exp_bf.sh            (both dims, 3 runs each)
 #        DIMS=256 bash exp_bf.sh
 set -u
+echo "exp_bf.sh v3 (2026-11-16 22:40) -- full output mode"
 WORK=${WORK:-/workspace/work}
 RUNS=${RUNS:-3}
 cd "$WORK"

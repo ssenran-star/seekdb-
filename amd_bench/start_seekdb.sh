@@ -8,6 +8,7 @@
 #      accept lib=cuvs
 # Launch args mirror docs/gpu-vector-index-hipvs-cuvs/validation/run_gpu_smoke.sh.
 set -u
+echo "start_seekdb.sh v3 (2026-11-16 22:40) -- robust port-free"
 WORK=/workspace/work
 BIN=${SEEKDB_BIN:-/workspace/seekdb-src/build_release/src/observer/seekdb}
 BRIDGE=${BRIDGE:-$WORK/libseekdb_cuvs_bridge.so}
