@@ -167,7 +167,14 @@ template <typename DataType = void>
 class ObFTDATReader
 {
 public:
-  ObFTDATReader(ObFTDAT *dat) : dat_(dat) {}
+  // The trie alphabet is a small, immutable set of characters, so the
+  // character -> code lookup in the word map is a pure function of the
+  // character bytes for the whole life of this reader. Remember the result in
+  // a tiny direct mapped table to keep the (hash + modulo + probe) sequence off
+  // the per-character hot path of the tokenizers.
+  static constexpr int64_t CHAR_CODE_CACHE_SLOTS = 512;
+
+  ObFTDATReader(ObFTDAT *dat) : dat_(dat), char_code_cache_() {}
 
   // Match single word with hit.
   int match_with_hit(const ObString &single_word,
@@ -175,7 +182,59 @@ public:
                      ObDATrieHit &hit) const;
 
 private:
+  // Pack a 1..3 byte character into a non zero key. Longer characters are not
+  // cached, they are rare and would need more bits than the key has.
+  static inline bool build_char_code_key(const ObString &ch, uint32_t &key)
+  {
+    bool ok = false;
+    const unsigned char *p = reinterpret_cast<const unsigned char *>(ch.ptr());
+    const int32_t len = ch.length();
+    if (1 == len) {
+      key = (1UL << 24) | static_cast<uint32_t>(p[0]);
+      ok = true;
+    } else if (2 == len) {
+      key = (2UL << 24) | (static_cast<uint32_t>(p[0]) << 8) | static_cast<uint32_t>(p[1]);
+      ok = true;
+    } else if (3 == len) {
+      key = (3UL << 24) | (static_cast<uint32_t>(p[0]) << 16)
+            | (static_cast<uint32_t>(p[1]) << 8) | static_cast<uint32_t>(p[2]);
+      ok = true;
+    }
+    return ok;
+  }
+
+  static inline uint64_t char_code_slot(const uint32_t key)
+  {
+    return ((static_cast<uint64_t>(key) * 2654435761UL) >> 20) & (CHAR_CODE_CACHE_SLOTS - 1);
+  }
+
+  // One entry is a single 64 bit word so that a reader can never observe a key
+  // from one character and a code from another one: high half is the key, low
+  // half is code + 1 (0 means "this character is not in the trie alphabet").
+  static inline uint64_t pack_char_code(const uint32_t key, const uint32_t code_plus_one)
+  {
+    return (static_cast<uint64_t>(key) << 32) | static_cast<uint64_t>(code_plus_one);
+  }
+
+  inline bool probe_char_code(const uint32_t key, uint32_t &code_plus_one) const
+  {
+    const uint64_t packed = __atomic_load_n(&char_code_cache_[char_code_slot(key)], __ATOMIC_RELAXED);
+    const bool hit = (static_cast<uint32_t>(packed >> 32) == key);
+    if (hit) {
+      code_plus_one = static_cast<uint32_t>(packed);
+    }
+    return hit;
+  }
+
+  inline void remember_char_code(const uint32_t key, const uint32_t code_plus_one) const
+  {
+    __atomic_store_n(&char_code_cache_[char_code_slot(key)],
+                     pack_char_code(key, code_plus_one), __ATOMIC_RELAXED);
+  }
+
+private:
   ObFTDAT *dat_;
+  mutable uint64_t char_code_cache_[CHAR_CODE_CACHE_SLOTS];
 
 private:
   DISALLOW_COPY_AND_ASSIGN(ObFTDATReader);
