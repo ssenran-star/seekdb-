@@ -1,10 +1,6 @@
 /*
  * Copyright (c) 2025 OceanBase.
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
  *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
@@ -12,6 +8,10 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  */
 
 #define USING_LOG_PREFIX STORAGE_FTS
@@ -1052,7 +1052,7 @@ int ObFtsIndexBuilderUtil::decide_parallelism(
         break;
       case share::schema::ObIndexType::INDEX_TYPE_FTS_INDEX_LOCAL:
       case share::schema::ObIndexType::INDEX_TYPE_FTS_DOC_WORD_LOCAL:
-        decided_parallelism = MAX(original_parallelism / 3, 5L);
+        decided_parallelism = MAX(original_parallelism / 3, 1L);
         // A fulltext index build fans out into four concurrent aux-table
         // INSERT /*+ parallel(N) */ ... SELECT jobs (rowkey_doc, doc_rowkey,
         // fts_index_aux, fts_doc_word), each deep-copying the parallelism
