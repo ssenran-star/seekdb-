@@ -200,3 +200,85 @@ LD_LIBRARY_PATH=/tmp/bridge:/opt/hipvs/lib:/opt/rocm/lib \
 取文件需走 `api.github.com`；命令细节见 `amd_bench/README.md`。
 
 原始实测数据与精确真值见 `amd_bench/results/`。
+
+---
+
+## 9. 第二轮（冲 20 分）：方案与执行顺序
+
+> 本节对应 commit `bridge+adaptor: round-2 build/query pipeline`，基于分支最新
+> tip（niter 25/50 + igdeg=128，即 c683c70dd）之上。
+
+### 9.1 距满分的量化缺口
+
+计分公式（评测文档第九节）：
+
+```
+综合构建加速比 = SIFT^0.4 × Hidden^0.6        （加权几何平均）
+构建性能分 = 14 × clamp( ln(综合构建加速比) / ln(3.0), 0, 1 )
+查询性能分 =  2 × clamp( ln(综合查询加速比) / ln(1.5), 0, 1 )
+总分 = 4（硬门槛） + 构建分 + 查询分
+```
+
+| 项 | 已验证最好（2c76a2f） | 分支 tip（25/50，待评） | 满分要求 |
+|---|---|---|---|
+| 综合构建加速（端到端） | 1.828× → 7.68 分 | 合成 3.78×/2.23×，估端到端 ≈2.05× → ≈8.7 分 | ≥3.0× → 14 分 |
+| 综合查询加速 | 1.014× → 0.07 分 | 未变 | ≥1.5× → 2 分 |
+| 合计 | ≈11.7 / 20 | ≈12.8 / 20（估） | 20 / 20 |
+
+按 F≈16% 固定开销模型（见第 7 节），端到端 3.0× 需要**真实建图加速 ≈4.85×**
+（合成口径 ≈5.4×）。当前合成加权约 2.9×（25/50 版），还差 ~1.9×。因此单靠继续
+压 niter 不够（且已接近 0.005 召回门槛极限），必须引入**不损召回的算法性提速**。
+
+### 9.2 本 commit 的改动
+
+| 层 | 改动 | 预期收益 | 风险 |
+|---|---|---|---|
+| bridge 建图 | **nd 模式**：独立 `cuvsNNDescentBuild`（max_iterations 按维度 + `termination_threshold` 收敛早停）→ `cuvsCagraIndexFromArgs`，查询仍走固定 `cuvsCagraSearch`。默认 `CAGRA_BUILD_MODE=auto`：hipVS 有独立 NN-Descent API 就走 nd，否则/失败自动回退 legacy（dlsym 软链接，不引入硬依赖） | 早停砍掉收敛后的冗余迭代（上限即现 niter 25/50，超不掉召回）；FromArgs 若略过 CAGRA optimize 阶段还能再省一截 | 需 exp_build_matrix 实测 recall@100 与 legacy 对齐；默认上限与现行提交同档，先验证结构等价性 |
+| bridge 查询 | 搜索缓冲/参数/pinned 暂存常驻；新增 `CAGRA_ITOPK`/`CAGRA_SW` 调参入口（默认 = 基线行为）。注：缓冲复用本身此前实测≈0（RMM 有池化），保留无害 | 主要靠 itopk 降档（exp_query.sh 待跑） | itopk 降档可能损召回，须过 recall@100 判定 |
+| adaptor | ①每查询 `pthread_create`(32MB 栈) → 常驻 worker；②`get_vid_bound` 全量扫 250K id → 增量缓存 min/max | query_bench 测不到的 bridge 外每查询开销，估 0.2~0.5ms/查询 | 无召回风险 |
+| adaptor 快照 | OBCUVS03：ids+向量流写与 GPU 建图**重叠**（读侧兼容 02） | 计时窗口固定开销 F 缩小 ~0.5s | 格式变更；冒烟测试只查日志字段（built/graph_bytes 不变），兼容 |
+
+合规性：赛题 3.1 明确允许「自定义 GPU 建图，不限定具体构图接口」；查询端
+`cuvsCagraSearch` 为组织方固定实现、参数未绕过；nd 默认参数刻意与当前提交
+同档（25/50），只有实验验证「recall 降幅不超门槛」后才把早停参数写死。
+
+### 9.3 在实例上的执行顺序（4 小时额度内）
+
+```bash
+# 0. 资料与脚本自检（实例重启后跑 setup_query.sh 可恢复环境）
+bash amd_bench/setup_query.sh
+
+# 1. 决定性实验：nd 早停矩阵（双维度，recall@100 判定，~40 分钟）
+bash amd_bench/exp_build_matrix.sh
+
+# 2. 查询参数扫描（itopk/sw，recall + 单查延迟，~20 分钟）
+bash amd_bench/exp_query.sh
+
+# 3. 端到端 QPS（4096 条单行 SQL，对齐评测口径）
+N=250000 DIM=256 bash amd_bench/qps_measure.sh
+
+# 4. 端到端构建窗口（F 分解，验证快照重叠收益）
+bash amd_bench/e2e_measure.sh
+```
+
+**决策规则**：
+
+1. exp_build_matrix 找每维度「recall100 比 legacy/ref 降幅 < 0.003」的最快 nd
+   配置 → 写回 bridge 默认（CAGRA_MAX_ITER / CAGRA_TERM_TH）；若 nd 全部不达标，
+   默认切回 legacy（现行提交行为），nd 仅留实验用途。
+2. exp_query 找 recall 降幅 < 0.003 的最低 itopk → 写回 bridge 默认。
+3. 若 1 之后综合构建仍 < 2.7×，按优先级加杠杆：
+   a) FP16 数据喂 NN-Descent（赛题允许内部 FP16，须过同一 Recall 门槛）；
+   b) nd 输出 256 度稠密图直接 FromArgs（跳过剪枝，验召回）；
+   c) 自定义 HIP RobustPrune（NN-Descent → 剪枝 → FromArgs 全自控管线）。
+4. 查询若 < 1.2×：用 qps_measure 与 query_bench 的差值定位 bridge 外占比，
+   再定向优化 SQL/DAS 层每查询开销。
+
+### 9.4 本改动的验证状态
+
+| 项 | 状态 |
+|---|---|
+| nd 模式 recall@100 对齐（双维度 250K） | **待实例实测**（exp_build_matrix.sh） |
+| adaptor worker / vid 缓存正确性 | 逻辑自审通过，待实例冒烟（run_ddl_persistence_smoke.sh + e2e_measure.sh） |
+| OBCUVS03 快照重叠 | 逻辑自审通过，待实例冒烟（日志字段 built/graph_bytes 不变） |
+| itopk 调参 | **待实例实测**（exp_query.sh） |
