@@ -36,6 +36,25 @@ HIPVS_ROOT=/opt/hipvs ROCM_ROOT=/opt/rocm \
   bash "$SRC/tools/hipvs_bridge/build.sh" "$WORK/libseekdb_cuvs_bridge.so"
 ls -la "$WORK/libseekdb_cuvs_bridge.so"
 
+echo "=== 2b. deps/3rd devtools (clang-17 toolchain; eval provides this frozen) ==="
+DT="$SRC/deps/3rd/usr/local/oceanbase/devtools"
+if [ ! -x "$DT/bin/clang-17" ] && [ ! -x "$DT/bin/clang" ]; then
+  if bash "$SRC/deps/init/dep_create.sh"; then
+    echo "dep_create.sh populated deps/3rd"
+  else
+    echo "dep_create.sh failed; searching the image for an existing devtools tree ..."
+    found=$(find /seekdb_workspace /usr/local /opt /root /home -maxdepth 8 -type f \( -name 'clang-17' -o -name 'clang++-17' \) -path '*devtools*' 2>/dev/null | head -1)
+    if [ -n "$found" ]; then
+      mkdir -p "$SRC/deps/3rd/usr/local/oceanbase"
+      ln -sfn "$(dirname "$(dirname "$found")")" "$DT"
+      echo "linked devtools -> $(readlink "$DT")"
+    else
+      echo "WARN: no devtools tree found; cmake may fail with 'can't find suitable compiler'"
+    fi
+  fi
+fi
+ls "$DT/bin" 2>/dev/null | head -5
+
 echo "=== 3. cmake configure + build seekdb (contest flags) ==="
 cd "$SRC"
 cmake -S . -B build_release -G "Unix Makefiles" \
