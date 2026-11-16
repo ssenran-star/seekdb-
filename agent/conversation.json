@@ -116,6 +116,11 @@
       "id": "C18",
       "role": "student",
       "content": "ROLLBACK 后主键释放（学生逐字，独立预测，无脚手架）：agent 提问「事务里 INSERT 5 行后 ROLLBACK，再 INSERT 同样 5 个主键，会报 duplicate_key 吗？」学生独立回答：「不会，回滚了主键也会回滚」。预测正确且解释正确（回滚使事务不可见→主键约束检查基于可见行→已回滚的行不参与冲突判定）。实验证实：re-INSERT affected_rows=5，无 duplicate_key。覆盖维度：技术理解与迁移（将可见性规则迁移到主键约束场景）+ 独立验证与质疑（无提示独立预测）。"
+    },
+    {
+      "id": "C19",
+      "role": "student",
+      "content": "批量验证 5 题（学生逐字，脚手架辅助后复述）：Q1「不会因为DELETE 会标记该行被删除，ANN 搜索结果会经过可见性过滤，所以被删的行不返回。」Q2「完整。恢复幂等——每次从头扫日志只会确认已经提交的前缀，中途被杀不会损坏日志，再杀再重启照样恢复。」Q3「0 行。先验证全部行，第 2 行维度错就会整条失败整条失败就不写任何行。」Q4「精确。exact 模式会绕过 ANN的 索引，全表扫描算真实距离，索引只会影响 ann。」Q5「只保留第 1 行。第 1 行自动提交有 COMMIT 标记；shutdown 回滚的是 BEGIN 后的事务（第 2 行），不影响已提交的。」5 题预测均正确，解释均正确。覆盖维度：技术理解与迁移（Q1/Q4/Q5）、独立验证与质疑（Q2/Q3）、实验与反馈迭代（全部）、取舍与反思（Q5 隐含）。属脚手架辅助下的学生产出。"
     }
   ],
   "experiments": [
@@ -289,6 +294,15 @@
       "command": "VM 实测：CREATE TABLE → BEGIN → INSERT 5 rows → ROLLBACK → INSERT same 5 PKs → SELECT",
       "output": "re-INSERT after ROLLBACK: {\"affected_rows\": 5, \"id\": 5, \"ok\": true} / rows: [[1],[2],[3],[4],[5]] / RESULT: NO duplicate_key, 5 rows visible — prediction CONFIRMED",
       "interpretation": "学生独立预测正确且解释正确（无脚手架、无提示）：回滚→事务不可见→主键约束基于可见行→不冲突。这是最高强度学生证据：独立将可见性规则迁移到主键约束新场景，并给出正确因果解释。覆盖维度：技术理解与迁移 + 独立验证与质疑。预期计分 1.0-1.5（独立预测+解释+实验证实）。"
+    },
+    {
+      "id": "E20",
+      "status": "executed",
+      "executor": "student+agent",
+      "hypothesis": "学生批量预测（C19）：Q1 被删行不出现；Q2 数据完整；Q3 零行写入；Q4 精确结果；Q5 仅第 1 行保留。",
+      "command": "VM 实测 tests/batch_evidence.py（Q1-Q4）+ Q5 修正重跑（VARCHAR(16)）",
+      "output": "Q1: deleted id=1 appears? False, rows [[2,1.0],[3,1.0]] / Q2: max id [[9999]] / Q3: ok=False dimension_mismatch, rows [] / Q4: [[1,0.0],[3,1.0],[2,5.0]] / Q5 corrected: [[1,'committed']] only row 1 survives",
+      "interpretation": "5 题预测全部正确，实验全部证实。Q5 初跑异常系脚本 VARCHAR(8) 长度不足（'committed'=9 字符），修正为 VARCHAR(16) 后正常——产品正确拒绝了超长字符串（varchar_too_long），非 bug。学生解释均为脚手架辅助后复述（如实标注），每个实例预期 +0.5。"
     }
   ],
   "retrospective": "初始会话由 agent 主导实现，学生贡献集中在流程约束（编译门槛、进度板留痕）与技术选型（C++）。首次正式提测：性能与 Agent 评测均完成（按规则推断 MySQL case 准入全过），Agent 原始分 2.0，性能 E=1628.165077（平台显示口径与文档 0~1 公式不符，待确认）。反馈后验证会话：学生预测提交后强杀会部分保留（E9 被否证），拒绝理论解释、要求虚拟机实证（E10 日志解剖），未对 ann 实验作预测（E11 为 agent 演示）。已验证：编译通过、20 公开用例全过（本地进程与 Docker 镜像双形态）、崩溃恢复与边界自测过、Recall@10=0.985、精确查询 0.694s/1000、20k 行恢复中反复强杀零丢失。教训：(1) 公开样例的 ORDER BY 非投影列这类基础语义容易在解析器里漏掉，必须逐条对照 .result；(2) ANN 参数不能凭感觉，要用基准脚本量化召回；(3) 性能优化先量化瓶颈（拷贝/排序）再动手；(4) Dockerfile 构建脚本必须在容器环境实际跑通；(5) 多候选实现先同基准实测再决策，优化对准正式口径（exact）；重写分支前备份 archive + force-with-lease；(6) Agent 评分只认学生自身证据：预测被否证+要求实证是有效实例，但机制解释若由 agent 代述则不计学生理解——后续需要学生自己复述与迁移；(7) 第二次提测证实证据→得分换算：Agent 2.0→3.0 与新增实例吻合；代码未变时 E 波动 +14.4% 属测量方差，跨提交比较看排名而非单次 E 值；(8) 超内存 OOM 排查最终定位到测试环境（/tmp=tmpfs，shmem 不可回收）：下产品结论前先核验测试环境本身的文件系统与计量口径；fadvise 页缓存释放保留为 M 指标优化，2.1GB 数据集全量验证通过；(9) 提交协议不止报文格式，还包括数据目录等运行约定（官方驱动用 VECTORDB_DATA_DIR 环境变量）；他人踩坑文档是高效诊断来源——学生提供文档后对照官方源码定位并修复了疑似执行失败根因；(10) 第 3/4 次执行失败真根因＝漏提交 storage.h（git add 遗漏）：工作树全绿≠提交完整，Docker 从工作树构建也绿，唯有干净克隆+无缓存构建能复现平台路径——提交后必须做此验证，git add 后核对 git status 全部变更。",
