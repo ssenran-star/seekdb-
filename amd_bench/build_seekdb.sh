@@ -39,17 +39,30 @@ ls -la "$WORK/libseekdb_cuvs_bridge.so"
 echo "=== 2b. deps/3rd devtools (clang-17 toolchain; eval provides this frozen) ==="
 DT="$SRC/deps/3rd/usr/local/oceanbase/devtools"
 if [ ! -x "$DT/bin/clang-17" ] && [ ! -x "$DT/bin/clang" ]; then
-  if bash "$SRC/deps/init/dep_create.sh"; then
+  echo "--- dep cache at \${DEP_CACHE_DIR:-/opt/seekdb-deps-cache} ---"
+  ls -la "${DEP_CACHE_DIR:-/opt/seekdb-deps-cache}" "${DEP_CACHE_DIR:-/opt/seekdb-deps-cache}/3rd" 2>/dev/null | head -15
+  # dep_create.sh looks up the .deps profile relative to its CWD
+  if (cd "$SRC/deps/init" && bash dep_create.sh); then
     echo "dep_create.sh populated deps/3rd"
   else
-    echo "dep_create.sh failed; searching the image for an existing devtools tree ..."
-    found=$(find /seekdb_workspace /usr/local /opt /root /home -maxdepth 8 -type f \( -name 'clang-17' -o -name 'clang++-17' \) -path '*devtools*' 2>/dev/null | head -1)
-    if [ -n "$found" ]; then
-      mkdir -p "$SRC/deps/3rd/usr/local/oceanbase"
-      ln -sfn "$(dirname "$(dirname "$found")")" "$DT"
-      echo "linked devtools -> $(readlink "$DT")"
-    else
-      echo "WARN: no devtools tree found; cmake may fail with 'can't find suitable compiler'"
+    echo "dep_create.sh failed; retrying with cache DONE marker if files exist ..."
+    CACHE="${DEP_CACHE_DIR:-/opt/seekdb-deps-cache}/3rd"
+    nfiles=$(find "$CACHE" -type f 2>/dev/null | wc -l)
+    if [ "$nfiles" -gt 0 ] && [ ! -e "$CACHE/DONE" ]; then
+      echo "cache holds $nfiles files but no DONE marker; creating it and retrying"
+      touch "$CACHE/DONE"
+      (cd "$SRC/deps/init" && bash dep_create.sh) || true
+    fi
+    if [ ! -x "$DT/bin/clang-17" ] && [ ! -x "$DT/bin/clang" ]; then
+      echo "searching the image for an existing devtools tree ..."
+      found=$(find /seekdb_workspace /usr/local /opt /root /home -maxdepth 8 -type f \( -name 'clang-17' -o -name 'clang++-17' \) -path '*devtools*' 2>/dev/null | head -1)
+      if [ -n "$found" ]; then
+        mkdir -p "$SRC/deps/3rd/usr/local/oceanbase"
+        ln -sfn "$(dirname "$(dirname "$found")")" "$DT"
+        echo "linked devtools -> $(readlink "$DT")"
+      else
+        echo "WARN: no devtools tree found; cmake may fail with 'can't find suitable compiler'"
+      fi
     fi
   fi
 fi

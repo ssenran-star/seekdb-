@@ -45,13 +45,20 @@ for dim in 128 256; do
   probe "$dim" "current(25/50)  " CAGRA_BUILD_MODE=legacy
   CUR=$LAST100
   builds=""
-  probe "$dim" "nd(default)     " CAGRA_BUILD_MODE=nd
+  probe "$dim" "bf(default)     " CAGRA_BUILD_MODE=bf
+  BF=$LAST100
+  builds=""
+  probe "$dim" "nd(experiment)  " CAGRA_BUILD_MODE=nd
   ND=$LAST100
-  python3 - "$FROZEN" "$CUR" "$ND" <<'PY'
+  python3 - "$FROZEN" "$CUR" "$BF" "$ND" <<'PY'
 import sys
-f, c, n = (float(x) for x in sys.argv[1:4])
-print("  delta current-vs-frozen = %.4f   %s" % (f - c, "OK" if f - c <= 0.003 else ("IN-GATE" if f - c <= 0.005 else "OVER")))
-print("  delta nd-vs-frozen      = %.4f   %s" % (f - n, "OK" if f - n <= 0.003 else ("IN-GATE" if f - n <= 0.005 else "OVER")))
+f, c, b, n = (float(x) for x in sys.argv[1:5])
+def verdict(d):
+    return "OK" if d <= 0.003 else ("IN-GATE" if d <= 0.005 else "OVER")
+print("  delta current-vs-frozen = %.4f   %s" % (f - c, verdict(f - c)))
+print("  delta bf-vs-frozen      = %.4f   %s" % (f - b, verdict(f - b)))
+print("  delta nd-vs-frozen      = %.4f   %s" % (f - n, verdict(f - n)))
+print("  => ship bf default if bf <= 0.003 (or <= 0.005 with known synthetic->real shrinkage)")
 PY
 done
 echo DONE

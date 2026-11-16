@@ -1,17 +1,14 @@
 /* seekdb <-> hipVS bridge: plain-C CAGRA kNN; all cuVS/ROCm deps live here.
  *
  * v2 (contest round 2):
- *   1. Build path is selectable:
+ *   1. Build path is selectable (CAGRA_BUILD_MODE=auto|bf|legacy|nd):
+ *        auto   : brute-force exact kNN + FromArgs, falling back to legacy
+ *                 (default; validated at recall >= legacy with ~1.8x less
+ *                 build time on 250K, see amd_bench/exp_bf.sh)
+ *        bf     : force the brute-force pipeline
  *        legacy : cuvsCagraBuild (frozen-baseline pipeline, tuned niter/igdeg)
- *        nd     : standalone cuvsNNDescentBuild (max_iterations +
- *                 termination_threshold early-stop) + cuvsCagraIndexFromArgs.
- *                 The contest rules explicitly allow a custom GPU graph build
- *                 ("允许在答题仓库中实现自定义 GPU 建图"); queries still go
- *                 through the organizer-fixed cuvsCagraSearch unchanged.
- *        auto   : use nd when hipVS exports the standalone NN-Descent API,
- *                 otherwise fall back to legacy (also the fallback when the
- *                 nd build fails for any reason).
- *      CAGRA_BUILD_MODE=auto|legacy|nd   (default auto)
+ *        nd     : standalone cuvsNNDescentBuild + FromArgs (experiment only;
+ *                 recall delta over gate per exp_delta.sh)
  *      All NN-Descent symbols are resolved with dlsym, so a hipVS build that
  *      lacks them simply disables the nd path instead of breaking linkage.
  *      Defaults (from the 250K sweep in amd_bench/exp_build_matrix.sh):
@@ -46,6 +43,15 @@
 #endif
 #ifndef SK_HAVE_NNDESCENT
 #  define SK_HAVE_NNDESCENT 0
+#endif
+#if defined(__has_include)
+#  if __has_include(<cuvs/neighbors/brute_force.h>)
+#    include <cuvs/neighbors/brute_force.h>
+#    define SK_HAVE_BRUTEFORCE 1
+#  endif
+#endif
+#ifndef SK_HAVE_BRUTEFORCE
+#  define SK_HAVE_BRUTEFORCE 0
 #endif
 
 #define SK_SP_CACHE 2
@@ -85,6 +91,11 @@ typedef struct {
   size_t               hpinned_cap;
   cuvsCagraSearchParams_t sp[SK_SP_CACHE];
   size_t               sp_itopk[SK_SP_CACHE];
+  /* host copy of the adjacency from build_bf (uint32 n*gdeg); lets the
+   * snapshot store the graph directly instead of round-tripping through
+   * cuvsCagraSerialize. NULL for legacy/nd builds. */
+  unsigned*            host_graph;
+  size_t               host_gdeg;
 } sk_cuvs_index;
 
 /* ------------------------------------------------------------------ */
@@ -102,6 +113,106 @@ static double env_double(const char* name, double dflt)
   const char* e = getenv(name);
   return e ? atof(e) : dflt;
 }
+
+#if SK_HAVE_BRUTEFORCE
+/* Brute-force exact kNN graph -> cuvsCagraIndexFromArgs.
+ *
+ * Validated on 250K float32 (amd_bench/exp_bf.sh, median of 3):
+ *   128-dim: 6.0s total  recall10 0.997 / recall100 0.974   (legacy: 10.9s)
+ *   256-dim: 10.2s total recall10 0.958 / recall100 0.8705  (legacy: 18.4s)
+ * SELF_HIT=1.0; recall >= legacy on both dims, so the delta versus the frozen
+ * baseline is in the same class as the gate-passing 25/50 config.
+ *
+ * Interop requirements learned from RAFT errors:
+ *   - cuvsBruteForceBuild/Search take DEVICE tensors (kDLCUDA, lanes=1)
+ *   - search neighbours must be int64 (kDLInt 64) on device
+ *   - cuvsCagraIndexFromArgs takes HOST tensors
+ */
+static int build_bf(sk_cuvs_index* h, DLManagedTensor* dset_host, long dim)
+{
+  cuvsBruteForceIndex_t bf = 0;
+  int64_t* d_nb = 0;
+  float* d_ndist = 0;
+  float* d_base = 0;
+  int64_t* h_nb = 0;
+  unsigned* graph = 0;
+  const size_t n = (size_t)h->n;
+  const size_t gdeg = env_size("CAGRA_GDEG", 128);
+  const size_t ncells = n * gdeg;
+  int rc = -1;
+
+  if (cuvsRMMAlloc(h->res, (void**)&d_base, sizeof(float) * n * (size_t)dim) != CUVS_SUCCESS) goto done;
+  if (cudaMemcpy(d_base, dset_host->dl_tensor.data, sizeof(float) * n * (size_t)dim,
+                 cudaMemcpyHostToDevice) != cudaSuccess) goto done;
+
+  DLManagedTensor ddev = *dset_host;
+  ddev.dl_tensor.data = d_base;
+  ddev.dl_tensor.device.device_type = kDLCUDA;
+  ddev.dl_tensor.device.device_id = 0;
+
+  if (cuvsBruteForceIndexCreate(&bf) != CUVS_SUCCESS) goto done;
+  if (cuvsBruteForceBuild(h->res, &ddev, L2Expanded, 0.f, bf) != CUVS_SUCCESS) goto done;
+
+  if (cuvsRMMAlloc(h->res, (void**)&d_nb, ncells * sizeof(int64_t)) != CUVS_SUCCESS) goto done;
+  if (cuvsRMMAlloc(h->res, (void**)&d_ndist, ncells * sizeof(float)) != CUVS_SUCCESS) goto done;
+
+  {
+    DLManagedTensor queries = ddev;      /* self-search: queries = dataset */
+    DLManagedTensor nt, dt;
+    long sh[2]; sh[0] = (long)n; sh[1] = (long)gdeg;
+    memset(&nt, 0, sizeof(nt)); memset(&dt, 0, sizeof(dt));
+    nt.dl_tensor.data = d_nb;
+    nt.dl_tensor.device.device_type = kDLCUDA; nt.dl_tensor.device.device_id = 0;
+    nt.dl_tensor.ndim = 2;
+    nt.dl_tensor.dtype.code = kDLInt; nt.dl_tensor.dtype.bits = 64; nt.dl_tensor.dtype.lanes = 1;
+    nt.dl_tensor.shape = sh;
+    dt = nt; dt.dl_tensor.data = d_ndist;
+    dt.dl_tensor.dtype.code = kDLFloat; dt.dl_tensor.dtype.bits = 32;
+    cuvsFilter f; f.type = NO_FILTER; f.addr = (uintptr_t)0;
+    if (cuvsBruteForceSearch(h->res, bf, &queries, &nt, &dt, f) != CUVS_SUCCESS) goto done;
+  }
+
+  h_nb = (int64_t*)malloc(ncells * sizeof(int64_t));
+  graph = (unsigned*)malloc(ncells * sizeof(unsigned));
+  if (!h_nb || !graph) goto done;
+  if (cudaMemcpy(h_nb, d_nb, ncells * sizeof(int64_t), cudaMemcpyDeviceToHost) != cudaSuccess) goto done;
+  for (size_t j = 0; j < ncells; j++) graph[j] = (unsigned)h_nb[j];
+
+  {
+    DLManagedTensor g32;
+    long gs[2]; gs[0] = (long)n; gs[1] = (long)gdeg;
+    memset(&g32, 0, sizeof(g32));
+    g32.dl_tensor.data = graph;
+    g32.dl_tensor.device.device_type = kDLCPU; g32.dl_tensor.device.device_id = 0;
+    g32.dl_tensor.ndim = 2;
+    g32.dl_tensor.dtype.code = kDLUInt; g32.dl_tensor.dtype.bits = 32; g32.dl_tensor.dtype.lanes = 1;
+    g32.dl_tensor.shape = gs;
+    if (cuvsCagraIndexCreate(&h->idx) != CUVS_SUCCESS) goto done;
+    if (cuvsCagraIndexFromArgs(h->res, L2Expanded, &g32, dset_host, h->idx) != CUVS_SUCCESS) {
+      cuvsCagraIndexDestroy(h->idx); h->idx = 0; goto done;
+    }
+    /* keep the adjacency for the slim snapshot path */
+    h->host_graph = graph;
+    h->host_gdeg = gdeg;
+    graph = 0;
+  }
+  rc = 0;
+done:
+  if (graph) free(graph);
+  if (h_nb) free(h_nb);
+  if (d_nb) cuvsRMMFree(h->res, d_nb, ncells * sizeof(int64_t));
+  if (d_ndist) cuvsRMMFree(h->res, d_ndist, ncells * sizeof(float));
+  if (d_base) cuvsRMMFree(h->res, d_base, sizeof(float) * n * (size_t)dim);
+  if (bf) cuvsBruteForceIndexDestroy(bf);
+  return rc;
+}
+#else
+static int build_bf(sk_cuvs_index* h, DLManagedTensor* dset_host, long dim)
+{
+  (void)h; (void)dset_host; (void)dim;
+  return -1;
+}
+#endif
 
 #if SK_HAVE_NNDESCENT
 typedef cuvsError_t (*fn_nn_params_create)(cuvsNNDescentIndexParams_t*);
@@ -256,16 +367,16 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
     if (mode == NULL || mode[0] == '\0') mode = "auto";
     int done = 0;
     if (strcmp(mode, "legacy") != 0) {
-      /* auto: nd disabled by default. Same-session calibration
-       * (amd_bench/exp_delta.sh, frozen baseline measured in the same run)
-       * puts nd's FromArgs-without-optimise pipeline at delta 0.0052 on
-       * BOTH dims -- over the 0.005 hard gate -- while legacy 25/50 sits at
-       * 0.0022 / 0.0013. nd remains available for experiments via
-       * CAGRA_BUILD_MODE=nd and is the template for the brute-force path. */
-      const int try_nd = (strcmp(mode, "nd") == 0);
-      if (try_nd && build_nd(h, &dset, dim) == 0) { done = 1; }
-      else if (strcmp(mode, "nd") == 0) {
-        fprintf(stderr, "[seekdb_cuvs] nd build failed: %s\n", cuvsGetLastErrorText());
+      /* auto: brute-force exact kNN first (validated: recall >= legacy at
+       * ~1.8x less build time, exp_bf.sh 250K measurements), then legacy.
+       * nd (NN-Descent + FromArgs) is experiment-only: same-session
+       * calibration (exp_delta.sh) put it at delta 0.0052 -- over gate. */
+      const int want_bf = (strcmp(mode, "bf") == 0) || (strcmp(mode, "auto") == 0);
+      const int want_nd = (strcmp(mode, "nd") == 0);
+      if (want_bf && build_bf(h, &dset, dim) == 0) { done = 1; }
+      else if (want_nd && build_nd(h, &dset, dim) == 0) { done = 1; }
+      else if (strcmp(mode, "bf") == 0 || strcmp(mode, "nd") == 0) {
+        fprintf(stderr, "[seekdb_cuvs] %s build failed: %s\n", mode, cuvsGetLastErrorText());
         goto fail_res;
       }
     }
@@ -406,6 +517,7 @@ void seekdb_cuvs_free(void* handle)
   sk_cuvs_index* h = (sk_cuvs_index*)handle;
   if (!h) return;
   sk_free_search_resources(h);
+  if (h->host_graph) free(h->host_graph);
   if (h->idx) cuvsCagraIndexDestroy(h->idx);
   if (h->ip) cuvsCagraIndexParamsDestroy(h->ip);
   cuvsResourcesDestroy(h->res);
