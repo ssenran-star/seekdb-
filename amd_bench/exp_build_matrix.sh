@@ -26,13 +26,13 @@ export LD_LIBRARY_PATH=$WORK:/opt/hipvs/lib:/opt/rocm/lib
 
 # ---- prep: probe binary + datasets + exact top-100 ground truth ----
 if [ ! -x "$TEST" ]; then
-  [ -f "$WORK/bridge_test.c" ] || curl -fsSL -H "Authorization: Bearer ${TOKEN:-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}" \
+  [ -f "$WORK/bridge_test.c" ] || curl -fsSL \
     "https://api.github.com/repos/ssenran-star/seekdb-/contents/amd_bench/bridge_test.c?ref=${REF:-amd-cagra-submit}" \
     | python3 -c "import sys,json,base64;open('bridge_test.c','wb').write(base64.b64decode(json.load(sys.stdin)['content']))"
   gcc -O2 -o "$TEST" "$WORK/bridge_test.c" -ldl || { echo GCC_FAIL; exit 1; }
 fi
 if [ ! -f "$WORK/gen_data.py" ]; then
-  curl -fsSL -H "Authorization: Bearer ${TOKEN:-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}" \
+  curl -fsSL \
     "https://api.github.com/repos/ssenran-star/seekdb-/contents/amd_bench/gen_data.py?ref=${REF:-amd-cagra-submit}" \
     | python3 -c "import sys,json,base64;open('gen_data.py','wb').write(base64.b64decode(json.load(sys.stdin)['content']))"
 fi
@@ -44,13 +44,14 @@ for d in 128 256; do
 done
 
 echo "=== build round-2 bridge (default mode = auto) ==="
-TOKEN=${TOKEN:-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}
+# repo is public: anonymous api.github.com fetch (the old embedded PAT is dead
+# and a bad Authorization header makes GitHub reject even public reads)
 REF=${REF:-amd-cagra-submit}
 mkdir -p /tmp/bv_r2/tools/hipvs_bridge /tmp/bridge_r2
 cd /tmp/bv_r2
 for f in seekdb_cuvs_bridge.c seekdb_cuvs_bridge.h build.sh; do
-  [ -s "/workspace/work/hipvs_bridge/$f" ] && cp "/workspace/work/hipvs_bridge/$f" "tools/hipvs_bridge/$f" && continue
-  curl -fsSL -H "Authorization: Bearer $TOKEN" \
+  [ -s "$WORK/hipvs_bridge/$f" ] && cp "$WORK/hipvs_bridge/$f" "tools/hipvs_bridge/$f" && continue
+  curl -fsSL \
     "https://api.github.com/repos/ssenran-star/seekdb-/contents/tools/hipvs_bridge/$f?ref=$REF" \
     | python3 -c "import sys,json,base64;open('tools/hipvs_bridge/$f','wb').write(base64.b64decode(json.load(sys.stdin)['content']))" \
     || { echo "FETCH_FAIL $f"; exit 1; }

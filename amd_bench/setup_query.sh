@@ -2,13 +2,13 @@
 # Self-heal after instance reset: rebuild work dir, pull files, compile,
 # regenerate 256-dim data, then run the itopk/sw sweep.
 set -u
-TOKEN='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'
+# repo is public: fetch anonymously (embedded PAT expired)
 mkdir -p /workspace/work
 cd /workspace/work
 
 echo "=== 1. pull files ==="
 for f in bridge_test.c seekdb_cuvs_bridge_algo.c query_bench.c gen_data.py; do
-  curl -fsSL -H "Authorization: Bearer $TOKEN" \
+  curl -fsSL \
     "https://api.github.com/repos/ssenran-star/seekdb-/contents/amd_bench/$f?ref=amd-cagra-submit" \
     | python3 -c "import sys,json,base64;open('$f','wb').write(base64.b64decode(json.load(sys.stdin)['content']))"
 done

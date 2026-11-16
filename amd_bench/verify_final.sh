@@ -2,12 +2,12 @@
 # Verify the FINAL bridge (niter=70 default) via the official build.sh path,
 # then measure it directly to confirm niter=70 is what actually got built.
 set -u
-TOKEN='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'
+# repo is public: fetch anonymously (embedded PAT expired)
 
 mkdir -p /tmp/bv/tools/hipvs_bridge /tmp/bridge
 cd /tmp/bv
 for f in seekdb_cuvs_bridge.c seekdb_cuvs_bridge.h build.sh; do
-  curl -fsSL -H "Authorization: Bearer $TOKEN" \
+  curl -fsSL \
     "https://api.github.com/repos/ssenran-star/seekdb-/contents/tools/hipvs_bridge/$f?ref=amd-cagra-submit" \
     | python3 -c "import sys,json,base64;open('/tmp/bv/tools/hipvs_bridge/$f','wb').write(base64.b64decode(json.load(sys.stdin)['content']))"
 done
