@@ -65,6 +65,7 @@ int main(int argc, char **argv) {
   dataset.dl_tensor.device.device_type = kDLCPU;
   dataset.dl_tensor.ndim = 2;
   dataset.dl_tensor.dtype.code = kDLFloat; dataset.dl_tensor.dtype.bits = 32;
+  dataset.dl_tensor.dtype.lanes = 1;
   dataset.dl_tensor.shape = ds;
 
   /* ---- 1. brute-force build (attach dataset) ---- */
@@ -96,10 +97,12 @@ int main(int argc, char **argv) {
   neighbors.dl_tensor.ndim = 2;
   neighbors.dl_tensor.dtype.code = (nbits == 32) ? kDLUInt : kDLInt;
   neighbors.dl_tensor.dtype.bits = nbits;
+  neighbors.dl_tensor.dtype.lanes = 1;
   neighbors.dl_tensor.shape = nn;
   DLManagedTensor distances = neighbors;
   distances.dl_tensor.data = ndist;
   distances.dl_tensor.dtype.code = kDLFloat; distances.dl_tensor.dtype.bits = 32;
+  distances.dl_tensor.dtype.lanes = 1;
 
   cuvsFilter flt; flt.type = NO_FILTER; flt.addr = (uintptr_t)0;
   t0 = now_ms();
@@ -128,6 +131,7 @@ int main(int argc, char **argv) {
   g32.dl_tensor.device.device_type = kDLCPU;
   g32.dl_tensor.ndim = 2;
   g32.dl_tensor.dtype.code = kDLUInt; g32.dl_tensor.dtype.bits = 32;
+  g32.dl_tensor.dtype.lanes = 1;
   g32.dl_tensor.shape = gs;
 
   cuvsCagraIndex_t cidx = 0;
@@ -151,6 +155,7 @@ int main(int argc, char **argv) {
   memset(&qt, 0, sizeof(qt)); memset(&nt, 0, sizeof(nt)); memset(&dt, 0, sizeof(dt));
   qt.dl_tensor.data = qd; qt.dl_tensor.device.device_type = kDLCUDA;
   qt.dl_tensor.ndim = 2; qt.dl_tensor.dtype.code = kDLFloat; qt.dl_tensor.dtype.bits = 32;
+  qt.dl_tensor.dtype.lanes = 1;
   qt.dl_tensor.shape = qs;
   nt = qt; nt.dl_tensor.data = nd; nt.dl_tensor.dtype.code = kDLUInt; nt.dl_tensor.shape = nsh;
   dt = qt; dt.dl_tensor.data = dd; dt.dl_tensor.dtype.code = kDLFloat; dt.dl_tensor.shape = dsh;
