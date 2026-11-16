@@ -39,7 +39,7 @@ run() {  # run <dim> <label> <env...>
     GT_Q=100 GT_K=100 SNAP_PATH=/tmp/snap_probe.bin \
     "$WORK/bridge_test" "$SO" 250000 "$dim" 100 100 2>/dev/null | tail -1 \
     | grep -oE "BUILD_MS=[0-9.]+|SEARCH_MS=[0-9.]+|RECALL10=[0-9.]+|RECALLK=[0-9.]+" \
-    | tr '\n' ' ' | sed "s/^/$label /"
+    | tr '\n' ' ' | sed "s|^|${label} |"
   echo ""
 }
 run 128 "gdeg256/mi=25/th=1e-4" CAGRA_MAX_ITER=25 CAGRA_TERM_TH=0.0001

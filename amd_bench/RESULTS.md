@@ -409,3 +409,24 @@ sw 降档单查反而 3~10 倍变慢。itopk=512/sw=4 已是最优点，查询�
 2. 起 observer 后 `e2e_measure.sh` —— 把 F 的 8s 分解到扫描/持久化/首查
 3. 据 1/2 的输出实施：快照只存一份数据（graph 内嵌 dataset + 流里去掉原始向量，
    或反向），brute-force/FP16 建图
+
+---
+
+## 13. probe_api.sh 结果：三个关键 API 全部存在
+
+libcuvs_c.so 导出（评测同款固定 hipVS）：
+
+| API | 意义 |
+|---|---|
+| `cuvsBruteForceBuild/Search`（+Index/Serialize 全套） | **暴力精确 kNN 建图可行**：精确邻居质量 ≥ NN-Descent，且输出图直接在主机内存 |
+| `cuvsCagraIndexGetDataset/GetGraph/GetGraphDegree` | 快照去重可行：重建索引 / 提取图，砍掉 dataset 双写（650MB→390MB） |
+| `cagra_optimize.hpp`（C++） | RobustPrune 可补回（nd 路径丢的 0.002 召回、itopk 降档的希望） |
+| 另有 `cuvsCagraMerge/Extend`、`vamana.h`、`refine.h` | 后备牌 |
+
+dense-graph 检查被 sed bug 吞了（label 含 `/`），已修。
+
+**行动**：`amd_bench/bf_test.c` + `exp_bf.sh` 验证 bf 管线
+（BF build → BF self-search top-128 → FromArgs → CAGRA search recall）。
+判定标准：SELF_HIT≈1.0（dtype 正确）；RECALL ≥ legacy（128d 0.973 / 256d 0.868）；
+BF_BUILD+SEARCH+FROMARGS 总时长 < legacy（10.5s / 18s）。全过则 bf 成为新默认，
+快照改用主机图格式（下一 commit），查询侧再评估 itopk 降档。
