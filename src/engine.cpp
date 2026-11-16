@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <queue>
+#include <thread>
 
 #include "simd.h"
 
