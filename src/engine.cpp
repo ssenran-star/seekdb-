@@ -554,7 +554,13 @@ ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
         if (it.is_distance) {
             if (s.cols[idx].type != ValType::VECTOR)
                 throw DbError("type_mismatch", "L2_DISTANCE needs vector column");
-            item_qvec.push_back(parse_vector_literal(it.raw_vec, s.cols[idx].len));
+            if (!it.query_vec.empty()) {
+                if (it.query_vec.size() != s.cols[idx].len)
+                    throw DbError("dimension_mismatch", "vector dimension mismatch");
+                item_qvec.push_back(it.query_vec);
+            } else {
+                item_qvec.push_back(parse_vector_literal(it.raw_vec, s.cols[idx].len));
+            }
             names.push_back(it.alias.empty() ? "distance" : it.alias);
         } else {
             item_qvec.push_back({});

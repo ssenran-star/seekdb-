@@ -59,5 +59,7 @@ struct Statement {
 };
 
 Statement parse_sql(const std::string& sql);
+// Fast path for SELECT id, L2_DISTANCE(col,'[...]') [AS d] FROM t [WHERE c='v'] ORDER BY d LIMIT k;
+bool try_parse_l2_select(const std::string& sql, Statement& st);
 
 }  // namespace mvdb

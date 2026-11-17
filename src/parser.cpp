@@ -419,7 +419,144 @@ private:
 
 }  // namespace
 
+bool try_parse_l2_select(const std::string& sql, Statement& st) {
+    const char* s = sql.data();
+    const char* e = s + sql.size();
+    auto skip = [&]() {
+        while (s < e && is_ascii_space(*s)) ++s;
+    };
+    auto kw = [&](const char* k) -> bool {
+        skip();
+        const char* p = s;
+        for (; *k; ++k, ++p) {
+            if (p >= e) return false;
+            char c = *p;
+            if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 32);
+            if (c != *k) return false;
+        }
+        if (p < e) {
+            unsigned char u = static_cast<unsigned char>(*p);
+            if (std::isalnum(u) || *p == '_') return false;
+        }
+        s = p;
+        return true;
+    };
+    auto ident = [&](std::string& out) -> bool {
+        skip();
+        if (s >= e) return false;
+        unsigned char u = static_cast<unsigned char>(*s);
+        if (!(std::isalpha(u) || *s == '_')) return false;
+        const char* b = s++;
+        while (s < e) {
+            u = static_cast<unsigned char>(*s);
+            if (!(std::isalnum(u) || *s == '_')) break;
+            ++s;
+        }
+        out.assign(b, s);
+        return true;
+    };
+    auto punct = [&](char c) -> bool {
+        skip();
+        if (s < e && *s == c) {
+            ++s;
+            return true;
+        }
+        return false;
+    };
+
+    if (!kw("SELECT")) return false;
+    Statement tmp;
+    tmp.type = StmtType::SELECT;
+    SelectItem id_item;
+    if (!ident(id_item.column)) return false;
+    if (kw("AS")) {
+        if (!ident(id_item.alias)) return false;
+    }
+    tmp.items.push_back(std::move(id_item));
+    if (!punct(',')) return false;
+    if (!kw("L2_DISTANCE") || !punct('(')) return false;
+    SelectItem ditem;
+    ditem.is_distance = true;
+    if (!ident(ditem.column) || !punct(',')) return false;
+    skip();
+    if (s >= e || *s != '\'') return false;
+    ++s;
+    const char* vs = s;
+    while (s < e && *s != '\'') ++s;
+    if (s >= e) return false;
+    ditem.query_vec = parse_vector_literal(vs, s, 0);
+    ++s;
+    if (!punct(')')) return false;
+    if (kw("AS")) {
+        if (!ident(ditem.alias)) return false;
+    } else {
+        skip();
+        if (s < e) {
+            unsigned char u = static_cast<unsigned char>(*s);
+            if (std::isalpha(u) || *s == '_') {
+                const char* p = s;
+                const char* b = p++;
+                while (p < e) {
+                    u = static_cast<unsigned char>(*p);
+                    if (!(std::isalnum(u) || *p == '_')) break;
+                    ++p;
+                }
+                std::string maybe(b, p);
+                std::string up = maybe;
+                for (char& c : up) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+                if (up != "FROM" && up != "WHERE" && up != "ORDER" && up != "LIMIT") {
+                    ditem.alias = std::move(maybe);
+                    s = p;
+                }
+            }
+        }
+    }
+    tmp.items.push_back(std::move(ditem));
+    if (!kw("FROM") || !ident(tmp.table)) return false;
+    if (kw("WHERE")) {
+        Predicate pred;
+        if (!ident(pred.column)) return false;
+        skip();
+        if (s >= e || *s != '=') return false;
+        ++s;
+        pred.op = "=";
+        skip();
+        if (s >= e || *s != '\'') return false;
+        ++s;
+        const char* a = s;
+        while (s < e && *s != '\'') ++s;
+        if (s >= e) return false;
+        pred.literal.kind = Literal::STRING;
+        pred.literal.s.assign(a, s);
+        ++s;
+        tmp.where.push_back(std::move(pred));
+    }
+    if (!kw("ORDER") || !kw("BY")) return false;
+    tmp.has_order = true;
+    if (!ident(tmp.order_by)) return false;
+    if (kw("DESC")) return false;
+    kw("ASC");
+    if (!kw("LIMIT")) return false;
+    skip();
+    if (s >= e || *s < '0' || *s > '9') return false;
+    int64_t lim = 0;
+    while (s < e && *s >= '0' && *s <= '9') {
+        lim = lim * 10 + (*s - '0');
+        ++s;
+    }
+    tmp.has_limit = true;
+    tmp.limit = lim;
+    skip();
+    if (s < e && *s == ';') ++s;
+    skip();
+    if (s < e) return false;
+    st = std::move(tmp);
+    return true;
+}
+
 Statement parse_sql(const std::string& sql) {
+    Statement st;
+    if (try_parse_l2_select(sql, st)) return st;
     std::string t = trim(sql);
     if (t.empty()) throw DbError("syntax_error", "empty statement");
     Parser p(t);

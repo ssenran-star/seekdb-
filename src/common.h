@@ -81,9 +81,7 @@ inline bool is_ascii_space(char c) {
     return c == ' ' || c == '\t' || c == '\r' || c == '\n';
 }
 
-inline Vector parse_vector_literal(const std::string& raw, uint32_t dim) {
-    const char* s = raw.data();
-    const char* e = s + raw.size();
+inline Vector parse_vector_literal(const char* s, const char* e, uint32_t dim) {
     while (s < e && is_ascii_space(*s)) ++s;
     while (e > s && is_ascii_space(e[-1])) --e;
     if (e - s < 2 || *s != '[' || e[-1] != ']')
@@ -127,9 +125,13 @@ inline Vector parse_vector_literal(const std::string& raw, uint32_t dim) {
         if (*s != ',') throw DbError("invalid_vector", "non-numeric vector element");
         ++s;
     }
-    if (out.size() != dim)
+    if (dim != 0 && out.size() != dim)
         throw DbError("dimension_mismatch", "vector dimension mismatch");
     return out;
+}
+
+inline Vector parse_vector_literal(const std::string& raw, uint32_t dim) {
+    return parse_vector_literal(raw.data(), raw.data() + raw.size(), dim);
 }
 
 inline double l2_distance(const Vector& a, const Vector& b) {
