@@ -138,7 +138,12 @@ static int build_bf(sk_cuvs_index* h, DLManagedTensor* dset_host, long dim)
   unsigned* graph = 0;
   const size_t n = (size_t)h->n;
   const size_t gdeg = env_size("CAGRA_GDEG", 128);
-  const size_t ncells = n * gdeg;
+  /* Search one extra candidate per row and drop the self-loop (row i always
+   * lands in its own top-(gdeg+1) at distance 0). Keeping self would waste
+   * one of the gdeg edge slots; the exact gdeg non-self neighbours give a
+   * strictly better graph (recall margin for the 0.005 delta gate). */
+  const size_t k1 = gdeg + 1;
+  const size_t ncells = n * k1;
   int rc = -1;
 
   if (cuvsRMMAlloc(h->res, (void**)&d_base, sizeof(float) * n * (size_t)dim) != CUVS_SUCCESS) goto done;
@@ -159,7 +164,7 @@ static int build_bf(sk_cuvs_index* h, DLManagedTensor* dset_host, long dim)
   {
     DLManagedTensor queries = ddev;      /* self-search: queries = dataset */
     DLManagedTensor nt, dt;
-    long sh[2]; sh[0] = (long)n; sh[1] = (long)gdeg;
+    long sh[2]; sh[0] = (long)n; sh[1] = (long)k1;
     memset(&nt, 0, sizeof(nt)); memset(&dt, 0, sizeof(dt));
     nt.dl_tensor.data = d_nb;
     nt.dl_tensor.device.device_type = kDLCUDA; nt.dl_tensor.device.device_id = 0;
@@ -173,10 +178,19 @@ static int build_bf(sk_cuvs_index* h, DLManagedTensor* dset_host, long dim)
   }
 
   h_nb = (int64_t*)malloc(ncells * sizeof(int64_t));
-  graph = (unsigned*)malloc(ncells * sizeof(unsigned));
+  graph = (unsigned*)malloc(n * gdeg * sizeof(unsigned));
   if (!h_nb || !graph) goto done;
   if (cudaMemcpy(h_nb, d_nb, ncells * sizeof(int64_t), cudaMemcpyDeviceToHost) != cudaSuccess) goto done;
-  for (size_t j = 0; j < ncells; j++) graph[j] = (unsigned)h_nb[j];
+  /* drop the self-loop: keep the first gdeg neighbours that are not i */
+  for (size_t i = 0; i < n; i++) {
+    size_t out = 0;
+    for (size_t c = 0; c < k1 && out < gdeg; c++) {
+      int64_t nb = h_nb[i * k1 + c];
+      if (nb == (int64_t)i) continue;
+      graph[i * gdeg + out++] = (unsigned)nb;
+    }
+    while (out < gdeg) graph[i * gdeg + out++] = (unsigned)i; /* unreachable */
+  }
 
   {
     DLManagedTensor g32;

@@ -101,8 +101,11 @@ int main(int argc, char **argv) {
   double bf_build_ms = now_ms() - t0;
   printf("stage: bf_build OK (%.0f ms); bf_self_search ...\n", bf_build_ms);
 
-  /* ---- 2. self-search exact top-gdeg (queries = same device dataset) ---- */
-  size_t ncells = (size_t)n * gdeg;
+  /* ---- 2. self-search exact top-(gdeg+1) (queries = same device dataset) ----
+   * One extra candidate per row lets us drop the self-loop (row i is always
+   * its own nearest neighbour at distance 0) and keep gdeg real neighbours. */
+  size_t k1 = (size_t)gdeg + 1;
+  size_t ncells = (size_t)n * k1;
   size_t nb_bytes = ncells * (nbits == 32 ? 4 : 8);
   void *h_nb = malloc(nb_bytes);
   float *h_ndist = malloc(ncells * 4);
@@ -110,13 +113,13 @@ int main(int argc, char **argv) {
 
   DLManagedTensor queries = dataset;      /* device */
   DLManagedTensor n_h, d_h, n_d, d_d;
-  init_tensor(&n_h, h_nb, n, gdeg, 0, nb_code, nbits);
-  init_tensor(&d_h, h_ndist, n, gdeg, 0, kDLFloat, 32);
+  init_tensor(&n_h, h_nb, n, k1, 0, nb_code, nbits);
+  init_tensor(&d_h, h_ndist, n, k1, 0, kDLFloat, 32);
   void *d_nb = 0, *d_ndist = 0;
   cuvsRMMAlloc(res, &d_nb, nb_bytes);
   cuvsRMMAlloc(res, &d_ndist, ncells * 4);
-  init_tensor(&n_d, d_nb, n, gdeg, 1, nb_code, nbits);
-  init_tensor(&d_d, d_ndist, n, gdeg, 1, kDLFloat, 32);
+  init_tensor(&n_d, d_nb, n, k1, 1, nb_code, nbits);
+  init_tensor(&d_d, d_ndist, n, k1, 1, kDLFloat, 32);
 
   cuvsFilter flt; flt.type = NO_FILTER; flt.addr = (uintptr_t)0;
   t0 = now_ms();
@@ -136,18 +139,25 @@ int main(int argc, char **argv) {
   printf("stage: bf_self_search OK (%.0f ms, out=%s); convert+fromargs ...\n",
          bf_search_ms, used_host_out ? "host" : "device");
 
-  /* self-hit sanity: row i's top-1 neighbour must be i */
+  /* self-hit sanity: row i's top-1 neighbour (of the raw k1 search) must be i */
   long self_hit = 0;
   for (int i = 0; i < n; i++) {
-    long long first = (nbits == 32) ? ((unsigned *)h_nb)[(size_t)i * gdeg]
-                                    : ((long long *)h_nb)[(size_t)i * gdeg];
+    long long first = (nbits == 32) ? ((unsigned *)h_nb)[(size_t)i * k1]
+                                    : ((long long *)h_nb)[(size_t)i * k1];
     if (first == i) self_hit++;
   }
 
-  /* ---- 3. convert to uint32 host graph + FromArgs (host tensors) ---- */
-  unsigned *graph = malloc(ncells * 4);
-  for (size_t j = 0; j < ncells; j++) {
-    graph[j] = (nbits == 32) ? ((unsigned *)h_nb)[j] : (unsigned)((long long *)h_nb)[j];
+  /* ---- 3. convert to uint32 host graph (drop self) + FromArgs (host tensors) ---- */
+  unsigned *graph = malloc((size_t)n * gdeg * 4);
+  for (size_t i = 0; i < (size_t)n; i++) {
+    size_t out = 0;
+    for (size_t c = 0; c < k1 && out < (size_t)gdeg; c++) {
+      long long nb = (nbits == 32) ? (long long)((unsigned *)h_nb)[i * k1 + c]
+                                   : ((long long *)h_nb)[i * k1 + c];
+      if (nb == (long long)i) continue;
+      graph[i * gdeg + out++] = (unsigned)nb;
+    }
+    while (out < (size_t)gdeg) graph[i * gdeg + out++] = (unsigned)i; /* unreachable */
   }
   DLManagedTensor g32, dset_host;
   init_tensor(&g32, graph, n, gdeg, 0, kDLUInt, 32);

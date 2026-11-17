@@ -453,3 +453,47 @@ bf 首跑输出为空（疑似某阶段崩溃）：bf_test.c 已加阶段打印 
 e2e 报 error 1235 `lib is not supported`：实例跑的是镜像原装 seekdb（不带
 CUVS 支持），SQL 端到端必须先 `build_seekdb.sh`（tarball 拉源码 + 赛题固定
 cmake 流程）再 `start_seekdb.sh`（已改为优先启动自编译 observer）。
+
+---
+
+## 15. exp_delta go/no-go（bf IN-GATE）与自环剔除修订
+
+### 15.1 同场次校准结果（exp_delta v2，250K，中位 5 次）
+
+| 维度 | frozen(100/256) | current(25/50) | **bf(default)** | nd(experiment) |
+|---|---|---|---|---|
+| 128d recall@100 | 0.9756 | 0.9728 (Δ0.0028 OK) | 0.9711 (**Δ0.0045 IN-GATE**) | 0.9716 (Δ0.0040 IN-GATE) |
+| 256d recall@100 | 0.8719 | 0.8687 (Δ0.0032 IN-GATE) | 0.8684 (**Δ0.0035 IN-GATE**) | 0.8669 (Δ0.0050 OVER) |
+| 128d build_ms | 42432 | 11032 | 8819 | 8893 |
+| 256d build_ms | 41221 | 18432 | 18923 | 16852 |
+
+**判定**：bf 两维均在 0.005 门槛内（0.0045/0.0035），但 128d 贴线。此前 exp_bf
+"delta≈0.0016" 的算法不成立——exp_bf 没有同场次冻结基线（跨场次比较无效），
+**exp_delta 是唯一有效口径**。nd 维持出局。
+
+### 15.2 计时口径矛盾的解释
+
+exp_bf 报 bf 管线 6.0s/10.2s，exp_delta 报 8819/18923ms，原因有二：
+1. **测量边界**：bf_test 的分段计时不含 cuvsResourcesCreate（HIP 上下文初始化
+   1-2s）与数据集 H2D 上传；bridge_test 的 BUILD_MS 包含（它调 seekdb_cuvs_build 全程）。
+2. **热状态偏差**：exp_delta v2 每个配置连跑 5 次，bf 排在 frozen(42s×5)+current(11s×5)
+   之后，GPU 已持续满载 4-5 分钟；exp_bf 是冷启动首跑。256d 的 8.7s 差距主要是
+   这个。**exp_delta v3 已改为四配置轮转交错**，消除该偏差。
+
+### 15.3 自环剔除（本 commit）
+
+bf_test 与 bridge build_bf 均确认 SELF_HIT=1.0：每行第 0 列是自身（距离 0）。
+原转换把 self 一并写入图，**128 条边浪费 1 条**。现改为自检索 top-(gdeg+1)、
+转换时跳过 self、保留 128 条真邻居——严格更优的图，预期找回 0.001~0.003 召回
+余量，把 bf 的 delta 压进 0.003 安全线。
+
+### 15.4 下一步（冲门槛内余量 + 3.0×）
+
+1. `bash exp_delta.sh`（v3）—— 验证自环剔除后 bf delta ≤0.003 → **直接提测**。
+2. `bash dump_hipvs_headers.sh` —— 打印 cagra_optimize.hpp / index_wrappers /
+   core interop 签名 + libcuvs 导出的 optimize 符号；据此写 C++ 封装把
+   **RobustPrune 补回**（bf 精确 kNN → optimize 剪枝 → FromArgs）。exp_delta 显示
+   legacy+prune 比 exact-no-prune 高 0.003~0.004 召回，补回后 delta 可望 ≤0.001，
+   且为 itopk 降档（查询分）打开通路。
+3. `bash build_seekdb.sh` —— devtools 四级引导已修（缓存深层挖掘→rpm 解包→
+   dep_create→ROCm shim），通了即可跑 e2e/qps 拿 F 分解。
