@@ -28,6 +28,7 @@
 #include "sql/dtl/ob_dtl_fc_server.h"
 #include "observer/ob_srv_network_frame.h"
 #include "lib/worker.h"
+#include "lib/cpu/ob_cpu_topology.h"
 #include "storage/ob_file_system_router.h"
 #include "share/rc/ob_server_module_init_ctx.h"
 #include "sql/engine/px/ob_px_worker.h"
@@ -90,7 +91,15 @@ int ObPxPools::create_pool(int64_t group_id, ObPxPool *&pool)
 
         pool->set_group_id(group_id);
         pool->set_run_wrapper(share::server_runtime());
-        if (OB_FAIL(pool->start())) {
+        // lib::Threads defaults to a single thread, so the PX pool used to run
+        // with exactly one "PX_G<id>" worker.  Every PX job queued behind that
+        // one worker, which serialized independent jobs: one
+        // ALTER ... ADD FULLTEXT INDEX submits up to four aux-table builds and
+        // they all ran one after another no matter how large `parallelism` was
+        // or how many cores were idle.  Size the pool from the CPU count.
+        int64_t px_thread_cnt = MIN(MAX(common::get_cpu_count(), 4L), 16L);
+        if (OB_FAIL(pool->set_thread_count(px_thread_cnt))) {
+        } else if (OB_FAIL(pool->start())) {
         } else if (OB_FAIL(pool_map_.set_refactored(group_id, pool))) {
         }
       }
