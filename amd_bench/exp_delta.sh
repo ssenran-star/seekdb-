@@ -17,8 +17,19 @@ SO=${SO:-/tmp/bridge_r2/libseekdb_cuvs_bridge.so}
 RUNS=${RUNS:-5}
 cd "$WORK"
 export LD_LIBRARY_PATH=$WORK:/opt/hipvs/lib:/opt/rocm/lib
-[ -f "$SO" ] || { echo "bridge .so missing at $SO (run boot_r2.sh first)"; exit 1; }
+if [ ! -f "$SO" ]; then
+  echo "bridge .so missing at $SO -- building from $WORK/hipvs_bridge"
+  mkdir -p "$(dirname "$SO")"
+  HIPVS_ROOT=/opt/hipvs ROCM_ROOT=/opt/rocm bash "$WORK/hipvs_bridge/build.sh" "$SO" || exit 1
+fi
 [ -x "$WORK/bridge_test" ] || gcc -O2 -o "$WORK/bridge_test" "$WORK/bridge_test.c" -ldl || exit 1
+# datasets: generate if missing (instance resets wipe them)
+for dim in 128 256; do
+  if [ ! -f "$WORK/d$dim/base.f32" ]; then
+    echo "generating d$dim ..."
+    python3 "$WORK/gen_data.py" --n 250000 --dim "$dim" --nq 100 --topk 100 --out "$WORK/d$dim" || exit 1
+  fi
+done
 
 median() { printf '%s\n' "$@" | sort -n | awk '{a[NR]=$1} END{print a[int((NR+1)/2)]}'; }
 

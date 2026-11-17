@@ -30,6 +30,7 @@ echo "=== 1. fetch bench tools (anonymous, repo is public) ==="
 # scripts/sources always refresh: they change between rounds and a stale copy
 # silently produces wrong experiments (only the heavy datasets are cached)
 for f in exp_build_matrix.sh exp_query.sh exp_delta.sh exp_bf.sh probe_api.sh \
+         exp_opt.sh opt_test.cpp \
          qps_measure.sh e2e_measure.sh start_seekdb.sh build_seekdb.sh \
          dump_hipvs_headers.sh \
          bridge_test.c bf_test.c query_bench.c gen_data.py seekdb_cuvs_bridge_algo.c; do

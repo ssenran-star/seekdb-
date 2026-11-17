@@ -38,17 +38,31 @@ ls -la "$WORK/libseekdb_cuvs_bridge.so"
 
 echo "=== 2b. deps/3rd devtools (clang-17 toolchain; eval provides this frozen) ==="
 DT="$SRC/deps/3rd/usr/local/oceanbase/devtools"
+JEM="$SRC/deps/3rd/usr/local/oceanbase/deps/devel/lib/libjemalloc_pic.a"
 CACHE_ROOT="${DEP_CACHE_DIR:-/opt/seekdb-deps-cache}"
-if [ ! -x "$DT/bin/clang-17" ] && [ ! -x "$DT/bin/clang" ]; then
+need_deps=0
+{ [ ! -x "$DT/bin/clang-17" ] && [ ! -x "$DT/bin/clang" ]; } && need_deps=1
+[ -f "$JEM" ] || need_deps=1
+if [ "$need_deps" = 1 ]; then
   echo "--- dep cache at $CACHE_ROOT ---"
   find "$CACHE_ROOT" -maxdepth 3 2>/dev/null | head -20 || true
-  # (a) cache may already hold an extracted devtools tree under a hash dir
-  found=$(find "$CACHE_ROOT" -maxdepth 10 -type f -name 'clang-17' -path '*devtools*bin*' 2>/dev/null | head -1; true)
-  if [ -n "$found" ]; then
-    DT_SRC=$(dirname "$(dirname "$found")")
-    mkdir -p "$SRC/deps/3rd/usr/local/oceanbase"
-    ln -sfn "$DT_SRC" "$DT"
-    echo "linked devtools from cache -> $DT_SRC"
+  # (a) cache may hold a complete extracted 3rd tree under a hash dir --
+  # link the WHOLE tree (devtools AND deps/devel e.g. libjemalloc_pic.a)
+  cache3rd=""
+  for d in "$CACHE_ROOT"/*/3rd; do
+    if [ -x "$d/usr/local/oceanbase/devtools/bin/clang-17" ] || [ -x "$d/usr/local/oceanbase/devtools/bin/clang" ]; then
+      cache3rd="$d"
+      break
+    fi
+  done
+  if [ -n "$cache3rd" ]; then
+    rm -rf "$SRC/deps/3rd"
+    mkdir -p "$SRC/deps"
+    ln -sfn "$cache3rd" "$SRC/deps/3rd"
+    echo "linked whole deps/3rd -> $cache3rd"
+    ls "$SRC/deps/3rd/usr/local/oceanbase" 2>/dev/null || true
+    [ -f "$SRC/deps/3rd/usr/local/oceanbase/deps/devel/lib/libjemalloc_pic.a" ] \
+      && echo "jemalloc OK" || echo "WARN: jemalloc still missing under the linked tree"
   fi
 fi
 if [ ! -x "$DT/bin/clang-17" ] && [ ! -x "$DT/bin/clang" ]; then

@@ -497,3 +497,33 @@ bf_test 与 bridge build_bf 均确认 SELF_HIT=1.0：每行第 0 列是自身（
    且为 itopk 降档（查询分）打开通路。
 3. `bash build_seekdb.sh` —— devtools 四级引导已修（缓存深层挖掘→rpm 解包→
    dep_create→ROCm shim），通了即可跑 e2e/qps 拿 F 分解。
+
+---
+
+## 16. optimize 签名到手 + 三项修复（2026-11-17 晨）
+
+### 16.1 dump_hipvs_headers 关键输出
+
+```cpp
+namespace cuvs::neighbors::cagra::helpers {
+  void optimize(raft::resources const& handle,
+                raft::host_matrix_view<uint32_t,int64_t,raft::row_major> knn_graph,
+                raft::host_matrix_view<uint32_t,int64_t,raft::row_major> new_graph);
+}
+```
+
+- **host uint32 双张量**（不是 int64/不是 device）；官方示例直接 make_host_matrix + view。
+- `libcuvs.so` 导出 `cuvs::neighbors::cagra::helpers::optimize`（T 符号，实测在）。
+- raft 头文件位置未知（/opt/hipvs/include/raft 不存在）——dump §7 已加全局 find，
+  结果决定 opt_test 能否编译。
+
+### 16.2 本 commit 修复
+
+| 问题 | 修复 |
+|---|---|
+| exp_delta 死于 SO 缺失（boot 不再预建 /tmp/bridge_r2） | 缺失时用 $WORK/hipvs_bridge/build.sh 自建；数据集缺失自动 gen_data |
+| build_seekdb 死于 libjemalloc_pic.a（只链了 devtools 子目录） | 改为整棵缓存 3rd 树软链（含 deps/devel）；守卫加 jemalloc 检查（上轮已链过 devtools 会跳过旧逻辑） |
+| optimize 探针 | opt_test.cpp + exp_opt.sh：bf kNN(256) → helpers::optimize → 128 度图 → FromArgs → 召回，同场次对照 noopt（截断） |
+
+**判定规则（exp_opt）**：OPT_RK ≥ NOOPT_RK+0.002 且 OPT_MS ≲3s → build_bf 采纳
+pruned 图（delta 预期 ≤0.001，双保险）；否则维持 self-drop 版 bf。

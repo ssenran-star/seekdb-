@@ -43,4 +43,19 @@ done
 echo ""
 echo "=== 6. cagra.h FromArgs + optimize hints ==="
 grep -n "optimize\|FromArgs\|prune" "$INC/cuvs/neighbors/cagra.h" 2>/dev/null | head -15
+
+echo ""
+echo "=== 7. raft headers + resources ABI (needed by the optimize wrapper) ==="
+echo "--- raft header search ---"
+find /opt/hipvs /opt/rocm /usr/include /usr/local/include -maxdepth 6 \
+  \( -name 'host_mdspan.hpp' -o -name 'device_mdspan.hpp' -o -path '*raft/core/resources.hpp' \) \
+  2>/dev/null | head -10
+ls "$INC/raft" 2>/dev/null | head -5
+ls /opt/hipvs/ 2>/dev/null
+echo "--- cuvsResources_t typedef ---"
+grep -n "cuvsResources_t\|typedef" "$INC/cuvs/core/c_api.h" | head -12
+echo "--- raft::resources ctor/dtor exported from libcuvs.so? ---"
+nm -D /opt/hipvs/lib/libcuvs.so 2>/dev/null | grep -E 'raft9resourcesC|raft16device_resourcesC|raft9resourcesD' | head -8
+echo "--- make_host_matrix_view / helpers::optimize mangled ---"
+nm -D /opt/hipvs/lib/libcuvs.so 2>/dev/null | grep -E 'make_host_matrix_view|helpers8optimize' | head -6
 echo "DONE"
