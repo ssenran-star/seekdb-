@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# exp_delta.sh v3 (2026-11-17 09:15) -- interleaved same-session delta calibration
+# exp_delta.sh v3.1 (2026-11-17 11:35) -- interleaved + per-run progress same-session delta calibration
 # The gate is candidate-vs-frozen-baseline in the SAME round. v2 ran each
 # config's RUNS back to back, so later configs (bf) ran on a heat-soaked GPU
 # while frozen ran cold -- that biased build_ms against bf. v3 round-robins
@@ -11,7 +11,7 @@
 #   nd      = CAGRA_BUILD_MODE=nd     (experiment only)
 # Gate = 0.005 drop vs frozen on recall@100; aim <= 0.003.
 set -u
-echo "exp_delta.sh v3 (2026-11-17 09:15) -- interleaved"
+echo "exp_delta.sh v3.1 (2026-11-17 11:35) -- interleaved + per-run progress"
 WORK=${WORK:-/workspace/work}
 SO=${SO:-/tmp/bridge_r2/libseekdb_cuvs_bridge.so}
 RUNS=${RUNS:-5}
@@ -60,10 +60,12 @@ for dim in 128 256; do
   B=("" "" "" ""); R=("" "" "" ""); R10=("" "" "" "")
   for i in $(seq 1 "$RUNS"); do
     for idx in 0 1 2 3; do
+      echo "  [$(date +%T)] dim=$dim run=$i/$RUNS cfg=${LABELS[$idx]} starting (frozen ~45s, silent until done)"
       line=$(run_one "$dim" "$idx")
       b=$(echo "$line" | cut -d' ' -f1); r=$(echo "$line" | cut -d' ' -f3); r10=$(echo "$line" | cut -d' ' -f2)
       if [ -n "$b" ]; then
         B[$idx]="${B[$idx]} $b"; R[$idx]="${R[$idx]} $r"; R10[$idx]="${R10[$idx]} $r10"
+        echo "  [$(date +%T)] -> build_ms=$b recall100=$r"
       else
         echo "  !! failed run $i cfg=$idx"
       fi

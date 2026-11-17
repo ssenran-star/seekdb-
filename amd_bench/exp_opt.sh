@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# exp_opt.sh v1 (2026-11-17 09:40) -- RobustPrune probe for the bf pipeline
+# exp_opt.sh v1.1 (2026-11-17 11:35) -- RobustPrune probe for the bf pipeline
 # bf exact kNN -> cagra::helpers::optimize -> FromArgs -> recall, with a
 # no-optimize reference in the same run. The gate for adopting optimize:
 #   OPT_RK >= NOOPT_RK + 0.002   (visible recall win)
 # and OPT_MS should stay under ~3s for 250K (it runs inside the timed build).
 set -u
-echo "exp_opt.sh v1 (2026-11-17 09:40)"
+echo "exp_opt.sh v1.1 (2026-11-17 11:35)"
 WORK=${WORK:-/workspace/work}
 cd "$WORK"
 export LD_LIBRARY_PATH=$WORK:/opt/hipvs/lib:/opt/rocm/lib
@@ -44,6 +44,7 @@ for dim in 128 256; do
   echo ""
   echo "==================== dim=$dim ===================="
   for run in 1 2 3; do
+    echo "  [$(date +%T)] dim=$dim run=$run/3 starting (bf search ~10s, optimize up to 7min w/ timeout)"
     env BASE_F32="$data/base.f32" QUERY_F32="$data/query.f32" GT_I32="$data/gt.i32" \
         GT_Q=100 GT_K=100 \
         timeout --kill-after=30 420 ./opt_test 250000 "$dim" 256 128 2>&1 | tail -2
