@@ -707,3 +707,45 @@ SIFT 已过）。
 
 **预期分**：SIFT bf ~3×、Hidden legacy25/50 ~2.2× → 综合 ≈2.5× → 构建 ~11.6，
 总分 **≈15.6**（放弃 Hidden 端的 14 分冲刺，换确定过门槛）。
+
+---
+
+## 22. hidden250k:query_regression 分析与修复（11-17 18:15）
+
+提测 1b0442d0c：**gates failed: hidden250k:query_regression**（recall ✓、显存 ✓、
+SIFT 查询 ✓、GPU 建图 ✓——只剩 Hidden 查询吞吐 < 同轮基线 90%）。
+
+### 22.1 三轮对照（唯一变量是查询实现）
+
+| commit | hidden 建图 | 查询实现 | hidden 查询门槛 |
+|---|---|---|---|
+| c683c70dd | legacy 25/50 | 逐调用（RMM 分配+SearchParamsCreate+cudaMemcpyDefault）| **过**（query=1.004×）|
+| bfbfb69e9 | bf 精确图 | 常驻缓冲+pinned+参数缓存 | **过**（bf 图游走快）|
+| 1b0442d0c | legacy 25/50 | 常驻缓冲+pinned+参数缓存 | **挂**（<0.90×）|
+
+建图侧 legacy 25/50 与 c683c70dd 逐位同参（gdeg=128/igdeg=128/niter=50，
+评测不设 CAGRA_* 环境变量），adaptor 也未动。**唯一差异是 seekdb_cuvs_search
+的实现形态**。假设：nq=1 单行查询下 pinned 暂存的 memcpy + 缓存查找在
+「legacy 图搜索本来就慢（itopk=512 游走 3.65ms/查打底）」的场景把每查开销
+推过 10% 红线；bf 图游走快（~0.2ms/查批量摊薄），吸收了同样的开销所以 bfbfb69e9
+过线。另有可能是评测轮间噪声（c683c70dd 的 1.004× 余量仅 11%）。
+
+### 22.2 修复：查询路径回退到 c683c70dd 原样
+
+`seekdb_cuvs_search` 恢复逐调用形态——RMM 逐查分配、SearchParamsCreate 逐查、
+cudaMemcpyDefault、itopk=max(topk*4,512)/sw=4 参数规则完全不变。删除常驻缓冲/
+pinned 暂存/参数缓存（sk_search_ensure / sk_search_params / sk_host_alloc 等）。
+**这是真实过门槛（query=1.004×）的代码原样**，与 legacy 25/50 组合是实证过的
+安全配对。文件头注释加了「禁止单方面优化该函数」的警示。
+
+### 22.3 风险与后手
+
+- 若回退后 query 仍 <0.90：说明是评测轮噪声/基线漂移，而非实现差异。届时的
+  唯一增强杠杆是让 hidden 图游走变快：(a) bf+RobustPrune（exp_opt 探针，raft
+  头缺失待解）；(b) hidden 改 niter=60（图更收敛、召回 Δ0.0006 更富余，但建图
+  +13%）；(c) adaptor 每查 pthread_create(32MB 栈) → 常驻 worker（full adaptor
+  5 个编译错误未修）。
+- **不要**再把常驻缓冲优化加回查询路径——它在 bf 图上收益 ≈0（RMM 有池化），
+  在 legacy 图上有实测嫌疑，风险收益比为负。
+
+**预期分**（同 §21）：≈15.6。查询分 0（itopk 死路）。
