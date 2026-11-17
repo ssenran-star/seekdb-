@@ -84,7 +84,6 @@ void Engine::run_with_helper(std::function<void()> helper, std::function<void()>
 
 void Engine::open(const std::string& data_dir) {
     log_.open(data_dir);
-    start_helper();
     struct TxnInfo {
         bool data = false;
         bool commit = false;
