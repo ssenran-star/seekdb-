@@ -122,6 +122,7 @@ public:
     uint64_t append(uint8_t type, uint64_t txn, uint32_t stmt, const std::string& payload);
     void sync();
     void drop_cache();
+    void drop_upto(uint64_t off);
     void scan(const std::function<void(const RecordView&)>& cb);
     RecordView read_at(uint64_t offset);
     void close();
