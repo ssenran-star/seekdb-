@@ -17,8 +17,8 @@ SO=${SO:-/tmp/bridge_r2/libseekdb_cuvs_bridge.so}
 RUNS=${RUNS:-5}
 cd "$WORK"
 export LD_LIBRARY_PATH=$WORK:/opt/hipvs/lib:/opt/rocm/lib
-if [ ! -f "$SO" ]; then
-  echo "bridge .so missing at $SO -- building from $WORK/hipvs_bridge"
+if [ ! -f "$SO" ] || [ "$WORK/hipvs_bridge/seekdb_cuvs_bridge.c" -nt "$SO" ]; then
+  echo "building bridge -> $SO (missing or source newer)"
   mkdir -p "$(dirname "$SO")"
   HIPVS_ROOT=/opt/hipvs ROCM_ROOT=/opt/rocm bash "$WORK/hipvs_bridge/build.sh" "$SO" || exit 1
 fi
