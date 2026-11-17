@@ -241,7 +241,10 @@ void Log::close() {
         rbuf_off_ = 0;
         rbuf_.clear();
         ::close(fd_);
-        
+        fd_ = -1;
+    }
+}
+
 PackedScan::~PackedScan() { close(); }
 
 void PackedScan::close() {
