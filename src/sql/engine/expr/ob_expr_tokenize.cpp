@@ -19,7 +19,6 @@
 #include "lib/alloc/alloc_struct.h"
 #include "lib/allocator/page_arena.h"
 #include "lib/charset/ob_charset.h"
-#include "lib/lock/ob_spin_lock.h"
 #include "common/json_type/ob_json_base.h"
 #include "common/json_type/ob_json_tree.h"
 #include "lib/ob_errno.h"
@@ -40,101 +39,6 @@ namespace oceanbase
 {
 namespace sql
 {
-namespace
-{
-// A small bounded memo cache for the deterministic tokenize() scalar function.
-// For the same (parser, options, text) the function always produces the same
-// JSON document, and hot-path callers (index maintenance, generated columns,
-// repeated probes) keep feeding the very same documents. Remembering the packed
-// JSON turns the repeated call into a single memory copy instead of running the
-// whole dictionary lookup + JSON serialization pipeline again.
-class ObTokenizeResultCache
-{
-public:
-  static const int64_t SLOT_CNT = 64;
-  struct Entry
-  {
-    uint64_t hash_;
-    int64_t text_len_;
-    int64_t json_len_;
-    char *text_;
-    char *json_;
-  };
-public:
-  static ObTokenizeResultCache &instance()
-  {
-    static ObTokenizeResultCache cache;
-    return cache;
-  }
-  // The copy happens under the lock: a concurrent put() may free the slot.
-  bool get(const char *text, const int64_t text_len, const uint64_t hash,
-           common::ObIAllocator &allocator, ObString &json)
-  {
-    bool hit = false;
-    common::ObSpinLockGuard guard(lock_);
-    Entry &e = entries_[slot_of(hash)];
-    if (e.hash_ == hash && e.text_len_ == text_len && nullptr != e.text_ &&
-        nullptr != text && 0 == MEMCMP(e.text_, text, text_len)) {
-      char *buf = static_cast<char *>(allocator.alloc(e.json_len_));
-      if (nullptr != buf) {
-        MEMCPY(buf, e.json_, e.json_len_);
-        json.assign_ptr(buf, static_cast<int32_t>(e.json_len_));
-        hit = true;
-      }
-    }
-    return hit;
-  }
-  void put(const char *text, const int64_t text_len, const uint64_t hash,
-           const char *json, const int64_t json_len)
-  {
-    common::ObSpinLockGuard guard(lock_);
-    Entry &e = entries_[slot_of(hash)];
-    char *new_text = static_cast<char *>(ob_malloc(text_len, ObMemAttr("TokCache")));
-    char *new_json = static_cast<char *>(ob_malloc(json_len, ObMemAttr("TokCache")));
-    if (OB_ISNULL(new_text) || OB_ISNULL(new_json)) {
-      if (nullptr != new_text) {
-        ob_free(new_text);
-      }
-      if (nullptr != new_json) {
-        ob_free(new_json);
-      }
-    } else {
-      MEMCPY(new_text, text, text_len);
-      MEMCPY(new_json, json, json_len);
-      if (nullptr != e.text_) {
-        ob_free(e.text_);
-      }
-      if (nullptr != e.json_) {
-        ob_free(e.json_);
-      }
-      e.hash_ = hash;
-      e.text_len_ = text_len;
-      e.json_ = new_json;
-      e.json_len_ = json_len;
-      e.text_ = new_text;
-    }
-  }
-private:
-  ObTokenizeResultCache()
-  {
-    MEMSET(entries_, 0, sizeof(entries_));
-  }
-  static int64_t slot_of(const uint64_t hash) { return static_cast<int64_t>(hash & (SLOT_CNT - 1)); }
-private:
-  Entry entries_[SLOT_CNT];
-  common::ObSpinLock lock_;
-};
-
-uint64_t tokenize_hash_append(const char *buf, const int64_t len, uint64_t hash)
-{
-  for (int64_t i = 0; i < len; ++i) {
-    hash ^= static_cast<uint64_t>(static_cast<unsigned char>(buf[i]));
-    hash *= 1099511628211ULL;
-  }
-  return hash;
-}
-} // anonymous namespace
-
 ObExprTokenize::ObExprTokenize(common::ObIAllocator &alloc)
     : ObStringExprOperator(alloc,
                            T_FUN_TOKENIZE,
@@ -160,40 +64,12 @@ int ObExprTokenize::eval_tokenize(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &e
   if (OB_UNLIKELY(expr.arg_cnt_ < 1 || expr.arg_cnt_ > 3)) {
     ret = OB_INVALID_ARGUMENT;
   } else if (OB_FAIL(parse_param(expr, ctx, temp_allocator, param))) {
-  } else {
-    uint64_t cache_hash = 1469598103934665603ULL;
-    cache_hash = tokenize_hash_append(param.parser_name_.ptr(), param.parser_name_.length(), cache_hash);
-    cache_hash = tokenize_hash_append(param.properties_.ptr(), param.properties_.length(), cache_hash);
-    cache_hash ^= static_cast<uint64_t>(param.output_mode_);
-    cache_hash = tokenize_hash_append(param.fulltext_.ptr(), param.fulltext_.length(), cache_hash);
-    ObString cached_str;
-    if (OB_UNLIKELY(param.fulltext_.length() <= 0)) {
-      if (OB_FAIL(tokenize_fulltext(param, param.output_mode_, temp_allocator, json_result))) {
-      } else if (OB_FAIL(ObJsonExprHelper::pack_json_res(
-                           expr, ctx, temp_allocator, json_result, expr_datum))) {
-      }
-    } else if (ObTokenizeResultCache::instance().get(param.fulltext_.ptr(),
-                                                     param.fulltext_.length(),
-                                                     cache_hash,
+  } else if (OB_FAIL(tokenize_fulltext(param, param.output_mode_, temp_allocator, json_result))) {
+  } else if (OB_FAIL(ObJsonExprHelper::pack_json_res(expr,
+                                                     ctx,
                                                      temp_allocator,
-                                                     cached_str)) {
-      if (OB_FAIL(ObJsonExprHelper::pack_json_str_res(expr, ctx, expr_datum, cached_str))) {
-      }
-    } else if (OB_FAIL(tokenize_fulltext(param, param.output_mode_, temp_allocator, json_result))) {
-    } else if (OB_FAIL(ObJsonExprHelper::pack_json_res(expr, ctx, temp_allocator, json_result, expr_datum))) {
-    } else if (nullptr != json_result && !json_result->is_bin()) {
-      // The non-binary path above is exactly get_raw_binary() + pack, so the
-      // serialized form can be replayed verbatim on a cache hit.
-      ObString raw_json;
-      if (OB_SUCC(share::ObJsonWrapper::get_raw_binary(json_result, raw_json, &temp_allocator))
-          && raw_json.length() > 0 && raw_json.length() <= 8192) {
-        ObTokenizeResultCache::instance().put(param.fulltext_.ptr(),
-                                              param.fulltext_.length(),
-                                              cache_hash,
-                                              raw_json.ptr(),
-                                              raw_json.length());
-      }
-    }
+                                                     json_result,
+                                                     expr_datum))) {
   }
 
   return ret;
@@ -336,8 +212,7 @@ int ObExprTokenize::parse_param(const ObExpr &expr,
   } else if (OB_FAIL(parse_fulltext(expr, ctx, param))) {
   } else if (OB_FAIL(parse_parser_name(expr, ctx, param))) {
   } else if (OB_FAIL(parse_parser_properties(expr, ctx, temp_allocator, param))) {
-  } else if (!param.properties_.empty() && OB_FAIL(param.reform_parser_properties(param.properties_))) {
-    // 未传 parser 属性时无需重建规范 JSON：ObFTParseHelper 会直接使用默认属性。
+  } else if (OB_FAIL(param.reform_parser_properties(param.properties_))) {
   } else if (OB_FAIL(param.try_load_dictionary_for_ik())) {
   }
   return ret;
