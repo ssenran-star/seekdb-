@@ -46,7 +46,7 @@ for dim in 128 256; do
   for run in 1 2 3; do
     env BASE_F32="$data/base.f32" QUERY_F32="$data/query.f32" GT_I32="$data/gt.i32" \
         GT_Q=100 GT_K=100 \
-        ./opt_test 250000 "$dim" 256 128 2>&1 | tail -2
+        timeout --kill-after=30 420 ./opt_test 250000 "$dim" 256 128 2>&1 | tail -2
     echo "  (exit=$?)"
   done
 done

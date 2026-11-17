@@ -12,7 +12,17 @@ echo "build_seekdb.sh v3 (2026-11-16 22:40) -- strip-components tarball"
 WORK=/workspace/work
 SRC=/workspace/seekdb-src
 REF=${REF:-amd-cagra-submit}
-JOBS=${JOBS:-64}
+# OB unity TUs can eat 2-3GB each; -j64 on a <=128GB box OOM-thrashes and
+# looks like a silent hang. Size jobs from MemAvailable unless overridden.
+if [ -z "${JOBS:-}" ]; then
+  ncpu=$(nproc 2>/dev/null || echo 32)
+  memg=$(awk '/MemAvailable/ {print int($2/1048576)}' /proc/meminfo 2>/dev/null || echo 64)
+  [ "$memg" -lt 3 ] && memg=64
+  bymem=$((memg / 3)); [ "$bymem" -lt 4 ] && bymem=4
+  [ "$ncpu" -gt "$bymem" ] && ncpu=$bymem
+  JOBS=$ncpu
+fi
+echo "JOBS=$JOBS (override with JOBS=N)"
 # token for api.github.com (anonymous rate limit is 60/h per IP and the
 # tarball is one of the heavier calls); override with GITHUB_TOKEN=...
 GITHUB_TOKEN=${GITHUB_TOKEN:-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}

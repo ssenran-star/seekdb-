@@ -47,7 +47,7 @@ run_one() {  # run_one <dim> <cfg-idx> -> echoes "BUILD RECALL10 RECALL100"
   out=$(env ${ENVS[$idx]} \
     BASE_F32="$data/base.f32" QUERY_F32="$data/query.f32" GT_I32="$data/gt.i32" \
     GT_Q=100 GT_K=100 SNAP_PATH=/tmp/snap_probe.bin \
-    "$WORK/bridge_test" "$SO" 250000 "$dim" 100 100 2>/dev/null | tail -1)
+    timeout --kill-after=30 600 "$WORK/bridge_test" "$SO" 250000 "$dim" 100 100 2>/dev/null | tail -1)
   echo "$out" | grep -oE 'BUILD_MS=[0-9.]+' | cut -d= -f2 | tr -d '\n'
   echo -n " "
   echo "$out" | grep -oE 'RECALL10=[0-9.]+' | cut -d= -f2 | tr -d '\n'
