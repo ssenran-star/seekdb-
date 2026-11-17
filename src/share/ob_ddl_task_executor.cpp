@@ -16,6 +16,7 @@
 
 #include "ob_ddl_task_executor.h"
 #include "lib/ob_running_mode.h"
+#include "lib/cpu/ob_cpu_topology.h"
 #include "lib/thread/ob_thread_name.h"
 #include "lib/stat/ob_diagnostic_info_guard.h"
 #include "share/rc/ob_server_runtime.h"
@@ -350,7 +351,13 @@ int ObDDLLocalBuilder::push_task(ObAsyncTask &task)
 
 int64_t ObDDLLocalBuilder::get_thread_cnt_() const
 {
-  return lib::is_mini_mode() ? 1 : 16;
+  // A single FTS index build submits several aux index build jobs (rowkey_doc,
+  // doc_rowkey, domain index aux, doc_word). They are independent, so give the
+  // local builder enough workers to run them concurrently instead of queueing
+  // them behind a single thread. Keep it bounded by the machine size.
+  const int64_t cpu_cnt = static_cast<int64_t>(common::get_cpu_num());
+  const int64_t want = cpu_cnt > 0 ? cpu_cnt : 8;
+  return std::min(want, static_cast<int64_t>(8));
 }
 
 }  // end namespace share
