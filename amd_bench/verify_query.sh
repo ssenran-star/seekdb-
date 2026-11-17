@@ -3,14 +3,14 @@
 # compile query_bench, then compare per-query latency OLD (/tmp/bridge, no
 # reuse) vs NEW (/tmp/bridge2, reuse). Same niter=70 build on both.
 set -u
-TOKEN='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'
+# repo is public: fetch anonymously (embedded PAT expired)
 WORK=/workspace/work
 
 echo "=== 1. build NEW bridge (reuse) ==="
 mkdir -p /tmp/bv2/tools/hipvs_bridge /tmp/bridge2
 cd /tmp/bv2
 for f in seekdb_cuvs_bridge.c seekdb_cuvs_bridge.h build.sh; do
-  curl -fsSL -H "Authorization: Bearer $TOKEN" \
+  curl -fsSL \
     "https://api.github.com/repos/ssenran-star/seekdb-/contents/tools/hipvs_bridge/$f?ref=amd-cagra-submit" \
     | python3 -c "import sys,json,base64;open('/tmp/bv2/tools/hipvs_bridge/$f','wb').write(base64.b64decode(json.load(sys.stdin)['content']))"
 done
@@ -18,7 +18,7 @@ HIPVS_ROOT=/opt/hipvs ROCM_ROOT=/opt/rocm bash tools/hipvs_bridge/build.sh /tmp/
 
 echo "=== 2. compile query_bench ==="
 cd "$WORK"
-curl -fsSL -H "Authorization: Bearer $TOKEN" \
+curl -fsSL \
   "https://api.github.com/repos/ssenran-star/seekdb-/contents/amd_bench/query_bench.c?ref=amd-cagra-submit" \
   | python3 -c "import sys,json,base64;open('query_bench.c','wb').write(base64.b64decode(json.load(sys.stdin)['content']))"
 gcc -O2 -o query_bench query_bench.c -ldl && echo GCC_OK

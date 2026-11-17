@@ -2,14 +2,14 @@
 # Verify dimension-aware niter: build via official build.sh, then measure
 # 128-dim (expect ~21700ms, niter=40) and 256-dim (expect ~32700ms, niter=70).
 set -u
-TOKEN='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'
+# repo is public: fetch anonymously (embedded PAT expired)
 WORK=/workspace/work
 
 echo "=== 1. build dim-aware bridge ==="
 mkdir -p /tmp/bv3/tools/hipvs_bridge /tmp/bridge3
 cd /tmp/bv3
 for f in seekdb_cuvs_bridge.c seekdb_cuvs_bridge.h build.sh; do
-  curl -fsSL -H "Authorization: Bearer $TOKEN" \
+  curl -fsSL \
     "https://api.github.com/repos/ssenran-star/seekdb-/contents/tools/hipvs_bridge/$f?ref=amd-cagra-submit" \
     | python3 -c "import sys,json,base64;open('/tmp/bv3/tools/hipvs_bridge/$f','wb').write(base64.b64decode(json.load(sys.stdin)['content']))"
 done

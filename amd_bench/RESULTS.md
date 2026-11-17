@@ -200,3 +200,330 @@ LD_LIBRARY_PATH=/tmp/bridge:/opt/hipvs/lib:/opt/rocm/lib \
 取文件需走 `api.github.com`；命令细节见 `amd_bench/README.md`。
 
 原始实测数据与精确真值见 `amd_bench/results/`。
+
+---
+
+## 9. 第二轮（冲 20 分）：方案与执行顺序
+
+> 本节对应 commit `bridge+adaptor: round-2 build/query pipeline`，基于分支最新
+> tip（niter 25/50 + igdeg=128，即 c683c70dd）之上。
+
+### 9.1 距满分的量化缺口
+
+计分公式（评测文档第九节）：
+
+```
+综合构建加速比 = SIFT^0.4 × Hidden^0.6        （加权几何平均）
+构建性能分 = 14 × clamp( ln(综合构建加速比) / ln(3.0), 0, 1 )
+查询性能分 =  2 × clamp( ln(综合查询加速比) / ln(1.5), 0, 1 )
+总分 = 4（硬门槛） + 构建分 + 查询分
+```
+
+| 项 | 已验证最好（2c76a2f） | 分支 tip（25/50，待评） | 满分要求 |
+|---|---|---|---|
+| 综合构建加速（端到端） | 1.828× → 7.68 分 | 合成 3.78×/2.23×，估端到端 ≈2.05× → ≈8.7 分 | ≥3.0× → 14 分 |
+| 综合查询加速 | 1.014× → 0.07 分 | 未变 | ≥1.5× → 2 分 |
+| 合计 | ≈11.7 / 20 | ≈12.8 / 20（估） | 20 / 20 |
+
+按 F≈16% 固定开销模型（见第 7 节），端到端 3.0× 需要**真实建图加速 ≈4.85×**
+（合成口径 ≈5.4×）。当前合成加权约 2.9×（25/50 版），还差 ~1.9×。因此单靠继续
+压 niter 不够（且已接近 0.005 召回门槛极限），必须引入**不损召回的算法性提速**。
+
+### 9.2 本 commit 的改动
+
+| 层 | 改动 | 预期收益 | 风险 |
+|---|---|---|---|
+| bridge 建图 | **nd 模式**：独立 `cuvsNNDescentBuild`（max_iterations 按维度 + `termination_threshold` 收敛早停）→ `cuvsCagraIndexFromArgs`，查询仍走固定 `cuvsCagraSearch`。默认 `CAGRA_BUILD_MODE=auto`：hipVS 有独立 NN-Descent API 就走 nd，否则/失败自动回退 legacy（dlsym 软链接，不引入硬依赖） | 早停砍掉收敛后的冗余迭代（上限即现 niter 25/50，超不掉召回）；FromArgs 若略过 CAGRA optimize 阶段还能再省一截 | 需 exp_build_matrix 实测 recall@100 与 legacy 对齐；默认上限与现行提交同档，先验证结构等价性 |
+| bridge 查询 | 搜索缓冲/参数/pinned 暂存常驻；新增 `CAGRA_ITOPK`/`CAGRA_SW` 调参入口（默认 = 基线行为）。注：缓冲复用本身此前实测≈0（RMM 有池化），保留无害 | 主要靠 itopk 降档（exp_query.sh 待跑） | itopk 降档可能损召回，须过 recall@100 判定 |
+| adaptor | ①每查询 `pthread_create`(32MB 栈) → 常驻 worker；②`get_vid_bound` 全量扫 250K id → 增量缓存 min/max | query_bench 测不到的 bridge 外每查询开销，估 0.2~0.5ms/查询 | 无召回风险 |
+| adaptor 快照 | OBCUVS03：ids+向量流写与 GPU 建图**重叠**（读侧兼容 02） | 计时窗口固定开销 F 缩小 ~0.5s | 格式变更；冒烟测试只查日志字段（built/graph_bytes 不变），兼容 |
+
+合规性：赛题 3.1 明确允许「自定义 GPU 建图，不限定具体构图接口」；查询端
+`cuvsCagraSearch` 为组织方固定实现、参数未绕过；nd 默认参数刻意与当前提交
+同档（25/50），只有实验验证「recall 降幅不超门槛」后才把早停参数写死。
+
+### 9.3 在实例上的执行顺序（4 小时额度内）
+
+```bash
+# 0. 资料与脚本自检（实例重启后跑 setup_query.sh 可恢复环境）
+bash amd_bench/setup_query.sh
+
+# 1. 决定性实验：nd 早停矩阵（双维度，recall@100 判定，~40 分钟）
+bash amd_bench/exp_build_matrix.sh
+
+# 2. 查询参数扫描（itopk/sw，recall + 单查延迟，~20 分钟）
+bash amd_bench/exp_query.sh
+
+# 3. 端到端 QPS（4096 条单行 SQL，对齐评测口径）
+N=250000 DIM=256 bash amd_bench/qps_measure.sh
+
+# 4. 端到端构建窗口（F 分解，验证快照重叠收益）
+bash amd_bench/e2e_measure.sh
+```
+
+**决策规则**：
+
+1. exp_build_matrix 找每维度「recall100 比 legacy/ref 降幅 < 0.003」的最快 nd
+   配置 → 写回 bridge 默认（CAGRA_MAX_ITER / CAGRA_TERM_TH）；若 nd 全部不达标，
+   默认切回 legacy（现行提交行为），nd 仅留实验用途。
+2. exp_query 找 recall 降幅 < 0.003 的最低 itopk → 写回 bridge 默认。
+3. 若 1 之后综合构建仍 < 2.7×，按优先级加杠杆：
+   a) FP16 数据喂 NN-Descent（赛题允许内部 FP16，须过同一 Recall 门槛）；
+   b) nd 输出 256 度稠密图直接 FromArgs（跳过剪枝，验召回）；
+   c) 自定义 HIP RobustPrune（NN-Descent → 剪枝 → FromArgs 全自控管线）。
+4. 查询若 < 1.2×：用 qps_measure 与 query_bench 的差值定位 bridge 外占比，
+   再定向优化 SQL/DAS 层每查询开销。
+
+### 9.4 本改动的验证状态
+
+| 项 | 状态 |
+|---|---|
+| nd 模式 recall@100 对齐（双维度 250K） | **待实例实测**（exp_build_matrix.sh） |
+| adaptor worker / vid 缓存正确性 | 逻辑自审通过，待实例冒烟（run_ddl_persistence_smoke.sh + e2e_measure.sh） |
+| OBCUVS03 快照重叠 | 逻辑自审通过，待实例冒烟（日志字段 built/graph_bytes 不变） |
+| itopk 调参 | **待实例实测**（exp_query.sh） |
+
+---
+
+## 10. nd 早停矩阵实测结果（exp_build_matrix.sh，250K，中位数 3 次）
+
+Δ 列 = 相对**冻结基线**（niter=100/igdeg=256，recall@100 0.9766 / 0.8718）的降幅；
+硬门槛 0.005，自定安全线 0.003（synthetic 口径，依据「合成更难、真实降幅更小」的既有校准）。
+
+**128-dim（SIFT）** legacy/ref(25/128) = 10555ms / 0.9740 / Δ0.0026
+
+| nd 配置 | build_ms | recall@100 | Δ vs 冻结 | 备注 |
+|---|---|---|---|---|
+| mi=30 th=1e-4 | 10227 | 0.9733 | 0.0033 | ≈legacy |
+| **mi=25 th=1e-4** | **8966** | **0.9728** | **0.0038** | **选定**：比 legacy 快 15% |
+| mi=25 th=1e-3 | 8901 | 0.9714 | 0.0052 | ✗ 超门槛 |
+| mi=20 th=1e-4 | 7328 | 0.9694 | 0.0072 | ✗ 超门槛 |
+| mi=15 | 5914~6071 | ≤0.9675 | ≥0.009 | ✗ |
+
+**256-dim（Hidden）** legacy/ref(50/128) = 18162ms / 0.8696 / Δ0.0022
+
+| nd 配置 | build_ms | recall@100 | Δ vs 冻结 | 备注 |
+|---|---|---|---|---|
+| mi=60 th=1e-3 | 20300 | 0.8677 | 0.0041 | 比 legacy 还慢 |
+| **mi=50 th=1e-3** | **16084** | **0.8671** | **0.0047** | **选定**：快 11%，但贴线 |
+| mi=50 th=1e-4 | 16046 | 0.8657 | 0.0061 | ✗ |
+| mi=40 | 13293~14084 | ≤0.8652 | ≥0.0066 | ✗ |
+| mi=30 | ~10500 | ≤0.8622 | ≥0.0096 | ✗ |
+
+**结论**：
+
+1. nd（独立 NN-Descent + FromArgs）有 ~0.002 的结构性召回代价——FromArgs
+   略过了 CAGRA 的 RobustPrune 剪枝；同样迭代数下 256d nd60(0.8677) 反而低于
+   legacy50(0.8696) 印证了这一点。
+2. 收益来源 = 早停 + 略过剪枝阶段：128d 同迭代数快 15%；256d 只有把 Δ 压到
+   0.0047 才快 11%。
+3. 已把默认值定为：**128d mi=25/th=1e-4，256d mi=50/th=1e-3**（auto 模式先试 nd，
+   hipVS 缺 API 自动回退 legacy）。若 hidden 回归门槛被拒（hidden250k:recall@100_baseline_delta），
+   按 build_nd 注释回退 256d 到 legacy（Δ0.0022）。
+4. 合成综合加速 = 4.54×^0.4 × 2.62×^0.6 ≈ **3.26×**（vs 冻结）；按 1.117 高估系数 +
+   F≈16% 模型 → 端到端 ≈ **2.2~2.4×**，构建分 ≈ **10~11**（现为 7.68）。
+5. 要冲 3.0× 端到端（满分 14）必须找回剪枝或换更高质量的建图来源——
+   `amd_bench/probe_api.sh` 负责探 hipVS 是否导出 optimize/prune/brute_force
+   C API，并顺带验证「256 度稠密图 FromArgs」能否把召回补回（代价是查询每跳变慢）。
+
+---
+
+## 11. 第二轮矩阵复测 + 查询参数扫描结论
+
+### 11.1 构建：跨场次方差与默认值修订
+
+复跑矩阵（同配置）显示 **build-to-build 召回方差 ~0.0015**（NN-Descent 并行调度
+非确定性），此前 ±0.0004 只是度量噪声。两场次合并看，nd 相对同场 legacy 的
+降幅很稳定（128d ≈ -0.0013，256d ≈ -0.003），但叠加 legacy 相对冻结基线的
+~-0.0028 后，**256d nd50/1e-3 对冻结的总降幅 ≈0.0055**——在 0.005 门槛上/超线，
+且它只快 11%。收益不抵拒分风险。
+
+**默认值修订（本 commit）**：
+- 128d：`nd mi=25/th=1e-4`（8.8s，比 legacy 快 16%，总降幅 ≈0.004）
+- 256d：**回退 legacy 50/128**（18.1s，降幅 ≈0.0027）——nd 在 256d 没有
+  「更快且门内」的点，除非找回 RobustPrune（见 probe_api.sh）
+- `CAGRA_BUILD_MODE=nd` 仍可强制全 nd 供实验
+
+### 11.2 查询：itopk/sw 扫描（256d，niter=60/igdeg=128 构建）
+
+| itopk | sw | 单查 AVG_US | batch SEARCH_MS/100 | recall@10 | recall@100 | 判定 |
+|---|---|---|---|---|---|---|
+| 512 | 4 | 3653 | 0.415 | 0.953 | 0.870 | 现默认 ✅ |
+| 512 | 2 | 9616 | 0.518 | 0.954 | 0.869 | 更慢 |
+| 512 | 1 | 11610 | 0.551 | 0.960 | 0.872 | 更慢 |
+| 256 | 4 | 1687 | 0.355 | 0.880 | 0.709 | ✗ 召回崩塌 |
+| 128 | 4 | 910 | 0.325 | 0.767 | 0.548 | ✗ |
+
+**结论：查询参数是死路。** itopk 512→256 召回崩塌（r100 0.87→0.71，远低于门槛）；
+sw 降档单查反而 3~10 倍变慢。itopk=512/sw=4 已是最优点，查询分的参数杠杆为 0。
+
+另一个关键测量：**单查 bridge 成本 3.65ms**（itopk=512），批量摊薄后 0.415ms/查
+——评测是 4096 条单行查询，GPU 图游走的串行延迟就是 ~3.6ms/查询打底。评测
+基线 QPS 147（6.8ms/查询）中约一半是这个，另一半是 SQL 栈。查询分（1.5× 满分）
+现实上限估计 **1.1~1.2×**（adaptor worker + vid 缓存 + 缓冲复用），除非：
+(a) 找回 RobustPrune 后图质量变好、itopk 可降；(b) 优化 SQL/DAS 层每查询开销。
+
+### 11.3 待办
+
+1. `bash exp_delta.sh` —— 同场次冻结基线校准（决定 128d nd 档去留，~10 分钟）
+2. `bash probe_api.sh` —— optimize/prune/brute_force API 探测（冲 3.0× 的钥匙）
+3. 起 seekdb observer 后跑 qps_measure / e2e_measure（mysql 2881 当前未监听）
+
+---
+
+## 12. c683c70dd（25/50）提测结果与模型修正
+
+**结果：build=1.830×, query=1.004×, gates=pass**
+
+| 项 | 含义 |
+|---|---|
+| gates=pass | 25/50 的合成降幅 0.0027 在真实数据上安全通过——「合成更难、真实降幅更小」论成立，召回预算确实存在 |
+| build=1.830 vs 2c76a2f 的 1.828 | 30/60→25/50 的 17% 建图提速在端到端**毫无体现**（评测波动 5~15% 内不可分辨） |
+| query=1.004 | 符合预期（该 commit 未动查询路径） |
+
+### 模型修正：F 远大于 16%
+
+三个实测点联立（niter=70 → 1.124×；30/60 → 1.828×；25/50 → 1.830×）否定了
+旧的「F=16% + 合成/真实 1.117 系数」两参数拟合。合理解释：
+
+- 评测窗口 = 扫描 + 传输 + **快照持久化（384~650MB I/O）** + 首查 + NN-Descent；
+  其中固定部分 **F ≈ 30~35%**（约 7~8s / 23s 窗口）。
+- 100→30/60 砍掉的是昂贵的中段迭代（省 10s+，e2e 1.83× ✓）；
+  30/60→25/50 砍的是收敛后的便宜尾段（省 ≤0.7s，淹没在噪声里）。
+  **继续压 niter 对端到端已经没有意义。**
+
+### 冲分的残酷算术
+
+- 当前 1.83× → 构建分 14×ln(1.83)/ln(3.0) ≈ **7.7**；查询分 ≈ 0.03。总分 ≈ 11.7。
+- **即使建图免费（B=0），e2e 上限 = T0/F ≈ 23/7.5 ≈ 3.1×** —— 3.0× 满分线
+  几乎贴着理论上限！必须同时：①砍 F（快照 I/O 是最大嫌疑：384MB 的 CAGRA
+  serialize 里 dataset 写了一份，流里又写了一份原始向量，Hidden 全程 ~650MB）；
+  ②把 B 再降一个数量级（brute-force 精确 kNN 建图 / FP16 NN-Descent）。
+- 目标拆解（SIFT 23s 窗口）：T 目标 ≤7.7s。B 若能到 2~3s（brute force），
+  F 必须从 ~8s 压到 ~5s（快照 I/O 减半 + 重叠）。
+
+### 下一步（按优先级）
+
+1. `exp_delta.sh` + `probe_api.sh` —— 校准 128d nd 档；探 optimize/prune/
+   brute_force/GetDataset API（决定快照去重方案和自定义建图方案）
+2. 起 observer 后 `e2e_measure.sh` —— 把 F 的 8s 分解到扫描/持久化/首查
+3. 据 1/2 的输出实施：快照只存一份数据（graph 内嵌 dataset + 流里去掉原始向量，
+   或反向），brute-force/FP16 建图
+
+---
+
+## 13. probe_api.sh 结果：三个关键 API 全部存在
+
+libcuvs_c.so 导出（评测同款固定 hipVS）：
+
+| API | 意义 |
+|---|---|
+| `cuvsBruteForceBuild/Search`（+Index/Serialize 全套） | **暴力精确 kNN 建图可行**：精确邻居质量 ≥ NN-Descent，且输出图直接在主机内存 |
+| `cuvsCagraIndexGetDataset/GetGraph/GetGraphDegree` | 快照去重可行：重建索引 / 提取图，砍掉 dataset 双写（650MB→390MB） |
+| `cagra_optimize.hpp`（C++） | RobustPrune 可补回（nd 路径丢的 0.002 召回、itopk 降档的希望） |
+| 另有 `cuvsCagraMerge/Extend`、`vamana.h`、`refine.h` | 后备牌 |
+
+dense-graph 检查被 sed bug 吞了（label 含 `/`），已修。
+
+**行动**：`amd_bench/bf_test.c` + `exp_bf.sh` 验证 bf 管线
+（BF build → BF self-search top-128 → FromArgs → CAGRA search recall）。
+判定标准：SELF_HIT≈1.0（dtype 正确）；RECALL ≥ legacy（128d 0.973 / 256d 0.868）；
+BF_BUILD+SEARCH+FROMARGS 总时长 < legacy（10.5s / 18s）。全过则 bf 成为新默认，
+快照改用主机图格式（下一 commit），查询侧再评估 itopk 降档。
+
+---
+
+## 14. exp_delta 同场次校准：nd 判负，全面回退 legacy
+
+| 维度 | 配置 | recall@100 | Δ vs 同场冻结基线 | 判定 |
+|---|---|---|---|---|
+| 128d | frozen(100/256) | 0.9763 | — | 40849ms |
+| 128d | current(25/50) | 0.9741 | **0.0022** | OK |
+| 128d | nd(default) | 0.9711 | **0.0052** | **OVER** |
+| 256d | frozen(100/256) | 0.8716 | — | 42030ms |
+| 256d | current(25/50) | 0.8703 | **0.0013** | OK |
+| 256d | nd(default) | 0.8664 | **0.0052** | **OVER** |
+
+**裁决**：FromArgs（无 RobustPrune）管线在两个维度都压线超门槛，nd 不可提交。
+默认已回退 legacy 25/50（即 c683c70dd 的已过门槛配置），nd 仅保留
+`CAGRA_BUILD_MODE=nd` 实验开关。跨场次绝对值与同场次 delta 的教训：
+**召回判定必须同场次对冻结基线，跨场次数字会被 ~0.002 方差带偏。**
+
+bf 首跑输出为空（疑似某阶段崩溃）：bf_test.c 已加阶段打印 + 退出码上报。
+e2e 报 error 1235 `lib is not supported`：实例跑的是镜像原装 seekdb（不带
+CUVS 支持），SQL 端到端必须先 `build_seekdb.sh`（tarball 拉源码 + 赛题固定
+cmake 流程）再 `start_seekdb.sh`（已改为优先启动自编译 observer）。
+
+---
+
+## 15. exp_delta go/no-go（bf IN-GATE）与自环剔除修订
+
+### 15.1 同场次校准结果（exp_delta v2，250K，中位 5 次）
+
+| 维度 | frozen(100/256) | current(25/50) | **bf(default)** | nd(experiment) |
+|---|---|---|---|---|
+| 128d recall@100 | 0.9756 | 0.9728 (Δ0.0028 OK) | 0.9711 (**Δ0.0045 IN-GATE**) | 0.9716 (Δ0.0040 IN-GATE) |
+| 256d recall@100 | 0.8719 | 0.8687 (Δ0.0032 IN-GATE) | 0.8684 (**Δ0.0035 IN-GATE**) | 0.8669 (Δ0.0050 OVER) |
+| 128d build_ms | 42432 | 11032 | 8819 | 8893 |
+| 256d build_ms | 41221 | 18432 | 18923 | 16852 |
+
+**判定**：bf 两维均在 0.005 门槛内（0.0045/0.0035），但 128d 贴线。此前 exp_bf
+"delta≈0.0016" 的算法不成立——exp_bf 没有同场次冻结基线（跨场次比较无效），
+**exp_delta 是唯一有效口径**。nd 维持出局。
+
+### 15.2 计时口径矛盾的解释
+
+exp_bf 报 bf 管线 6.0s/10.2s，exp_delta 报 8819/18923ms，原因有二：
+1. **测量边界**：bf_test 的分段计时不含 cuvsResourcesCreate（HIP 上下文初始化
+   1-2s）与数据集 H2D 上传；bridge_test 的 BUILD_MS 包含（它调 seekdb_cuvs_build 全程）。
+2. **热状态偏差**：exp_delta v2 每个配置连跑 5 次，bf 排在 frozen(42s×5)+current(11s×5)
+   之后，GPU 已持续满载 4-5 分钟；exp_bf 是冷启动首跑。256d 的 8.7s 差距主要是
+   这个。**exp_delta v3 已改为四配置轮转交错**，消除该偏差。
+
+### 15.3 自环剔除（本 commit）
+
+bf_test 与 bridge build_bf 均确认 SELF_HIT=1.0：每行第 0 列是自身（距离 0）。
+原转换把 self 一并写入图，**128 条边浪费 1 条**。现改为自检索 top-(gdeg+1)、
+转换时跳过 self、保留 128 条真邻居——严格更优的图，预期找回 0.001~0.003 召回
+余量，把 bf 的 delta 压进 0.003 安全线。
+
+### 15.4 下一步（冲门槛内余量 + 3.0×）
+
+1. `bash exp_delta.sh`（v3）—— 验证自环剔除后 bf delta ≤0.003 → **直接提测**。
+2. `bash dump_hipvs_headers.sh` —— 打印 cagra_optimize.hpp / index_wrappers /
+   core interop 签名 + libcuvs 导出的 optimize 符号；据此写 C++ 封装把
+   **RobustPrune 补回**（bf 精确 kNN → optimize 剪枝 → FromArgs）。exp_delta 显示
+   legacy+prune 比 exact-no-prune 高 0.003~0.004 召回，补回后 delta 可望 ≤0.001，
+   且为 itopk 降档（查询分）打开通路。
+3. `bash build_seekdb.sh` —— devtools 四级引导已修（缓存深层挖掘→rpm 解包→
+   dep_create→ROCm shim），通了即可跑 e2e/qps 拿 F 分解。
+
+---
+
+## 16. optimize 签名到手 + 三项修复（2026-11-17 晨）
+
+### 16.1 dump_hipvs_headers 关键输出
+
+```cpp
+namespace cuvs::neighbors::cagra::helpers {
+  void optimize(raft::resources const& handle,
+                raft::host_matrix_view<uint32_t,int64_t,raft::row_major> knn_graph,
+                raft::host_matrix_view<uint32_t,int64_t,raft::row_major> new_graph);
+}
+```
+
+- **host uint32 双张量**（不是 int64/不是 device）；官方示例直接 make_host_matrix + view。
+- `libcuvs.so` 导出 `cuvs::neighbors::cagra::helpers::optimize`（T 符号，实测在）。
+- raft 头文件位置未知（/opt/hipvs/include/raft 不存在）——dump §7 已加全局 find，
+  结果决定 opt_test 能否编译。
+
+### 16.2 本 commit 修复
+
+| 问题 | 修复 |
+|---|---|
+| exp_delta 死于 SO 缺失（boot 不再预建 /tmp/bridge_r2） | 缺失时用 $WORK/hipvs_bridge/build.sh 自建；数据集缺失自动 gen_data |
+| build_seekdb 死于 libjemalloc_pic.a（只链了 devtools 子目录） | 改为整棵缓存 3rd 树软链（含 deps/devel）；守卫加 jemalloc 检查（上轮已链过 devtools 会跳过旧逻辑） |
+| optimize 探针 | opt_test.cpp + exp_opt.sh：bf kNN(256) → helpers::optimize → 128 度图 → FromArgs → 召回，同场次对照 noopt（截断） |
+
+**判定规则（exp_opt）**：OPT_RK ≥ NOOPT_RK+0.002 且 OPT_MS ≲3s → build_bf 采纳
+pruned 图（delta 预期 ≤0.001，双保险）；否则维持 self-drop 版 bf。
