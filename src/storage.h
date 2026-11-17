@@ -35,6 +35,13 @@ public:
         append(v.data(), v.size() * sizeof(float));
     }
     void put_row(const Row& row) {
+        size_t need = row.size();
+        for (const Value& v : row) {
+            if (v.type == ValType::BIGINT) need += 9;
+            else if (v.type == ValType::VARCHAR) need += 5 + v.s.size();
+            else need += 5 + v.v.size() * 4;
+        }
+        data.reserve(data.size() + need);
         for (const Value& v : row) {
             put_u8(static_cast<uint8_t>(v.type));
             switch (v.type) {
@@ -121,8 +128,10 @@ public:
     uint64_t size() const { return size_; }
 
 private:
+    void flush_buf();
     int fd_ = -1;
     std::string path_;
+    std::string wbuf_;
     uint64_t size_ = 0;
     uint64_t drop_pos_ = 0;
 };

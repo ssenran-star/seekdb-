@@ -10,16 +10,11 @@
 namespace mvdb {
 
 namespace {
-std::string up(const std::string& s) {
-    std::string r = s;
-    for (char& c : r) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-    return r;
-}
-bool ieq(const std::string& a, const std::string& b) { return up(a) == up(b); }
+bool ieq(const std::string& a, const std::string& b) { return ieq_ascii(a, b); }
 
 int find_col(const TableSchema& s, const std::string& name) {
     for (size_t k = 0; k < s.cols.size(); ++k)
-        if (ieq(s.cols[k].name, name)) return static_cast<int>(k);
+        if (ieq_ascii(s.cols[k].name, name)) return static_cast<int>(k);
     throw DbError("column_not_found", "unknown column: " + name);
 }
 
@@ -147,11 +142,6 @@ bool Engine::visible(uint64_t txn, uint32_t stmt) const {
 const Row* Engine::resolve_row(Table& t, int64_t pk) {
     auto it = t.latest.find(pk);
     if (it == t.latest.end()) return nullptr;
-    if (cache_seen_epoch_ != cache_epoch_) {
-        row_cache_.clear();
-        cache_bytes_ = 0;
-        cache_seen_epoch_ = cache_epoch_;
-    }
     auto& tc = row_cache_[t.schema.table_id];
     auto cit = tc.find(pk);
     if (cit != tc.end() && cit->second.offset == it->second) return &cit->second.row;
@@ -171,20 +161,25 @@ const Row* Engine::resolve_row(Table& t, int64_t pk) {
         }
         if (visible(rv.txn, rv.stmt)) {
             Row parsed = b.get_row(t.schema.cols.size());
-            size_t bytes = 64;
-            for (auto& v : parsed) bytes += v.s.size() + v.v.size() * 4 + 16;
-            constexpr size_t kCacheCap = 256ull * 1024ull * 1024ull;
-            if (cache_bytes_ + bytes > kCacheCap) {
-                row_cache_.clear();
-                cache_bytes_ = 0;
-            }
-            row_cache_[t.schema.table_id][pk] = CachedRow{head, std::move(parsed)};
-            cache_bytes_ += bytes;
-            return &row_cache_[t.schema.table_id][pk].row;
+            return cache_put(t.schema.table_id, pk, head, std::move(parsed));
         }
         off = prev;
     }
     return nullptr;
+}
+
+Row* Engine::cache_put(uint32_t tid, int64_t pk, uint64_t head, Row row) {
+    size_t bytes = 64;
+    for (auto& v : row) bytes += v.s.size() + v.v.size() * 4 + 16;
+    constexpr size_t kCacheCap = 256ull * 1024ull * 1024ull;
+    if (cache_bytes_ + bytes > kCacheCap) {
+        row_cache_.clear();
+        cache_bytes_ = 0;
+    }
+    auto& slot = row_cache_[tid][pk];
+    slot = CachedRow{head, std::move(row)};
+    cache_bytes_ += bytes;
+    return &slot.row;
 }
 
 bool Engine::row_matches(const Row& row,
@@ -335,6 +330,8 @@ ExecResult Engine::exec_insert(const Statement& st) {
         uint64_t off = log_.append(REC_INSERT, txn, stmt, b.data);
         t.latest[pk] = off;
         if (t.ann && s.vector_index >= 0) t.ann->insert(pk, row[s.vector_index].v);
+        cache_put(s.table_id, pk, off, std::move(row));
+        if (!is_auto) txn_writes_.emplace_back(s.table_id, pk);
     }
     if (is_auto) append_commit(txn);
     ExecResult r;
@@ -379,6 +376,8 @@ ExecResult Engine::exec_update(const Statement& st) {
             t.ann->erase(pk);
             t.ann->insert(pk, row[s.vector_index].v);
         }
+        cache_put(s.table_id, pk, off, std::move(row));
+        if (!is_auto) txn_writes_.emplace_back(s.table_id, pk);
     }
     if (is_auto) append_commit(txn);
     ExecResult r;
@@ -411,6 +410,8 @@ ExecResult Engine::exec_delete(const Statement& st) {
         uint64_t off = log_.append(REC_DELETE, txn, stmt, b.data);
         t.latest[pk] = off;
         if (t.ann) t.ann->erase(pk);
+        row_cache_[s.table_id].erase(pk);
+        if (!is_auto) txn_writes_.emplace_back(s.table_id, pk);
     }
     if (is_auto) append_commit(txn);
     ExecResult r;
@@ -435,6 +436,7 @@ void Engine::build_fast_scan(Table& t) {
         if (c.type == ValType::VARCHAR) sc.vcols.emplace_back();
     }
     for (auto& vc : sc.vcols) vc.reserve(n);
+    sc.vidx.assign(sc.vcols.size(), {});
     for (auto& [pk, off] : t.latest) {
         const Row* row = resolve_row(t, pk);
         if (!row) continue;
@@ -445,13 +447,26 @@ void Engine::build_fast_scan(Table& t) {
         }
         size_t vi = 0;
         for (size_t c = 0; c < t.schema.cols.size(); c++) {
-            if (t.schema.cols[c].type == ValType::VARCHAR)
-                sc.vcols[vi++].push_back((*row)[c].s);
+            if (t.schema.cols[c].type == ValType::VARCHAR) {
+                const std::string& sref = (*row)[c].s;
+                sc.vcols[vi].push_back(sref);
+                sc.vidx[vi][sref].push_back(static_cast<int32_t>(sc.pks.size() - 1));
+                ++vi;
+            }
         }
         sc.rows.push_back(*row);
+        // vectors live in sc.vecs; don't hold a second copy per row
+        if (dim > 0) {
+            sc.rows.back()[t.schema.vector_index].v.clear();
+            sc.rows.back()[t.schema.vector_index].v.shrink_to_fit();
+        }
     }
     sc.n = static_cast<int64_t>(sc.pks.size());
     sc.epoch = cache_epoch_;
+    // The scan snapshot now serves queries; free the decoded-row cache so
+    // peak RSS / memcg charge stays low (memory.peak counts page cache too).
+    row_cache_.clear();
+    cache_bytes_ = 0;
 }
 
 ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
@@ -573,18 +588,23 @@ ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
                         return st.order_desc ? (dsq > cands_[0].dsq) : (dsq < cands_[0].dsq);
                     return pk < cands_[0].pk;
                 };
+                auto consider = [&](float dsq, int64_t pk, int32_t idx) {
+                    if (top_n < K) {
+                        cands_[top_n++] = {dsq, pk, idx};
+                        if (top_n == K)
+                            std::make_heap(cands_.begin(), cands_.begin() + K, entry_worse);
+                    } else if (better_than_top(dsq, pk)) {
+                        std::pop_heap(cands_.begin(), cands_.begin() + K, entry_worse);
+                        cands_[K - 1] = {dsq, pk, idx};
+                        std::push_heap(cands_.begin(), cands_.begin() + K, entry_worse);
+                    }
+                };
+                // Distance to the query vector; rows that lose to the current
+                // heap top are rejected by consider() after full computation.
+                auto dist_at = [&](const float* v) { return l2_sq_fast(v, qvec, dim); };
                 if (where.empty()) {
                     for (int64_t i = 0; i < sc.n; i++) {
-                        float dsq = l2_sq_fast(&sc.vecs[i * dim], qvec, dim);
-                        if (top_n < K) {
-                            cands_[top_n++] = {dsq, sc.pks[i], static_cast<int32_t>(i)};
-                            if (top_n == K)
-                                std::make_heap(cands_.begin(), cands_.begin() + K, entry_worse);
-                        } else if (better_than_top(dsq, sc.pks[i])) {
-                            std::pop_heap(cands_.begin(), cands_.begin() + K, entry_worse);
-                            cands_[K - 1] = {dsq, sc.pks[i], static_cast<int32_t>(i)};
-                            std::push_heap(cands_.begin(), cands_.begin() + K, entry_worse);
-                        }
+                        consider(dist_at(&sc.vecs[i * dim]), sc.pks[i], static_cast<int32_t>(i));
                     }
                 } else {
                     bool use_prefilter = false;
@@ -606,32 +626,28 @@ ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
                     }
                     if (use_prefilter) {
                         const auto& col_data = sc.vcols[pf_vi];
-                        for (int64_t i = 0; i < sc.n; i++) {
-                            if (col_data[i] != pf_val) continue;
-                            float dsq = l2_sq_fast(&sc.vecs[i * dim], qvec, dim);
-                            if (top_n < K) {
-                                cands_[top_n++] = {dsq, sc.pks[i], static_cast<int32_t>(i)};
-                                if (top_n == K)
-                                    std::make_heap(cands_.begin(), cands_.begin() + K, entry_worse);
-                            } else if (better_than_top(dsq, sc.pks[i])) {
-                                std::pop_heap(cands_.begin(), cands_.begin() + K, entry_worse);
-                                cands_[K - 1] = {dsq, sc.pks[i], static_cast<int32_t>(i)};
-                                std::push_heap(cands_.begin(), cands_.begin() + K, entry_worse);
+                        bool used_map = false;
+                        if (pf_vi < static_cast<int>(sc.vidx.size())) {
+                            auto it = sc.vidx[pf_vi].find(pf_val);
+                            if (it != sc.vidx[pf_vi].end()) {
+                                used_map = true;
+                                for (int32_t i : it->second)
+                                    consider(dist_at(&sc.vecs[static_cast<int64_t>(i) * dim]),
+                                             sc.pks[i], i);
+                            } else {
+                                used_map = true;  // value absent -> no rows
+                            }
+                        }
+                        if (!used_map) {
+                            for (int64_t i = 0; i < sc.n; i++) {
+                                if (col_data[i] != pf_val) continue;
+                                consider(dist_at(&sc.vecs[i * dim]), sc.pks[i], static_cast<int32_t>(i));
                             }
                         }
                     } else {
                         for (int64_t i = 0; i < sc.n; i++) {
                             if (!row_matches(sc.rows[i], where)) continue;
-                            float dsq = l2_sq_fast(&sc.vecs[i * dim], qvec, dim);
-                            if (top_n < K) {
-                                cands_[top_n++] = {dsq, sc.pks[i], static_cast<int32_t>(i)};
-                                if (top_n == K)
-                                    std::make_heap(cands_.begin(), cands_.begin() + K, entry_worse);
-                            } else if (better_than_top(dsq, sc.pks[i])) {
-                                std::pop_heap(cands_.begin(), cands_.begin() + K, entry_worse);
-                                cands_[K - 1] = {dsq, sc.pks[i], static_cast<int32_t>(i)};
-                                std::push_heap(cands_.begin(), cands_.begin() + K, entry_worse);
-                            }
+                            consider(dist_at(&sc.vecs[i * dim]), sc.pks[i], static_cast<int32_t>(i));
                         }
                     }
                 }
@@ -674,6 +690,32 @@ ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
                     std::sort(cands_.begin(), cands_.end(), cand_less);
                 if (K < cands_.size()) cands_.resize(K);
             }
+            // Recompute the shortlisted distances in double and re-sort: the
+            // float pass only picks candidates; ties ("距离相同按主键升序") and
+            // output values need the exact sum over the stored float32 vector.
+            if (order_dist && !cands_.empty()) {
+                const float* q = item_qvec[order_item].data();
+                std::vector<double> dsq_d(cands_.size());
+                for (size_t ci = 0; ci < cands_.size(); ++ci) {
+                    const float* v = &sc.vecs[static_cast<int64_t>(cands_[ci].idx) * dim];
+                    double s = 0.0;
+                    for (int j = 0; j < dim; ++j) {
+                        double t = (double)v[j] - (double)q[j];
+                        s += t * t;
+                    }
+                    dsq_d[ci] = s;
+                }
+                std::vector<size_t> perm(cands_.size());
+                for (size_t ci = 0; ci < perm.size(); ++ci) perm[ci] = ci;
+                std::sort(perm.begin(), perm.end(), [&](size_t a, size_t b) {
+                    if (dsq_d[a] != dsq_d[b]) return st.order_desc ? (dsq_d[a] > dsq_d[b]) : (dsq_d[a] < dsq_d[b]);
+                    return cands_[a].pk < cands_[b].pk;
+                });
+                std::vector<Cand> sorted;
+                sorted.reserve(cands_.size());
+                for (size_t ci : perm) sorted.push_back(cands_[ci]);
+                cands_.swap(sorted);
+            }
             for (auto& c : cands_) {
                 const Row& row = sc.rows[c.idx];
                 OutRow o;
@@ -683,9 +725,20 @@ ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
                     if (items[k].is_distance) {
                         Cell cell;
                         cell.kind = Cell::REAL;
-                        cell.d = (static_cast<int>(k) == order_item)
-                            ? std::sqrt(static_cast<double>(c.dsq))
-                            : l2_distance(row[item_col[k]].v, item_qvec[k]);
+                        const float* v = &sc.vecs[static_cast<int64_t>(c.idx) * dim];
+                        const Vector& q = item_qvec[k];
+                        double s = 0.0;
+                        for (int j = 0; j < dim; ++j) {
+                            double t = (double)v[j] - (double)q[j];
+                            s += t * t;
+                        }
+                        cell.d = std::sqrt(s);
+                        o.cells.push_back(std::move(cell));
+                    } else if (item_col[k] == t.schema.vector_index && dim > 0) {
+                        Cell cell;
+                        cell.kind = Cell::VEC;
+                        cell.v.assign(sc.vecs.begin() + static_cast<int64_t>(c.idx) * dim,
+                                      sc.vecs.begin() + (static_cast<int64_t>(c.idx) + 1) * dim);
                         o.cells.push_back(std::move(cell));
                     } else {
                         o.cells.push_back(to_cell(row[item_col[k]]));
@@ -739,6 +792,7 @@ ExecResult Engine::execute(const std::string& sql, const std::string& search_mod
             cur_txn_ = next_txn_++;
             cur_stmt_ = 0;
             stmt_aborted_.clear();
+            txn_writes_.clear();
             return {};
         case StmtType::COMMIT:
             bump_cache();
@@ -746,12 +800,15 @@ ExecResult Engine::execute(const std::string& sql, const std::string& search_mod
             append_commit(cur_txn_);
             cur_txn_ = 0;
             stmt_aborted_.clear();
+            txn_writes_.clear();
             return {};
         case StmtType::ROLLBACK:
             bump_cache();
             if (cur_txn_ == 0) throw DbError("no_transaction", "no active transaction");
             log_.append(REC_ABORT, cur_txn_, 0, "");
             aborted_.insert(cur_txn_);
+            for (auto& [tid, pk] : txn_writes_) row_cache_[tid].erase(pk);
+            txn_writes_.clear();
             cur_txn_ = 0;
             stmt_aborted_.clear();
             return {};
@@ -769,6 +826,8 @@ void Engine::shutdown() {
     if (cur_txn_ != 0) {
         log_.append(REC_ABORT, cur_txn_, 0, "");
         aborted_.insert(cur_txn_);
+        for (auto& [tid, pk] : txn_writes_) row_cache_[tid].erase(pk);
+        txn_writes_.clear();
         cur_txn_ = 0;
     }
     log_.sync();

@@ -56,65 +56,106 @@ inline std::string trim(const std::string& s) {
     return s.substr(b, e - b + 1);
 }
 
-inline float fast_parse_float(const char* s, const char** end) {
-    const char* p = s;
-    float sign = 1.0f;
-    if (*p == '-') { sign = -1.0f; p++; }
-    else if (*p == '+') p++;
-    if (!(*p >= '0' && *p <= '9') && *p != '.') { *end = s; return 0; }
-    float val = 0;
-    while (*p >= '0' && *p <= '9') { val = val * 10.0f + (*p - '0'); p++; }
-    if (*p == '.') {
-        p++;
-        float frac = 0.1f;
-        while (*p >= '0' && *p <= '9') { val += (*p - '0') * frac; frac *= 0.1f; p++; }
+// ASCII case-insensitive equality without allocating.
+inline bool ieq_ascii(const std::string& a, const std::string& b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i) {
+        char x = a[i], y = b[i];
+        if (x >= 'a' && x <= 'z') x = static_cast<char>(x - 'a' + 'A');
+        if (y >= 'a' && y <= 'z') y = static_cast<char>(y - 'a' + 'A');
+        if (x != y) return false;
     }
-    if (*p == 'e' || *p == 'E' || *p == 'x' || *p == 'X' ||
-        (*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z')) {
-        *end = s; return 0;
+    return true;
+}
+
+inline bool ieq_ascii(const std::string& a, const char* b) {
+    size_t i = 0;
+    for (; i < a.size(); ++i) {
+        char x = a[i];
+        if (x >= 'a' && x <= 'z') x = static_cast<char>(x - 'a' + 'A');
+        if (!b[i] || x != b[i]) return false;
+    }
+    return b[i] == '\0';
+}
+
+inline bool fast_parse_float(const char* s, const char* lim, const char** end, float* out) {
+    // Exact for <= 15 significant decimal digits (integer numerator stays within
+    // 2^53 and a single IEEE division rounds once) - matches strtod->float cast.
+    const char* p = s;
+    double sign = 1.0;
+    if (p < lim && *p == '-') { sign = -1.0; ++p; }
+    else if (p < lim && *p == '+') ++p;
+    if (!(p < lim && ((*p >= '0' && *p <= '9') || *p == '.'))) { *end = s; return false; }
+    double num = 0;
+    int digits = 0;
+    bool any = false;
+    while (p < lim && *p >= '0' && *p <= '9') { num = num * 10.0 + (*p - '0'); ++p; ++digits; any = true; }
+    double scale = 1.0;
+    if (p < lim && *p == '.') {
+        ++p;
+        while (p < lim && *p >= '0' && *p <= '9') {
+            num = num * 10.0 + (*p - '0');
+            scale *= 10.0;
+            ++p; ++digits; any = true;
+        }
+    }
+    if (!any || digits > 15) { *end = s; return false; }
+    if (p < lim && (*p == 'e' || *p == 'E' || *p == 'x' || *p == 'X' ||
+                    (*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z'))) {
+        *end = s; return false;
     }
     *end = p;
-    return sign * val;
+    *out = static_cast<float>(sign * num / scale);
+    return true;
 }
 
 inline Vector parse_vector_literal(const std::string& raw, uint32_t dim) {
-    std::string t = trim(raw);
-    if (t.size() < 2 || t.front() != '[' || t.back() != ']')
+    const char* base = raw.data();
+    const char* p = base;
+    const char* end = base + raw.size();
+    while (p < end && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')) ++p;
+    const char* e = end;
+    while (e > p && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\r' || e[-1] == '\n')) --e;
+    if (e - p < 2 || *p != '[' || e[-1] != ']')
         throw DbError("invalid_vector", "vector literal must be bracketed");
-    std::string body = t.substr(1, t.size() - 2);
+    ++p;
+    --e;  // interior span [p, e)
     Vector out;
-    size_t pos = 0;
-    if (trim(body).empty()) {
+    const char* q = p;
+    while (q < e && (*q == ' ' || *q == '\t' || *q == '\r' || *q == '\n')) ++q;
+    if (q >= e) {
         if (dim != 0) throw DbError("dimension_mismatch", "empty vector literal");
         return out;
     }
+    out.reserve(dim ? dim : 8);
     while (true) {
-        size_t comma = body.find(',', pos);
-        std::string tok = trim(body.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos));
-        if (tok.empty()) throw DbError("invalid_vector", "empty vector element");
+        while (p < e && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')) ++p;
+        if (p >= e) throw DbError("invalid_vector", "empty vector element");
         const char* endp = nullptr;
-        float f = fast_parse_float(tok.c_str(), &endp);
-        if (endp == tok.c_str()) {
+        float f = 0;
+        if (!fast_parse_float(p, e, &endp, &f)) {
             errno = 0;
             char* end2 = nullptr;
-            double d = std::strtod(tok.c_str(), &end2);
-            if (end2 == tok.c_str() || *end2 != '\0')
-                throw DbError("invalid_vector", "non-numeric vector element: " + tok);
+            double d = std::strtod(p, &end2);
+            if (end2 == p || end2 > e)
+                throw DbError("invalid_vector", "non-numeric vector element");
             if (std::isnan(d) || std::isinf(d))
                 throw DbError("invalid_vector", "NaN/Infinity not allowed");
             if (d > std::numeric_limits<float>::max() || d < -std::numeric_limits<float>::max())
                 throw DbError("invalid_vector", "float32 overflow");
             f = static_cast<float>(d);
             if (std::isinf(f)) throw DbError("invalid_vector", "float32 overflow");
-        } else if (*endp != '\0') {
-            throw DbError("invalid_vector", "non-numeric vector element: " + tok);
+            endp = end2;
         } else {
             if (std::isnan(f) || std::isinf(f))
                 throw DbError("invalid_vector", "NaN/Infinity not allowed");
         }
         out.push_back(f);
-        if (comma == std::string::npos) break;
-        pos = comma + 1;
+        p = endp;
+        while (p < e && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')) ++p;
+        if (p >= e) break;
+        if (*p == ',') { ++p; continue; }
+        throw DbError("invalid_vector", "non-numeric vector element");
     }
     if (out.size() != dim)
         throw DbError("dimension_mismatch", "vector dimension mismatch");

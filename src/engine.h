@@ -48,6 +48,8 @@ private:
             std::vector<float> vecs;
             std::vector<Row> rows;
             std::vector<std::vector<std::string>> vcols;
+            // per VARCHAR column: value -> matching row positions (vcols order)
+            std::vector<std::unordered_map<std::string, std::vector<int32_t>>> vidx;
         };
         FastScan scan;
     };
@@ -78,9 +80,10 @@ private:
     };
     std::unordered_map<uint32_t, std::unordered_map<int64_t, CachedRow>> row_cache_;
     uint64_t cache_epoch_ = 0;
-    uint64_t cache_seen_epoch_ = 0;
     size_t cache_bytes_ = 0;
     void bump_cache() { ++cache_epoch_; }
+    Row* cache_put(uint32_t tid, int64_t pk, uint64_t head, Row row);
+    std::vector<std::pair<uint32_t, int64_t>> txn_writes_;
     std::unordered_map<uint32_t, Table> tables_;
     std::unordered_map<std::string, uint32_t> by_name_;
     uint32_t next_table_id_ = 1;

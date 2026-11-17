@@ -78,35 +78,44 @@ void Log::open(const std::string& dir) {
     }
 }
 
+void Log::flush_buf() {
+    if (!wbuf_.empty()) {
+        write_full(fd_, wbuf_.data(), wbuf_.size());
+        wbuf_.clear();
+    }
+}
+
 uint64_t Log::append(uint8_t type, uint64_t txn, uint32_t stmt, const std::string& payload) {
     uint32_t body_len = static_cast<uint32_t>(13 + payload.size());
-    std::string frame;
-    frame.reserve(4 + body_len + 4);
-    frame.append(reinterpret_cast<const char*>(&body_len), 4);
-    frame.append(reinterpret_cast<const char*>(&txn), 8);
-    frame.append(reinterpret_cast<const char*>(&stmt), 4);
-    frame.push_back(static_cast<char>(type));
-    frame += payload;
-    frame.append(reinterpret_cast<const char*>(&kEndMagic), 4);
     uint64_t off = size_;
-    write_full(fd_, frame.data(), frame.size());
-    size_ += frame.size();
-    // page cache is charged to the container memcg; drop written ranges periodically
-    // or large loads OOM under the 2GiB limit (dirty pages outrun writeback)
-    if (size_ - drop_pos_ >= 64ull * 1024ull * 1024ull) {
-        ::posix_fadvise(fd_, static_cast<off_t>(drop_pos_),
-                        static_cast<off_t>(size_ - drop_pos_), POSIX_FADV_DONTNEED);
-        drop_pos_ = size_;
-    }
+    wbuf_.reserve(wbuf_.size() + 4 + body_len + 4);
+    wbuf_.append(reinterpret_cast<const char*>(&body_len), 4);
+    wbuf_.append(reinterpret_cast<const char*>(&txn), 8);
+    wbuf_.append(reinterpret_cast<const char*>(&stmt), 4);
+    wbuf_.push_back(static_cast<char>(type));
+    wbuf_ += payload;
+    wbuf_.append(reinterpret_cast<const char*>(&kEndMagic), 4);
+    size_ += 4 + static_cast<uint64_t>(body_len) + 4;
+    if (wbuf_.size() >= 1024 * 1024) flush_buf();
     return off;
 }
 
 void Log::sync() {
-    if (fd_ >= 0 && ::fdatasync(fd_) != 0)
-        throw DbError("internal_error", "fsync failed");
+    if (fd_ >= 0) {
+        flush_buf();
+        if (::fdatasync(fd_) != 0) throw DbError("internal_error", "fsync failed");
+        // written pages are clean now - drop them from the page cache so the
+        // container memory.peak (which charges page cache) stays low
+        if (size_ - drop_pos_ >= 1024 * 1024) {
+            ::posix_fadvise(fd_, static_cast<off_t>(drop_pos_),
+                            static_cast<off_t>(size_ - drop_pos_), POSIX_FADV_DONTNEED);
+            drop_pos_ = size_;
+        }
+    }
 }
 
 void Log::drop_cache() {
+    flush_buf();
     if (fd_ >= 0) {
         ::posix_fadvise(fd_, 0, 0, POSIX_FADV_DONTNEED);
         drop_pos_ = size_;
@@ -114,6 +123,7 @@ void Log::drop_cache() {
 }
 
 void Log::scan(const std::function<void(const RecordView&)>& cb) {
+    flush_buf();
     uint64_t off = kHeaderSize;
     while (off < size_) {
         if (size_ - off < 4) break;
@@ -143,6 +153,7 @@ void Log::scan(const std::function<void(const RecordView&)>& cb) {
 }
 
 RecordView Log::read_at(uint64_t offset) {
+    flush_buf();
     uint32_t body_len = 0;
     read_full(fd_, offset, reinterpret_cast<char*>(&body_len), 4);
     if (body_len < 13 || body_len > kMaxRecord)
@@ -163,6 +174,7 @@ RecordView Log::read_at(uint64_t offset) {
 
 void Log::close() {
     if (fd_ >= 0) {
+        flush_buf();
         ::close(fd_);
         fd_ = -1;
     }

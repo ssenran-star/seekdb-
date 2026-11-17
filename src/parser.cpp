@@ -14,12 +14,6 @@ struct Token {
     bool is_float = false;
 };
 
-std::string upper(const std::string& s) {
-    std::string r = s;
-    for (char& c : r) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-    return r;
-}
-
 class Lexer {
 public:
     explicit Lexer(const std::string& sql) : s_(sql) {}
@@ -35,7 +29,29 @@ public:
         if (c == '\'') {
             t.kind = Token::STRING;
             ++pos_;
+            // fast path: find the closing quote first; if no '' escape is
+            // present copy the span in one shot instead of char by char
+            size_t scan = pos_;
+            bool esc = false;
+            while (true) {
+                if (scan >= s_.size()) throw DbError("syntax_error", "unterminated string");
+                if (s_[scan] == '\'') {
+                    if (scan + 1 < s_.size() && s_[scan + 1] == '\'') {
+                        esc = true;
+                        scan += 2;
+                        continue;
+                    }
+                    break;
+                }
+                ++scan;
+            }
+            if (!esc) {
+                t.text.assign(s_, pos_, scan - pos_);
+                pos_ = scan + 1;
+                return t;
+            }
             std::string out;
+            out.reserve(scan - pos_);
             while (true) {
                 if (pos_ >= s_.size()) throw DbError("syntax_error", "unterminated string");
                 char ch = s_[pos_++];
@@ -127,8 +143,8 @@ public:
     Statement parse() {
         Statement st;
         if (tok_.kind != Token::IDENT) throw DbError("syntax_error", "expected statement");
-        std::string kw = upper(tok_.text);
-        if (kw == "CREATE") {
+        const std::string& kwref = tok_.text;
+        if (ieq_ascii(kwref, "CREATE")) {
             advance();
             if (accept_kw("TABLE")) {
                 st.type = StmtType::CREATE_TABLE;
@@ -145,7 +161,7 @@ public:
             } else {
                 throw DbError("unsupported_sql", "unsupported CREATE target");
             }
-        } else if (kw == "INSERT") {
+        } else if (ieq_ascii(kwref, "INSERT")) {
             st.type = StmtType::INSERT;
             advance();
             expect_kw("INTO");
@@ -169,11 +185,11 @@ public:
                 st.rows.push_back(std::move(row));
                 if (!accept_punct(",")) break;
             }
-        } else if (kw == "SELECT") {
+        } else if (ieq_ascii(kwref, "SELECT")) {
             st.type = StmtType::SELECT;
             advance();
             parse_select(st);
-        } else if (kw == "UPDATE") {
+        } else if (ieq_ascii(kwref, "UPDATE")) {
             st.type = StmtType::UPDATE;
             advance();
             st.table = expect_ident();
@@ -186,24 +202,26 @@ public:
                 if (!accept_punct(",")) break;
             }
             if (accept_kw("WHERE")) parse_where(st);
-        } else if (kw == "DELETE") {
+        } else if (ieq_ascii(kwref, "DELETE")) {
             st.type = StmtType::DELETE_ROWS;
             advance();
             expect_kw("FROM");
             st.table = expect_ident();
             if (accept_kw("WHERE")) parse_where(st);
-        } else if (kw == "BEGIN") {
+        } else if (ieq_ascii(kwref, "BEGIN")) {
             st.type = StmtType::BEGIN;
             advance();
             accept_kw("TRANSACTION");
-        } else if (kw == "COMMIT") {
+        } else if (ieq_ascii(kwref, "COMMIT")) {
             st.type = StmtType::COMMIT;
             advance();
-        } else if (kw == "ROLLBACK") {
+        } else if (ieq_ascii(kwref, "ROLLBACK")) {
             st.type = StmtType::ROLLBACK;
             advance();
-        } else if (kw == "ALTER" || kw == "DROP" || kw == "TRUNCATE" || kw == "GRANT" ||
-                   kw == "EXPLAIN" || kw == "SHOW" || kw == "USE" || kw == "SET") {
+        } else if (ieq_ascii(kwref, "ALTER") || ieq_ascii(kwref, "DROP") ||
+                   ieq_ascii(kwref, "TRUNCATE") || ieq_ascii(kwref, "GRANT") ||
+                   ieq_ascii(kwref, "EXPLAIN") || ieq_ascii(kwref, "SHOW") ||
+                   ieq_ascii(kwref, "USE") || ieq_ascii(kwref, "SET")) {
             throw DbError("unsupported_sql", "unsupported statement: " + tok_.text);
         } else {
             throw DbError("syntax_error", "unknown statement: " + tok_.text);
@@ -217,7 +235,7 @@ private:
     void advance() { tok_ = lex_.next(); }
 
     bool accept_kw(const char* kw) {
-        if (tok_.kind == Token::IDENT && upper(tok_.text) == kw) {
+        if (tok_.kind == Token::IDENT && ieq_ascii(tok_.text, kw)) {
             advance();
             return true;
         }
@@ -262,7 +280,7 @@ private:
             advance();
             return lit;
         }
-        if (tok_.kind == Token::IDENT && upper(tok_.text) == "NULL")
+        if (tok_.kind == Token::IDENT && ieq_ascii(tok_.text, "NULL"))
             throw DbError("unsupported_sql", "NULL is not supported");
         throw DbError("syntax_error", "expected literal");
     }
@@ -273,10 +291,10 @@ private:
         while (true) {
             ColumnDef col;
             col.name = expect_ident();
-            std::string ty = upper(expect_ident());
-            if (ty == "BIGINT") {
+            std::string ty = expect_ident();
+            if (ieq_ascii(ty, "BIGINT")) {
                 col.type = ValType::BIGINT;
-            } else if (ty == "VARCHAR") {
+            } else if (ieq_ascii(ty, "VARCHAR")) {
                 col.type = ValType::VARCHAR;
                 expect_punct("(");
                 if (tok_.kind != Token::NUMBER || tok_.is_float || tok_.ival <= 0)
@@ -284,7 +302,7 @@ private:
                 col.len = static_cast<uint32_t>(tok_.ival);
                 advance();
                 expect_punct(")");
-            } else if (ty == "VECTOR") {
+            } else if (ieq_ascii(ty, "VECTOR")) {
                 col.type = ValType::VECTOR;
                 expect_punct("(");
                 if (tok_.kind != Token::NUMBER || tok_.is_float || tok_.ival <= 0)
@@ -318,7 +336,7 @@ private:
         } else {
             while (true) {
                 SelectItem item;
-                if (tok_.kind == Token::IDENT && upper(tok_.text) == "L2_DISTANCE") {
+                if (tok_.kind == Token::IDENT && ieq_ascii(tok_.text, "L2_DISTANCE")) {
                     advance();
                     expect_punct("(");
                     item.is_distance = true;
@@ -330,18 +348,21 @@ private:
                     advance();
                     expect_punct(")");
                 } else {
-                    std::string kw = tok_.kind == Token::IDENT ? upper(tok_.text) : "";
-                    if (kw == "JOIN" || kw == "INNER" || kw == "LEFT" || kw == "RIGHT" ||
-                        kw == "GROUP" || kw == "HAVING" || kw == "DISTINCT" || kw == "COUNT" ||
-                        kw == "SUM" || kw == "AVG" || kw == "MIN" || kw == "MAX")
+                    if (tok_.kind == Token::IDENT &&
+                        (ieq_ascii(tok_.text, "JOIN") || ieq_ascii(tok_.text, "INNER") ||
+                         ieq_ascii(tok_.text, "LEFT") || ieq_ascii(tok_.text, "RIGHT") ||
+                         ieq_ascii(tok_.text, "GROUP") || ieq_ascii(tok_.text, "HAVING") ||
+                         ieq_ascii(tok_.text, "DISTINCT") || ieq_ascii(tok_.text, "COUNT") ||
+                         ieq_ascii(tok_.text, "SUM") || ieq_ascii(tok_.text, "AVG") ||
+                         ieq_ascii(tok_.text, "MIN") || ieq_ascii(tok_.text, "MAX")))
                         throw DbError("unsupported_sql", "unsupported SELECT feature");
                     item.column = expect_ident();
                 }
                 if (accept_kw("AS")) {
                     item.alias = expect_ident();
-                } else if (tok_.kind == Token::IDENT && upper(tok_.text) != "FROM" &&
-                           upper(tok_.text) != "WHERE" && upper(tok_.text) != "ORDER" &&
-                           upper(tok_.text) != "LIMIT") {
+                } else if (tok_.kind == Token::IDENT && !ieq_ascii(tok_.text, "FROM") &&
+                           !ieq_ascii(tok_.text, "WHERE") && !ieq_ascii(tok_.text, "ORDER") &&
+                           !ieq_ascii(tok_.text, "LIMIT")) {
                     item.alias = expect_ident();
                 }
                 st.items.push_back(std::move(item));
@@ -349,7 +370,7 @@ private:
             }
         }
         expect_kw("FROM");
-        if (tok_.kind == Token::IDENT && upper(tok_.text) == "SELECT")
+        if (tok_.kind == Token::IDENT && ieq_ascii(tok_.text, "SELECT"))
             throw DbError("unsupported_sql", "subqueries not supported");
         st.table = expect_ident();
         if (tok_.kind == Token::PUNCT && tok_.text == ",")
@@ -372,18 +393,20 @@ private:
             st.limit = tok_.ival;
             advance();
         }
-        if (tok_.kind == Token::IDENT) {
-            std::string kw = upper(tok_.text);
-            if (kw == "JOIN" || kw == "GROUP" || kw == "HAVING" || kw == "UNION" || kw == "OFFSET")
-                throw DbError("unsupported_sql", "unsupported SELECT feature: " + kw);
-        }
+        if (tok_.kind == Token::IDENT &&
+            (ieq_ascii(tok_.text, "JOIN") || ieq_ascii(tok_.text, "GROUP") ||
+             ieq_ascii(tok_.text, "HAVING") || ieq_ascii(tok_.text, "UNION") ||
+             ieq_ascii(tok_.text, "OFFSET")))
+            throw DbError("unsupported_sql", "unsupported SELECT feature: " + tok_.text);
     }
 
     void parse_where(Statement& st) {
         while (true) {
-            std::string kw = tok_.kind == Token::IDENT ? upper(tok_.text) : "";
-            if (kw == "OR" || kw == "LIKE" || kw == "IN" || kw == "BETWEEN" || kw == "IS" ||
-                kw == "NOT" || kw == "EXISTS")
+            if (tok_.kind == Token::IDENT &&
+                (ieq_ascii(tok_.text, "OR") || ieq_ascii(tok_.text, "LIKE") ||
+                 ieq_ascii(tok_.text, "IN") || ieq_ascii(tok_.text, "BETWEEN") ||
+                 ieq_ascii(tok_.text, "IS") || ieq_ascii(tok_.text, "NOT") ||
+                 ieq_ascii(tok_.text, "EXISTS")))
                 throw DbError("unsupported_sql", "unsupported WHERE feature");
             Predicate p;
             p.column = expect_ident();
