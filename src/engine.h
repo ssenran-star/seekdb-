@@ -1,6 +1,8 @@
 #pragma once
 #include <condition_variable>
 #include <cstdlib>
+#include <cstddef>
+#include <new>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -20,7 +22,11 @@ namespace mvdb {
 template <typename T, std::size_t Align = 64>
 struct AlignAlloc {
     using value_type = T;
+    using size_type = std::size_t;
+    using difference_type = std::ptrdiff_t;
+    using propagate_on_container_move_assignment = std::true_type;
     using is_always_equal = std::true_type;
+    template <typename U> struct rebind { using other = AlignAlloc<U, Align>; };
     AlignAlloc() noexcept = default;
     template <typename U> AlignAlloc(const AlignAlloc<U, Align>&) noexcept {}
     T* allocate(std::size_t n) {
@@ -30,9 +36,11 @@ struct AlignAlloc {
         return static_cast<T*>(p);
     }
     void deallocate(T* p, std::size_t) noexcept { std::free(p); }
-    template <typename U> bool operator==(const AlignAlloc<U, Align>&) const noexcept { return true; }
-    template <typename U> bool operator!=(const AlignAlloc<U, Align>&) const noexcept { return false; }
 };
+template <typename T, typename U, std::size_t A>
+inline bool operator==(const AlignAlloc<T, A>&, const AlignAlloc<U, A>&) noexcept { return true; }
+template <typename T, typename U, std::size_t A>
+inline bool operator!=(const AlignAlloc<T, A>&, const AlignAlloc<U, A>&) noexcept { return false; }
 
 struct Cell {
     enum Kind { INT, STR, VEC, REAL } kind = INT;
