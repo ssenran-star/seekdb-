@@ -341,11 +341,12 @@ bool PackedScan::ensure_in_buf(uint64_t off, size_t n) {
 }
 
 void PackedScan::evict_written() {
-    // Leave a dirty tail so mid-build flushes can start writeback without
-    // stalling on WAIT_AFTER every window. DONTNEED only evicts clean
-    // pages, so a lagged prefix is waited on to keep memory.peak from
-    // holding the whole snapshot plus the WAL.
-    constexpr uint64_t keep = 8ull << 20;
+    // Leave a small dirty tail so mid-build flushes can start writeback
+    // without WAIT_AFTER on every window. DONTNEED only evicts clean
+    // pages, so the lagged prefix is waited on (or fdatasync'd if the
+    // range wait fails) to keep memory.peak from holding WAL + the
+    // whole snapshot.
+    constexpr uint64_t keep = 2ull << 20;
     if (fd_ < 0 || size_ <= kHeaderSize + keep) return;
     uint64_t issue_to = (size_ - keep) & ~4095ull;
 #if defined(__linux__)
@@ -362,8 +363,9 @@ void PackedScan::evict_written() {
     if (evict_to > evict_pos_) {
         off_t start = static_cast<off_t>(evict_pos_);
         off_t len = static_cast<off_t>(evict_to - evict_pos_);
-        ::sync_file_range(fd_, start, len,
-                          SYNC_FILE_RANGE_WRITE | SYNC_FILE_RANGE_WAIT_AFTER);
+        int rc = ::sync_file_range(fd_, start, len,
+                                   SYNC_FILE_RANGE_WRITE | SYNC_FILE_RANGE_WAIT_AFTER);
+        if (rc != 0) ::fdatasync(fd_);
         ::posix_fadvise(fd_, start, len, POSIX_FADV_DONTNEED);
         evict_pos_ = evict_to;
     }

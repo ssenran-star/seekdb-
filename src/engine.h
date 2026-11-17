@@ -124,6 +124,7 @@ private:
     size_t cache_bytes_ = 0;
     void bump_cache() { ++cache_epoch_; }
     Row* cache_put(uint32_t tid, int64_t pk, uint64_t head, Row row);
+    void release_insert_cache();
     std::vector<std::pair<uint32_t, int64_t>> txn_writes_;
     std::unordered_map<uint32_t, Table> tables_;
     std::unordered_map<std::string, uint32_t> by_name_;

@@ -5,6 +5,9 @@
 #include <condition_variable>
 #include <cstring>
 #include <functional>
+#if defined(__linux__)
+#include <malloc.h>
+#endif
 #include <mutex>
 #include <queue>
 #include <string_view>
@@ -131,6 +134,16 @@ bool mid_where_ok(int64_t pk, int pk_index, const std::vector<int>& mid_cols,
 
 bool table_too_big_for_fastscan(int64_t n, int dim) {
     return n > 500000 || (dim > 0 && n * static_cast<int64_t>(dim) * 4 > 512LL * 1024 * 1024);
+}
+
+int table_dim(const TableSchema& s) {
+    return s.vector_index >= 0 ? static_cast<int>(s.cols[static_cast<size_t>(s.vector_index)].len) : 0;
+}
+
+void trim_heap() {
+#if defined(__linux__)
+    ::malloc_trim(0);
+#endif
 }
 }  // namespace
 
@@ -337,6 +350,13 @@ Row* Engine::cache_put(uint32_t tid, int64_t pk, uint64_t head, Row row) {
     return &slot.row;
 }
 
+void Engine::release_insert_cache() {
+    if (row_cache_.empty() && cache_bytes_ == 0) return;
+    row_cache_.clear();
+    cache_bytes_ = 0;
+    trim_heap();
+}
+
 bool Engine::row_matches(const Row& row,
                          const std::vector<std::pair<int, Predicate>>& where) {
     for (auto& [idx, p] : where) {
@@ -486,7 +506,13 @@ ExecResult Engine::exec_insert(const Statement& st) {
         uint64_t off = log_.append(REC_INSERT, txn, stmt, ins.data);
         t.latest[pk] = off;
         if (t.ann && s.vector_index >= 0) t.ann->insert(pk, row[s.vector_index].v);
-        cache_put(s.table_id, pk, off, std::move(row));
+        // Over-memory tables are served by packed scan, not row_cache_.
+        // Stop retaining decoded insert rows once FastScan is off so the
+        // shutdown snapshot is not charged on top of a 256MiB cache.
+        if (table_too_big_for_fastscan(static_cast<int64_t>(t.latest.size()), table_dim(s)))
+            release_insert_cache();
+        else
+            cache_put(s.table_id, pk, off, std::move(row));
         if (!is_auto) txn_writes_.emplace_back(s.table_id, pk);
     }
     if (is_auto) append_commit(txn);
@@ -532,7 +558,10 @@ ExecResult Engine::exec_update(const Statement& st) {
             t.ann->erase(pk);
             t.ann->insert(pk, row[s.vector_index].v);
         }
-        cache_put(s.table_id, pk, off, std::move(row));
+        if (table_too_big_for_fastscan(static_cast<int64_t>(t.latest.size()), table_dim(s)))
+            release_insert_cache();
+        else
+            cache_put(s.table_id, pk, off, std::move(row));
         if (!is_auto) txn_writes_.emplace_back(s.table_id, pk);
     }
     if (is_auto) append_commit(txn);
@@ -705,6 +734,11 @@ void Engine::ensure_packed_scan(Table& t) {
         t.packed_epoch = cache_epoch_;
         return;
     }
+    // Fresh build rereads the WAL and writes a packed file about the same
+    // size as the vectors. Drop the insert-time cache and already-durable
+    // WAL pages first so memory.peak is not row_cache + WAL + snapshot.
+    release_insert_cache();
+    log_.drop_cache();
     std::vector<ValType> mid_types;
     std::vector<int> mid_cols;
     mid_layout(t.schema, mid_types, mid_cols);
@@ -1679,12 +1713,18 @@ void Engine::shutdown() {
     // COMMIT/autocommit fsync is unchanged; this only covers a possible
     // shutdown abort record.
     log_.sync();
+    bool build_packed = false;
     for (auto& [id, t] : tables_) {
-        int dim = t.schema.vector_index >= 0
-                      ? static_cast<int>(t.schema.cols[static_cast<size_t>(t.schema.vector_index)].len)
-                      : 0;
+        if (table_too_big_for_fastscan(static_cast<int64_t>(t.latest.size()), table_dim(t.schema)))
+            build_packed = true;
+    }
+    if (build_packed) {
+        release_insert_cache();
+        log_.drop_cache();
+    }
+    for (auto& [id, t] : tables_) {
         // Over-memory tables only; the 10k FastScan path stays untouched.
-        if (table_too_big_for_fastscan(static_cast<int64_t>(t.latest.size()), dim)) {
+        if (table_too_big_for_fastscan(static_cast<int64_t>(t.latest.size()), table_dim(t.schema))) {
             try {
                 ensure_packed_scan(t);
             } catch (...) {
@@ -1694,6 +1734,7 @@ void Engine::shutdown() {
         }
         if (t.packed) t.packed->close();
     }
+    log_.drop_cache();
     log_.close();
 }
 
