@@ -1,3 +1,6 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #include "storage.h"
 
 #include <fcntl.h>
@@ -5,6 +8,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cstring>
 
 namespace mvdb {
 
@@ -237,8 +241,283 @@ void Log::close() {
         rbuf_off_ = 0;
         rbuf_.clear();
         ::close(fd_);
+        
+PackedScan::~PackedScan() { close(); }
+
+void PackedScan::close() {
+    if (fd_ >= 0) {
+        if (writing_) {
+            try { flush_wbuf(); } catch (...) {}
+        }
+        rbuf_len_ = 0;
+        rbuf_off_ = 0;
+        rbuf_.clear();
+        wbuf_.clear();
+        ::close(fd_);
         fd_ = -1;
+    }
+    ready_ = false;
+    writing_ = false;
+}
+
+void PackedScan::write_header(bool complete) {
+    if (fd_ < 0) return;
+    char hdr[kHeaderSize];
+    std::memset(hdr, 0, sizeof(hdr));
+    uint32_t magic = kMagic, ver = kVersion, complete_u = complete ? 1u : 0u;
+    uint32_t dim_u = static_cast<uint32_t>(dim_);
+    std::memcpy(hdr + 0, &magic, 4);
+    std::memcpy(hdr + 4, &ver, 4);
+    std::memcpy(hdr + 8, &table_id_, 4);
+    std::memcpy(hdr + 12, &dim_u, 4);
+    std::memcpy(hdr + 16, &n_, 8);
+    std::memcpy(hdr + 24, &log_size_, 8);
+    std::memcpy(hdr + 32, &committed_max_, 8);
+    std::memcpy(hdr + 40, &complete_u, 4);
+    ssize_t off = 0;
+    while (off < static_cast<ssize_t>(kHeaderSize)) {
+        ssize_t w = ::pwrite(fd_, hdr + off, kHeaderSize - static_cast<size_t>(off), off);
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            throw DbError("internal_error", "packed scan header write failed");
+        }
+        off += w;
     }
 }
 
+void PackedScan::invalidate_read_buf() {
+    if (rbuf_len_ > 0) {
+        drop_upto(rbuf_off_ + rbuf_len_);
+        rbuf_len_ = 0;
+        rbuf_off_ = 0;
+    }
+}
+
+void PackedScan::drop_upto(uint64_t off) {
+    if (fd_ < 0 || off <= drop_pos_) return;
+    constexpr uint64_t page = 4096;
+    uint64_t start = (drop_pos_ + page - 1) & ~(page - 1);
+    uint64_t end = off & ~(page - 1);
+    if (end <= start) return;
+    ::posix_fadvise(fd_, static_cast<off_t>(start),
+                    static_cast<off_t>(end - start), POSIX_FADV_DONTNEED);
+    drop_pos_ = end;
+}
+
+void PackedScan::drop_cache() {
+    flush_wbuf();
+    if (fd_ >= 0) {
+        ::posix_fadvise(fd_, 0, 0, POSIX_FADV_DONTNEED);
+        drop_pos_ = size_;
+    }
+}
+
+bool PackedScan::ensure_in_buf(uint64_t off, size_t n) {
+    if (n == 0) return true;
+    if (off >= rbuf_off_ && off + n <= rbuf_off_ + rbuf_len_) return true;
+    if (off + n > size_) return false;
+    // Leave a small tail so a 4-wide kernel can still hold pointers into
+    // the previous few rows when the window advances.
+    constexpr uint64_t kHold = 64ull * 1024ull;
+    if (rbuf_len_ > 0) {
+        if (off >= rbuf_off_ + kHold) drop_upto(off > kHold ? off - kHold : 0);
+        else if (off < rbuf_off_) drop_upto(rbuf_off_ + rbuf_len_);
+    }
+    uint64_t avail = size_ - off;
+    size_t want = static_cast<size_t>(std::min<uint64_t>(
+        std::max<uint64_t>(kReadWindow, n), avail));
+    if (want < n) return false;
+    rbuf_.resize(want);
+    read_full(fd_, off, rbuf_.data(), want);
+    rbuf_off_ = off;
+    rbuf_len_ = want;
+    constexpr uint64_t page = 4096;
+    uint64_t aligned = off & ~(page - 1);
+    if (aligned < drop_pos_) drop_pos_ = aligned;
+    return true;
+}
+
+void PackedScan::evict_written() {
+    constexpr uint64_t keep = 256ull << 10;
+    if (fd_ < 0 || size_ <= kHeaderSize + keep) return;
+    uint64_t evict_to = (size_ - keep) & ~4095ull;
+    if (evict_to <= evict_pos_) return;
+#if defined(__linux__)
+    off_t start = static_cast<off_t>(evict_pos_);
+    off_t len = static_cast<off_t>(evict_to - evict_pos_);
+    ::sync_file_range(fd_, start, len,
+                      SYNC_FILE_RANGE_WRITE | SYNC_FILE_RANGE_WAIT_AFTER);
+    ::posix_fadvise(fd_, start, len, POSIX_FADV_DONTNEED);
+#endif
+    evict_pos_ = evict_to;
+}
+
+void PackedScan::flush_wbuf() {
+    if (wbuf_.empty() || fd_ < 0) return;
+    invalidate_read_buf();
+    write_full(fd_, wbuf_.data(), wbuf_.size());
+    size_ += wbuf_.size();
+    wbuf_.clear();
+    evict_written();
+}
+
+bool PackedScan::try_open_existing(const std::string& path, uint32_t table_id, int dim,
+                                   uint64_t log_size, uint64_t committed_max) {
+    close();
+    path_ = path;
+    int fd = ::open(path.c_str(), O_RDWR);
+    if (fd < 0) return false;
+    fd_ = fd;
+    char hdr[kHeaderSize];
+    try {
+        read_full(fd_, 0, hdr, kHeaderSize);
+    } catch (...) {
+        close();
+        return false;
+    }
+    uint32_t magic = 0, ver = 0, tid = 0, dim_u = 0, complete = 0;
+    uint64_t n = 0, lsz = 0, cmax = 0;
+    std::memcpy(&magic, hdr + 0, 4);
+    std::memcpy(&ver, hdr + 4, 4);
+    std::memcpy(&tid, hdr + 8, 4);
+    std::memcpy(&dim_u, hdr + 12, 4);
+    std::memcpy(&n, hdr + 16, 8);
+    std::memcpy(&lsz, hdr + 24, 8);
+    std::memcpy(&cmax, hdr + 32, 8);
+    std::memcpy(&complete, hdr + 40, 4);
+    off_t end = ::lseek(fd_, 0, SEEK_END);
+    if (end < static_cast<off_t>(kHeaderSize) ||
+        magic != kMagic || ver != kVersion || complete != 1 ||
+        tid != table_id || static_cast<int>(dim_u) != dim ||
+        lsz != log_size || cmax != committed_max) {
+        close();
+        return false;
+    }
+    table_id_ = tid;
+    dim_ = dim;
+    n_ = n;
+    log_size_ = lsz;
+    committed_max_ = cmax;
+    size_ = static_cast<uint64_t>(end);
+    drop_pos_ = 0;
+    evict_pos_ = 0;
+    ready_ = true;
+    writing_ = false;
+    return true;
+}
+
+void PackedScan::start_build(const std::string& path, uint32_t table_id, int dim,
+                             uint64_t log_size, uint64_t committed_max) {
+    close();
+    path_ = path;
+    ::unlink(path.c_str());
+    fd_ = ::open(path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
+    if (fd_ < 0) throw DbError("internal_error", "cannot open packed scan file");
+    table_id_ = table_id;
+    dim_ = dim;
+    n_ = 0;
+    log_size_ = log_size;
+    committed_max_ = committed_max;
+    size_ = kHeaderSize;
+    drop_pos_ = 0;
+    evict_pos_ = 0;
+    ready_ = false;
+    writing_ = true;
+    write_header(false);
+    if (::lseek(fd_, static_cast<off_t>(kHeaderSize), SEEK_SET) < 0)
+        throw DbError("internal_error", "cannot seek packed scan file");
+}
+
+void PackedScan::append_row(int64_t pk, const std::vector<ValType>& mid_types,
+                            const int64_t* mid_i, const std::string_view* mid_s,
+                            const float* vec) {
+    if (!writing_ || fd_ < 0) throw DbError("internal_error", "packed scan not writable");
+    size_t mid_bytes = 0;
+    size_t si = 0;
+    for (ValType t : mid_types) {
+        if (t == ValType::BIGINT) mid_bytes += 8;
+        else {
+            mid_bytes += 4 + mid_s[si].size();
+            ++si;
+        }
+    }
+    uint32_t body = static_cast<uint32_t>(8 + mid_bytes + (dim_ > 0 ? static_cast<size_t>(dim_) * 4 : 0));
+    wbuf_.reserve(wbuf_.size() + 4 + body);
+    wbuf_.append(reinterpret_cast<const char*>(&body), 4);
+    wbuf_.append(reinterpret_cast<const char*>(&pk), 8);
+    size_t ii = 0, ss = 0;
+    for (ValType t : mid_types) {
+        if (t == ValType::BIGINT) {
+            wbuf_.append(reinterpret_cast<const char*>(&mid_i[ii++]), 8);
+        } else {
+            uint32_t n = static_cast<uint32_t>(mid_s[ss].size());
+            wbuf_.append(reinterpret_cast<const char*>(&n), 4);
+            wbuf_.append(mid_s[ss].data(), mid_s[ss].size());
+            ++ss;
+        }
+    }
+    if (dim_ > 0) {
+        if (!vec) throw DbError("internal_error", "packed scan missing vector");
+        wbuf_.append(reinterpret_cast<const char*>(vec), static_cast<size_t>(dim_) * 4);
+    }
+    ++n_;
+    if (wbuf_.size() >= kReadWindow) flush_wbuf();
+}
+
+void PackedScan::finish_build() {
+    if (!writing_) return;
+    flush_wbuf();
+    write_header(true);
+    if (::fdatasync(fd_) != 0) throw DbError("internal_error", "packed scan fsync failed");
+    evict_pos_ = 0;
+    drop_pos_ = 0;
+    drop_cache();
+    writing_ = false;
+    ready_ = true;
+}
+
+PackedScan::Cursor PackedScan::cursor(const std::vector<ValType>& mid_types, int dim) {
+    flush_wbuf();
+    if (fd_ >= 0) ::posix_fadvise(fd_, 0, 0, POSIX_FADV_SEQUENTIAL);
+    Cursor c;
+    c.s_ = this;
+    c.mid_types_ = mid_types;
+    c.dim_ = dim;
+    c.off_ = kHeaderSize;
+    c.end_ = size_;
+    return c;
+}
+
+bool PackedScan::Cursor::next() {
+    if (!s_ || off_ >= end_) return false;
+    if (end_ - off_ < 4) return false;
+    if (!s_->ensure_in_buf(off_, 4)) return false;
+    uint32_t body = 0;
+    std::memcpy(&body, s_->ptr_at(off_), 4);
+    uint64_t rec = 4ull + body;
+    if (body < 8 || off_ + rec > end_) return false;
+    if (!s_->ensure_in_buf(off_, static_cast<size_t>(rec))) return false;
+    const char* p = s_->ptr_at(off_);
+    std::memcpy(&row_.pk, p + 4, 8);
+    const char* mid = p + 12;
+    size_t mid_need = 0;
+    for (ValType t : mid_types_) {
+        if (t == ValType::BIGINT) mid_need += 8;
+        else {
+            if (12 + mid_need + 4 > rec) return false;
+            uint32_t n = 0;
+            std::memcpy(&n, mid + mid_need, 4);
+            mid_need += 4 + n;
+        }
+    }
+    size_t vec_bytes = dim_ > 0 ? static_cast<size_t>(dim_) * 4 : 0;
+    if (12 + mid_need + vec_bytes > rec) return false;
+    row_.mid = mid;
+    row_.mid_len = mid_need;
+    row_.vec = vec_bytes ? reinterpret_cast<const float*>(mid + mid_need) : nullptr;
+    off_ += rec;
+    return true;
+}
+
 }  // namespace mvdb
+ // namespace mvdb

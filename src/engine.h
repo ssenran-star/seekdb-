@@ -7,6 +7,7 @@
 #include <mutex>
 #include <new>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -82,6 +83,8 @@ private:
             std::vector<std::unordered_map<std::string, std::vector<int32_t>>> vidx;
         };
         FastScan scan;
+        std::unique_ptr<PackedScan> packed;
+        uint64_t packed_epoch = 0;
     };
 
     Table& get_table(const std::string& name);
@@ -94,6 +97,12 @@ private:
     uint64_t statement_txn(bool& is_autocommit);
     void rebuild_ann(Table& t);
     void build_fast_scan(Table& t);
+    bool decode_visible_scan(Table& t, int64_t pk,
+                             const std::vector<ValType>& mid_types,
+                             const std::vector<int>& mid_cols,
+                             int64_t* mid_i, std::string_view* mid_s,
+                             const float*& vec, int& dim);
+    void ensure_packed_scan(Table& t);
     struct Cand { float dsq; int64_t pk; int32_t idx; };
     std::vector<Cand> cands_;
 
@@ -104,6 +113,7 @@ private:
     ExecResult exec_delete(const Statement& st);
     ExecResult exec_select(const Statement& st, const std::string& mode);
 
+    std::string data_dir_;
     Log log_;
     struct CachedRow {
         uint64_t offset = 0;

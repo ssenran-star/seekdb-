@@ -3,6 +3,8 @@
 #include <cstring>
 #include <functional>
 #include <string>
+#include <string_view>
+#include <vector>
 
 #include "common.h"
 
@@ -119,6 +121,28 @@ public:
         if (row.size() > ncols) row.resize(ncols);
     }
     bool done() const { return pos_ >= rd_n_; }
+    void skip(size_t n) { check(n); pos_ += n; }
+    const char* ptr() const { return rd_ + pos_; }
+    const float* get_vec_ptr(uint32_t& n) {
+        n = get_u32();
+        check(n * sizeof(float));
+        const float* p = reinterpret_cast<const float*>(rd_ + pos_);
+        pos_ += n * sizeof(float);
+        return p;
+    }
+    void skip_value() {
+        switch (static_cast<ValType>(get_u8())) {
+            case ValType::BIGINT: skip(8); break;
+            case ValType::VARCHAR: skip(get_u32()); break;
+            case ValType::VECTOR: {
+                uint32_t n = get_u32();
+                skip(n * sizeof(float));
+                break;
+            }
+            default:
+                throw DbError("internal_error", "bad value type in log");
+        }
+    }
 
 private:
     void append(const void* p, size_t n) {
@@ -181,5 +205,86 @@ private:
 };
 
 void sync_dir(const std::string& dir);
+
+// On-disk packed snapshot for over-memory exact scans. Built lazily on the
+// first cold query (not on the write/COMMIT path). Rows are a tight
+// sequential layout: rec_size + pk + scalar mid columns + float32[dim].
+// Crash recovery still uses the WAL; this file is a cache and is ignored
+// unless its header matches the current log size and committed_max.
+class PackedScan {
+public:
+    PackedScan() = default;
+    ~PackedScan();
+    PackedScan(const PackedScan&) = delete;
+    PackedScan& operator=(const PackedScan&) = delete;
+
+    bool try_open_existing(const std::string& path, uint32_t table_id, int dim,
+                           uint64_t log_size, uint64_t committed_max);
+    void start_build(const std::string& path, uint32_t table_id, int dim,
+                     uint64_t log_size, uint64_t committed_max);
+    void append_row(int64_t pk, const std::vector<ValType>& mid_types,
+                    const int64_t* mid_i, const std::string_view* mid_s,
+                    const float* vec);
+    void finish_build();
+
+    struct RowView {
+        int64_t pk = 0;
+        const float* vec = nullptr;
+        const char* mid = nullptr;
+        size_t mid_len = 0;
+    };
+
+    class Cursor {
+    public:
+        bool next();
+        const RowView& row() const { return row_; }
+
+    private:
+        friend class PackedScan;
+        PackedScan* s_ = nullptr;
+        std::vector<ValType> mid_types_;
+        int dim_ = 0;
+        uint64_t off_ = 0;
+        uint64_t end_ = 0;
+        RowView row_;
+    };
+    Cursor cursor(const std::vector<ValType>& mid_types, int dim);
+
+    void drop_cache();
+    void close();
+    bool ready() const { return ready_; }
+    uint64_t n() const { return n_; }
+    int dim() const { return dim_; }
+
+private:
+    void flush_wbuf();
+    void evict_written();
+    bool ensure_in_buf(uint64_t off, size_t n);
+    const char* ptr_at(uint64_t off) const { return rbuf_.data() + (off - rbuf_off_); }
+    void write_header(bool complete);
+    void invalidate_read_buf();
+    void drop_upto(uint64_t off);
+
+    int fd_ = -1;
+    std::string path_;
+    std::string wbuf_;
+    std::string rbuf_;
+    uint64_t size_ = 0;
+    uint64_t n_ = 0;
+    int dim_ = 0;
+    uint32_t table_id_ = 0;
+    uint64_t log_size_ = 0;
+    uint64_t committed_max_ = 0;
+    uint64_t drop_pos_ = 0;
+    uint64_t evict_pos_ = 0;
+    uint64_t rbuf_off_ = 0;
+    size_t rbuf_len_ = 0;
+    bool ready_ = false;
+    bool writing_ = false;
+    static constexpr uint32_t kMagic = 0x4E415350;  // PSAN
+    static constexpr uint32_t kVersion = 1;
+    static constexpr uint64_t kHeaderSize = 4096;
+    static constexpr size_t kReadWindow = 2ull << 20;
+};
 
 }  // namespace mvdb

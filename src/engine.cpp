@@ -41,6 +41,97 @@ bool cmp_op(const std::string& op, int ord) {
     if (op == ">=") return ord >= 0;
     return false;
 }
+
+void mid_layout(const TableSchema& s, std::vector<ValType>& types, std::vector<int>& cols) {
+    types.clear();
+    cols.clear();
+    for (size_t i = 0; i < s.cols.size(); ++i) {
+        if (static_cast<int>(i) == s.pk_index || static_cast<int>(i) == s.vector_index) continue;
+        if (s.cols[i].type == ValType::VECTOR) continue;
+        types.push_back(s.cols[i].type);
+        cols.push_back(static_cast<int>(i));
+    }
+}
+
+bool pk_where_ok(int64_t pk, int pk_index, const std::vector<std::pair<int, Predicate>>& where) {
+    for (auto& [idx, p] : where) {
+        if (idx != pk_index) continue;
+        if (p.literal.kind != Literal::INT)
+            throw DbError("type_mismatch", "BIGINT comparison needs integer");
+        int ord = (pk > p.literal.i) - (pk < p.literal.i);
+        if (!cmp_op(p.op, ord)) return false;
+    }
+    return true;
+}
+
+void unpack_mid(const char* mid, size_t mid_len, const std::vector<ValType>& types,
+                int64_t* mid_i, std::string_view* mid_s) {
+    const char* p = mid;
+    const char* e = mid + mid_len;
+    size_t ii = 0, ss = 0;
+    for (ValType t : types) {
+        if (t == ValType::BIGINT) {
+            if (p + 8 > e) throw DbError("internal_error", "packed mid truncated");
+            std::memcpy(&mid_i[ii++], p, 8);
+            p += 8;
+        } else {
+            if (p + 4 > e) throw DbError("internal_error", "packed mid truncated");
+            uint32_t n = 0;
+            std::memcpy(&n, p, 4);
+            p += 4;
+            if (p + n > e) throw DbError("internal_error", "packed mid truncated");
+            mid_s[ss++] = std::string_view(p, n);
+            p += n;
+        }
+    }
+}
+
+bool mid_where_ok(int64_t pk, int pk_index, const std::vector<int>& mid_cols,
+                  const std::vector<ValType>& mid_types,
+                  const int64_t* mid_i, const std::string_view* mid_s,
+                  const std::vector<std::pair<int, Predicate>>& where) {
+    for (auto& [idx, p] : where) {
+        if (idx == pk_index) {
+            if (p.literal.kind != Literal::INT)
+                throw DbError("type_mismatch", "BIGINT comparison needs integer");
+            int ord = (pk > p.literal.i) - (pk < p.literal.i);
+            if (!cmp_op(p.op, ord)) return false;
+            continue;
+        }
+        size_t ii = 0, ss = 0;
+        bool found = false;
+        int64_t iv = 0;
+        std::string_view sv;
+        ValType typ = ValType::BIGINT;
+        for (size_t k = 0; k < mid_cols.size(); ++k) {
+            if (mid_types[k] == ValType::BIGINT) {
+                if (mid_cols[k] == idx) { found = true; typ = ValType::BIGINT; iv = mid_i[ii]; break; }
+                ++ii;
+            } else {
+                if (mid_cols[k] == idx) { found = true; typ = ValType::VARCHAR; sv = mid_s[ss]; break; }
+                ++ss;
+            }
+        }
+        if (!found) throw DbError("unsupported_sql", "vector column in WHERE");
+        if (typ == ValType::BIGINT) {
+            if (p.literal.kind != Literal::INT)
+                throw DbError("type_mismatch", "BIGINT comparison needs integer");
+            int ord = (iv > p.literal.i) - (iv < p.literal.i);
+            if (!cmp_op(p.op, ord)) return false;
+        } else {
+            if (p.literal.kind != Literal::STRING)
+                throw DbError("type_mismatch", "VARCHAR comparison needs string");
+            int ord = sv.compare(std::string_view(p.literal.data(), p.literal.size()));
+            ord = (ord > 0) - (ord < 0);
+            if (!cmp_op(p.op, ord)) return false;
+        }
+    }
+    return true;
+}
+
+bool table_too_big_for_fastscan(int64_t n, int dim) {
+    return n > 500000 || (dim > 0 && n * static_cast<int64_t>(dim) * 4 > 512LL * 1024 * 1024);
+}
 }  // namespace
 
 void Engine::start_helper() {
@@ -77,6 +168,7 @@ void Engine::run_with_helper(std::function<void()> helper, std::function<void()>
 }
 
 void Engine::open(const std::string& data_dir) {
+    data_dir_ = data_dir;
     log_.open(data_dir);
     struct TxnInfo {
         bool data = false;
@@ -537,6 +629,110 @@ void Engine::build_fast_scan(Table& t) {
     row_cache_.clear();
     cache_bytes_ = 0;
     log_.drop_cache();
+}
+
+bool Engine::decode_visible_scan(Table& t, int64_t pk,
+                                 const std::vector<ValType>& mid_types,
+                                 const std::vector<int>& mid_cols,
+                                 int64_t* mid_i, std::string_view* mid_s,
+                                 const float*& vec, int& dim) {
+    (void)mid_types;
+    (void)mid_cols;
+    auto it = t.latest.find(pk);
+    if (it == t.latest.end()) return false;
+    uint64_t off = it->second;
+    while (off != 0) {
+        RecordView rv = log_.read_at(off);
+        ByteBuf b;
+        b.wrap(rv.payload, rv.payload_len);
+        b.get_u32();
+        b.get_i64();
+        uint64_t prev = b.get_u64();
+        if (rv.type == REC_DELETE) {
+            if (visible(rv.txn, rv.stmt)) return false;
+            off = prev;
+            continue;
+        }
+        if (visible(rv.txn, rv.stmt)) {
+            vec = nullptr;
+            dim = 0;
+            size_t ii = 0, ss = 0;
+            for (size_t c = 0; c < t.schema.cols.size(); ++c) {
+                ValType typ = static_cast<ValType>(b.get_u8());
+                if (static_cast<int>(c) == t.schema.vector_index || typ == ValType::VECTOR) {
+                    uint32_t n = 0;
+                    const float* p = b.get_vec_ptr(n);
+                    if (static_cast<int>(c) == t.schema.vector_index) {
+                        vec = p;
+                        dim = static_cast<int>(n);
+                    }
+                    continue;
+                }
+                if (static_cast<int>(c) == t.schema.pk_index) {
+                    if (typ == ValType::BIGINT) b.skip(8);
+                    else if (typ == ValType::VARCHAR) b.skip(b.get_u32());
+                    else {
+                        uint32_t n = 0;
+                        b.get_vec_ptr(n);
+                    }
+                    continue;
+                }
+                if (typ == ValType::BIGINT) mid_i[ii++] = b.get_i64();
+                else if (typ == ValType::VARCHAR) {
+                    uint32_t n = b.get_u32();
+                    mid_s[ss++] = std::string_view(b.ptr(), n);
+                    b.skip(n);
+                } else {
+                    uint32_t n = 0;
+                    b.get_vec_ptr(n);
+                }
+            }
+            return true;
+        }
+        off = prev;
+    }
+    return false;
+}
+
+void Engine::ensure_packed_scan(Table& t) {
+    int dim = t.schema.vector_index >= 0
+                  ? static_cast<int>(t.schema.cols[static_cast<size_t>(t.schema.vector_index)].len)
+                  : 0;
+    if (t.packed && t.packed->ready() && t.packed_epoch == cache_epoch_) return;
+    if (!t.packed) t.packed = std::make_unique<PackedScan>();
+    const std::string path = data_dir_ + "/mvdb.scan." + std::to_string(t.schema.table_id);
+    if (t.packed->try_open_existing(path, t.schema.table_id, dim, log_.size(), committed_max_)) {
+        t.packed_epoch = cache_epoch_;
+        return;
+    }
+    std::vector<ValType> mid_types;
+    std::vector<int> mid_cols;
+    mid_layout(t.schema, mid_types, mid_cols);
+    t.packed->start_build(path, t.schema.table_id, dim, log_.size(), committed_max_);
+    std::vector<std::pair<uint64_t, int64_t>> recs;
+    recs.reserve(t.latest.size());
+    for (auto& [pk, off] : t.latest) recs.emplace_back(off, pk);
+    std::sort(recs.begin(), recs.end());
+    std::vector<int64_t> mid_i(mid_types.size());
+    std::vector<std::string_view> mid_s(mid_types.size());
+    const float* vec = nullptr;
+    int vdim = 0;
+    uint64_t last_drop = 0;
+    constexpr uint64_t kDropEvery = 2ull << 20;
+    for (auto& [off, pk] : recs) {
+        vec = nullptr;
+        vdim = 0;
+        if (!decode_visible_scan(t, pk, mid_types, mid_cols, mid_i.data(), mid_s.data(), vec, vdim))
+            continue;
+        t.packed->append_row(pk, mid_types, mid_i.data(), mid_s.data(), vec);
+        if (off - last_drop >= kDropEvery) {
+            log_.drop_upto(off);
+            last_drop = off;
+        }
+    }
+    t.packed->finish_build();
+    log_.drop_cache();
+    t.packed_epoch = cache_epoch_;
 }
 
 ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
@@ -1005,7 +1201,259 @@ ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
         }
     }
     if (!use_ann && !fast_done) {
-        if (order_dist && st.has_limit && st.limit > 0 && st.limit <= 4096) {
+        bool cold_done = false;
+        const bool by_pk_order = !order_dist && (!st.has_order || order_col == s.pk_index);
+        const int dim_est = s.vector_index >= 0
+                                ? static_cast<int>(s.cols[static_cast<size_t>(s.vector_index)].len)
+                                : 0;
+        const bool large_table = table_too_big_for_fastscan(static_cast<int64_t>(t.latest.size()), dim_est);
+        const bool want_full_scan =
+            (order_dist && st.has_limit && st.limit > 0 && st.limit <= 4096) ||
+            !(st.has_limit && st.limit > 0 && by_pk_order);
+        if (large_table && want_full_scan) {
+            std::vector<ValType> mid_types;
+            std::vector<int> mid_cols;
+            mid_layout(s, mid_types, mid_cols);
+            std::vector<int64_t> mid_i(mid_types.size() ? mid_types.size() : 1);
+            std::vector<std::string_view> mid_s(mid_types.size() ? mid_types.size() : 1);
+            auto packed_match = [&](int64_t pk, const int64_t* mi, const std::string_view* ms) {
+                return mid_where_ok(pk, s.pk_index, mid_cols, mid_types, mi, ms, where);
+            };
+            auto packed_project = [&](int64_t pk, const float* vec, int vdim,
+                                      const int64_t* mi, const std::string_view* ms) {
+                OutRow o;
+                o.pk = pk;
+                o.dists.resize(items.size(), 0.0);
+                o.cells.reserve(items.size());
+                auto fill_col = [&](int idx, Cell& cell) {
+                    if (idx == s.pk_index) {
+                        cell.kind = Cell::INT;
+                        cell.i = pk;
+                        return;
+                    }
+                    if (idx == s.vector_index) {
+                        cell.kind = Cell::VEC;
+                        if (vec && vdim > 0) cell.v.assign(vec, vec + vdim);
+                        return;
+                    }
+                    size_t ii = 0, ss = 0;
+                    for (size_t k = 0; k < mid_cols.size(); ++k) {
+                        if (mid_types[k] == ValType::BIGINT) {
+                            if (mid_cols[k] == idx) {
+                                cell.kind = Cell::INT;
+                                cell.i = mi[ii];
+                                return;
+                            }
+                            ++ii;
+                        } else {
+                            if (mid_cols[k] == idx) {
+                                cell.kind = Cell::STR;
+                                cell.s.assign(ms[ss].data(), ms[ss].size());
+                                return;
+                            }
+                            ++ss;
+                        }
+                    }
+                };
+                for (size_t k = 0; k < items.size(); ++k) {
+                    if (items[k].is_distance) {
+                        Cell cell;
+                        cell.kind = Cell::REAL;
+                        const Vector& q = item_qvec[k];
+                        int d = vdim;
+                        if (d <= 0) d = static_cast<int>(q.size());
+                        double sum = 0.0;
+                        if (vec) {
+                            for (int j = 0; j < d; ++j) {
+                                double td = static_cast<double>(vec[j]) - static_cast<double>(q[static_cast<size_t>(j)]);
+                                sum += td * td;
+                            }
+                        }
+                        cell.d = std::sqrt(sum);
+                        o.dists[k] = cell.d;
+                        o.cells.push_back(std::move(cell));
+                    } else {
+                        Cell cell;
+                        fill_col(item_col[k], cell);
+                        o.cells.push_back(std::move(cell));
+                    }
+                }
+                if (st.has_order && !order_dist) fill_col(order_col, o.order_cell);
+                return o;
+            };
+
+            bool packed_ready = t.packed && t.packed->ready() && t.packed_epoch == cache_epoch_;
+            if (!packed_ready) {
+                if (!t.packed) t.packed = std::make_unique<PackedScan>();
+                const std::string path =
+                    data_dir_ + "/mvdb.scan." + std::to_string(s.table_id);
+                if (t.packed->try_open_existing(path, s.table_id, dim_est, log_.size(), committed_max_)) {
+                    packed_ready = true;
+                    t.packed_epoch = cache_epoch_;
+                }
+            }
+
+            if (order_dist && st.has_limit && st.limit > 0 && st.limit <= 4096) {
+                size_t K = static_cast<size_t>(st.limit);
+                cands_.resize(K);
+                size_t top_n = 0;
+                const Vector& qv = item_qvec[order_item];
+                int dim = static_cast<int>(qv.size());
+                alignas(64) float qalign[512];
+                const float* quse = qv.data();
+                if (dim > 0 && dim <= 512) {
+                    std::memcpy(qalign, qv.data(), static_cast<size_t>(dim) * sizeof(float));
+                    quse = qalign;
+                }
+                auto entry_worse = [&](const Cand& a, const Cand& b) {
+                    if (a.dsq != b.dsq) return st.order_desc ? (a.dsq > b.dsq) : (a.dsq < b.dsq);
+                    return a.pk < b.pk;
+                };
+                auto better_than_top = [&](float dsq, int64_t pk) {
+                    if (dsq != cands_[0].dsq)
+                        return st.order_desc ? (dsq > cands_[0].dsq) : (dsq < cands_[0].dsq);
+                    return pk < cands_[0].pk;
+                };
+                auto consider = [&](float dsq, int64_t pk) {
+                    if (top_n < K) {
+                        cands_[top_n++] = {dsq, pk, 0};
+                        if (top_n == K)
+                            std::make_heap(cands_.begin(), cands_.begin() + static_cast<std::ptrdiff_t>(K), entry_worse);
+                    } else if (better_than_top(dsq, pk)) {
+                        std::pop_heap(cands_.begin(), cands_.begin() + static_cast<std::ptrdiff_t>(K), entry_worse);
+                        cands_[K - 1] = {dsq, pk, 0};
+                        std::push_heap(cands_.begin(), cands_.begin() + static_cast<std::ptrdiff_t>(K), entry_worse);
+                    }
+                };
+                auto flush_batch = [&](const float* const* vs, const int64_t* pks, int nfill) {
+                    if (nfill == 4 && dim == 128 && !st.order_desc) {
+                        float ds[4];
+                        l2_sq_fast_128x4(vs[0], vs[1], vs[2], vs[3], quse, ds);
+                        for (int i = 0; i < 4; ++i) consider(ds[i], pks[i]);
+                    } else {
+                        for (int i = 0; i < nfill; ++i)
+                            consider(l2_sq_fast(vs[i], quse, dim), pks[i]);
+                    }
+                };
+
+                if (packed_ready) {
+                    auto cur = t.packed->cursor(mid_types, dim);
+                    alignas(64) float batch_store[4 * 512];
+                    const float* batch_v[4];
+                    int64_t batch_pk[4];
+                    int batch_n = 0;
+                    while (cur.next()) {
+                        const auto& r = cur.row();
+                        if (!pk_where_ok(r.pk, s.pk_index, where)) continue;
+                        if (!mid_types.empty()) unpack_mid(r.mid, r.mid_len, mid_types, mid_i.data(), mid_s.data());
+                        if (!packed_match(r.pk, mid_i.data(), mid_s.data())) continue;
+                        if (!r.vec || dim <= 0) continue;
+                        if (dim <= 512) {
+                            std::memcpy(batch_store + batch_n * dim, r.vec, static_cast<size_t>(dim) * 4);
+                            batch_v[batch_n] = batch_store + batch_n * dim;
+                            batch_pk[batch_n] = r.pk;
+                            if (++batch_n == 4) {
+                                flush_batch(batch_v, batch_pk, 4);
+                                batch_n = 0;
+                            }
+                        } else {
+                            consider(l2_sq_fast(r.vec, quse, dim), r.pk);
+                        }
+                    }
+                    if (batch_n) flush_batch(batch_v, batch_pk, batch_n);
+                } else {
+                    const std::string path =
+                        data_dir_ + "/mvdb.scan." + std::to_string(s.table_id);
+                    t.packed->start_build(path, s.table_id, dim_est, log_.size(), committed_max_);
+                    std::vector<std::pair<uint64_t, int64_t>> recs;
+                    recs.reserve(t.latest.size());
+                    for (auto& [pk, off] : t.latest) recs.emplace_back(off, pk);
+                    std::sort(recs.begin(), recs.end());
+                    const float* vec = nullptr;
+                    int vdim = 0;
+                    uint64_t last_drop = 0;
+                    constexpr uint64_t kDropEvery = 2ull << 20;
+                    for (auto& [off, pk] : recs) {
+                        vec = nullptr;
+                        vdim = 0;
+                        if (!decode_visible_scan(t, pk, mid_types, mid_cols, mid_i.data(), mid_s.data(), vec, vdim))
+                            continue;
+                        t.packed->append_row(pk, mid_types, mid_i.data(), mid_s.data(), vec);
+                        if (packed_match(pk, mid_i.data(), mid_s.data()) && vec && dim > 0)
+                            consider(l2_sq_fast(vec, quse, dim), pk);
+                        if (off - last_drop >= kDropEvery) {
+                            log_.drop_upto(off);
+                            last_drop = off;
+                        }
+                    }
+                    t.packed->finish_build();
+                    t.packed_epoch = cache_epoch_;
+                }
+
+                if (t.packed) t.packed->drop_cache();
+                log_.drop_cache();
+                cands_.resize(top_n);
+                std::sort(cands_.begin(), cands_.end(), [&](const Cand& a, const Cand& b) {
+                    if (a.dsq != b.dsq) return st.order_desc ? (a.dsq > b.dsq) : (a.dsq < b.dsq);
+                    return a.pk < b.pk;
+                });
+                if (cands_.size() > K) cands_.resize(K);
+                for (auto& c : cands_) {
+                    const Row* rp = resolve_row(t, c.pk);
+                    if (rp) out.push_back(collect(c.pk, *rp));
+                }
+                std::sort(out.begin(), out.end(), [&](const OutRow& a, const OutRow& b) {
+                    double da = a.dists[order_item], db = b.dists[order_item];
+                    if (da != db) return st.order_desc ? (da > db) : (da < db);
+                    return a.pk < b.pk;
+                });
+                cold_done = true;
+            } else {
+                if (!packed_ready) ensure_packed_scan(t);
+                auto out_less = [&](const OutRow& a, const OutRow& b) {
+                    if (st.has_order) {
+                        int ord = 0;
+                        if (order_dist) {
+                            double da = a.dists[order_item], db = b.dists[order_item];
+                            ord = (da > db) - (da < db);
+                        } else if (a.order_cell.kind == Cell::INT) {
+                            ord = (a.order_cell.i > b.order_cell.i) - (a.order_cell.i < b.order_cell.i);
+                        } else {
+                            ord = a.order_cell.s.compare(b.order_cell.s);
+                            ord = (ord > 0) - (ord < 0);
+                        }
+                        if (st.order_desc) ord = -ord;
+                        if (ord != 0) return ord < 0;
+                    }
+                    return a.pk < b.pk;
+                };
+                auto cur = t.packed->cursor(mid_types, dim_est);
+                const bool limited = st.has_limit && st.limit > 0;
+                const size_t K = limited ? static_cast<size_t>(st.limit) : 0;
+                while (cur.next()) {
+                    const auto& r = cur.row();
+                    if (!pk_where_ok(r.pk, s.pk_index, where)) continue;
+                    if (!mid_types.empty()) unpack_mid(r.mid, r.mid_len, mid_types, mid_i.data(), mid_s.data());
+                    if (!packed_match(r.pk, mid_i.data(), mid_s.data())) continue;
+                    OutRow o = packed_project(r.pk, r.vec, dim_est, mid_i.data(), mid_s.data());
+                    if (!limited) {
+                        out.push_back(std::move(o));
+                    } else if (out.size() < K) {
+                        out.push_back(std::move(o));
+                        if (out.size() == K) std::make_heap(out.begin(), out.end(), out_less);
+                    } else if (out_less(o, out[0])) {
+                        std::pop_heap(out.begin(), out.end(), out_less);
+                        out.back() = std::move(o);
+                        std::push_heap(out.begin(), out.end(), out_less);
+                    }
+                }
+                if (t.packed) t.packed->drop_cache();
+                std::sort(out.begin(), out.end(), out_less);
+                cold_done = true;
+            }
+        }
+
+        if (!cold_done && order_dist && st.has_limit && st.limit > 0 && st.limit <= 4096) {
             size_t K = static_cast<size_t>(st.limit);
             cands_.resize(K);
             size_t top_n = 0;
@@ -1035,7 +1483,7 @@ ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
             uint64_t last_drop = 0;
             constexpr uint64_t kDropEvery = 2ull << 20;
             for (auto& [off, pk] : recs) {
-                if (!load_row(t, pk, row) || !row_matches(row, where)) continue;
+                if (!pk_where_ok(pk, s.pk_index, where) || !load_row(t, pk, row) || !row_matches(row, where)) continue;
                 const auto& vec = row[static_cast<size_t>(vcol)].v;
                 float dsq = l2_sq_fast(vec.data(), quse, dim);
                 if (top_n < K) {
@@ -1070,7 +1518,7 @@ ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
                 if (da != db) return st.order_desc ? (da > db) : (da < db);
                 return a.pk < b.pk;
             });
-        } else {
+        } else if (!cold_done) {
             auto out_less = [&](const OutRow& a, const OutRow& b) {
                 if (st.has_order) {
                     int ord = 0;
@@ -1103,7 +1551,7 @@ ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
                 Row row;
                 const size_t K = static_cast<size_t>(st.limit);
                 for (int64_t pk : pks) {
-                    if (!load_row(t, pk, row) || !row_matches(row, where)) continue;
+                    if (!pk_where_ok(pk, s.pk_index, where) || !load_row(t, pk, row) || !row_matches(row, where)) continue;
                     out.push_back(collect(pk, row));
                     if (out.size() == K) break;
                 }
@@ -1118,7 +1566,7 @@ ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
                 constexpr uint64_t kDropEvery = 2ull << 20;
                 const size_t K = static_cast<size_t>(st.limit);
                 for (auto& [off, pk] : recs) {
-                    if (!load_row(t, pk, row) || !row_matches(row, where)) continue;
+                    if (!pk_where_ok(pk, s.pk_index, where) || !load_row(t, pk, row) || !row_matches(row, where)) continue;
                     OutRow o = collect(pk, row);
                     if (out.size() < K) {
                         out.push_back(std::move(o));
@@ -1146,7 +1594,7 @@ ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
                 constexpr uint64_t kDropEvery = 2ull << 20;
                 out.reserve(t.latest.size());
                 for (auto& [off, pk] : recs) {
-                    if (!load_row(t, pk, row) || !row_matches(row, where)) continue;
+                    if (!pk_where_ok(pk, s.pk_index, where) || !load_row(t, pk, row) || !row_matches(row, where)) continue;
                     out.push_back(collect(pk, row));
                     if (off - last_drop >= kDropEvery) {
                         log_.drop_upto(off);
@@ -1223,6 +1671,9 @@ void Engine::shutdown() {
         for (auto& [tid, pk] : txn_writes_) row_cache_[tid].erase(pk);
         txn_writes_.clear();
         cur_txn_ = 0;
+    }
+    for (auto& [id, t] : tables_) {
+        if (t.packed) t.packed->close();
     }
     log_.sync();
     log_.close();
