@@ -752,13 +752,7 @@ ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
                             return st.order_desc ? (dsq > out[0].dsq) : (dsq < out[0].dsq);
                         return pk < out[0].pk;
                     };
-                    for (int64_t i = lo; i < hi; i++) {
-                        const float* vp = &sc.vecs[static_cast<size_t>(i) * static_cast<size_t>(dim)];
-                        float dsq;
-                        if (nfill == K && !st.order_desc)
-                            dsq = l2_sq_fast_abort(vp, quse, dim, out[0].dsq);
-                        else
-                            dsq = l2_sq_fast(vp, quse, dim);
+                    auto take = [&](int64_t i, float dsq) {
                         int64_t pk = sc.pks[static_cast<size_t>(i)];
                         if (nfill < K) {
                             out[nfill++] = {dsq, pk, static_cast<int32_t>(i)};
@@ -769,6 +763,30 @@ ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
                             out[K - 1] = {dsq, pk, static_cast<int32_t>(i)};
                             std::push_heap(out.begin(), out.begin() + static_cast<std::ptrdiff_t>(K), worse);
                         }
+                    };
+                    int64_t i = lo;
+                    if (dim == 128 && !st.order_desc) {
+                        const float* base = sc.vecs.data();
+                        for (; i + 4 <= hi; i += 4) {
+                            const float* vp = base + static_cast<size_t>(i) * 128u;
+                            if (i + 20 <= hi)
+                                _mm_prefetch(reinterpret_cast<const char*>(vp + 16 * 128), _MM_HINT_T0);
+                            float ds[4];
+                            l2_sq_fast_128x4(vp, vp + 128, vp + 256, vp + 384, quse, ds);
+                            take(i, ds[0]);
+                            take(i + 1, ds[1]);
+                            take(i + 2, ds[2]);
+                            take(i + 3, ds[3]);
+                        }
+                    }
+                    for (; i < hi; i++) {
+                        const float* vp = &sc.vecs[static_cast<size_t>(i) * static_cast<size_t>(dim)];
+                        float dsq;
+                        if (nfill == K && !st.order_desc)
+                            dsq = l2_sq_fast_abort(vp, quse, dim, out[0].dsq);
+                        else
+                            dsq = l2_sq_fast(vp, quse, dim);
+                        take(i, dsq);
                     }
                     out.resize(nfill);
                 };

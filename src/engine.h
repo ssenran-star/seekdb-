@@ -1,5 +1,6 @@
 #pragma once
 #include <condition_variable>
+#include <cstdlib>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -15,6 +16,23 @@
 #include "storage.h"
 
 namespace mvdb {
+
+template <typename T, std::size_t Align = 64>
+struct AlignAlloc {
+    using value_type = T;
+    using is_always_equal = std::true_type;
+    AlignAlloc() noexcept = default;
+    template <typename U> AlignAlloc(const AlignAlloc<U, Align>&) noexcept {}
+    T* allocate(std::size_t n) {
+        if (n == 0) return nullptr;
+        void* p = nullptr;
+        if (::posix_memalign(&p, Align, n * sizeof(T)) != 0) throw std::bad_alloc();
+        return static_cast<T*>(p);
+    }
+    void deallocate(T* p, std::size_t) noexcept { std::free(p); }
+    template <typename U> bool operator==(const AlignAlloc<U, Align>&) const noexcept { return true; }
+    template <typename U> bool operator!=(const AlignAlloc<U, Align>&) const noexcept { return false; }
+};
 
 struct Cell {
     enum Kind { INT, STR, VEC, REAL } kind = INT;
@@ -49,7 +67,7 @@ private:
             int64_t n = 0;
             int dim = 0;
             std::vector<int64_t> pks;
-            std::vector<float> vecs;
+            std::vector<float, AlignAlloc<float, 64>> vecs;
             std::vector<int> icol_of;
             std::vector<int> vcol_of;
             std::vector<std::vector<int64_t>> icols;

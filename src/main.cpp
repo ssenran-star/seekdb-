@@ -175,6 +175,8 @@ int main(int argc, char** argv) {
         std::string a = argv[i];
         if (a == "--data-dir" && i + 1 < argc) data_dir = argv[++i];
     }
+    std::ios::sync_with_stdio(false);
+    std::cin.tie(nullptr);
     mvdb::Engine engine;
     try {
         engine.open(data_dir);
