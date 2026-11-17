@@ -814,7 +814,7 @@ ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
                         auto it = sc.veq[static_cast<size_t>(pf_vi)].find(pf_val);
                         if (it != sc.veq[static_cast<size_t>(pf_vi)].end()) {
                             const auto& ids = it->second;
-                            if (ids.size() >= 512 && !st.order_desc) {
+                            if (ids.size() >= 2048 && !st.order_desc) {
                                 std::vector<Cand> left, right;
                                 size_t mid = ids.size() / 2;
                                 run_with_helper([&] { fill_ids(ids.data(), 0, mid, left); },
@@ -830,7 +830,7 @@ ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
                         for (int64_t i = 0; i < sc.n; i++) {
                             if (scan_match(i)) ids.push_back(static_cast<int32_t>(i));
                         }
-                        if (ids.size() >= 512) {
+                        if (ids.size() >= 2048) {
                             std::vector<Cand> left, right;
                             size_t mid = ids.size() / 2;
                             run_with_helper([&] { fill_ids(ids.data(), 0, mid, left); },
