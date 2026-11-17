@@ -341,18 +341,36 @@ bool PackedScan::ensure_in_buf(uint64_t off, size_t n) {
 }
 
 void PackedScan::evict_written() {
-    constexpr uint64_t keep = 256ull << 10;
+    // Leave a dirty tail so mid-build flushes can start writeback without
+    // stalling on WAIT_AFTER every window. DONTNEED only evicts clean
+    // pages, so a lagged prefix is waited on to keep memory.peak from
+    // holding the whole snapshot plus the WAL.
+    constexpr uint64_t keep = 8ull << 20;
     if (fd_ < 0 || size_ <= kHeaderSize + keep) return;
-    uint64_t evict_to = (size_ - keep) & ~4095ull;
-    if (evict_to <= evict_pos_) return;
+    uint64_t issue_to = (size_ - keep) & ~4095ull;
 #if defined(__linux__)
-    off_t start = static_cast<off_t>(evict_pos_);
-    off_t len = static_cast<off_t>(evict_to - evict_pos_);
-    ::sync_file_range(fd_, start, len,
-                      SYNC_FILE_RANGE_WRITE | SYNC_FILE_RANGE_WAIT_AFTER);
-    ::posix_fadvise(fd_, start, len, POSIX_FADV_DONTNEED);
+    if (issue_to > writeback_pos_) {
+        off_t len = static_cast<off_t>(issue_to - writeback_pos_);
+        if (len > 0)
+            ::sync_file_range(fd_, static_cast<off_t>(writeback_pos_), len,
+                              SYNC_FILE_RANGE_WRITE);
+        writeback_pos_ = issue_to;
+    }
+    uint64_t evict_to = writeback_pos_ > keep
+                            ? (writeback_pos_ - keep) & ~4095ull
+                            : 0;
+    if (evict_to > evict_pos_) {
+        off_t start = static_cast<off_t>(evict_pos_);
+        off_t len = static_cast<off_t>(evict_to - evict_pos_);
+        ::sync_file_range(fd_, start, len,
+                          SYNC_FILE_RANGE_WRITE | SYNC_FILE_RANGE_WAIT_AFTER);
+        ::posix_fadvise(fd_, start, len, POSIX_FADV_DONTNEED);
+        evict_pos_ = evict_to;
+    }
+#else
+    evict_pos_ = issue_to;
+    writeback_pos_ = issue_to;
 #endif
-    evict_pos_ = evict_to;
 }
 
 void PackedScan::flush_wbuf() {
@@ -404,6 +422,7 @@ bool PackedScan::try_open_existing(const std::string& path, uint32_t table_id, i
     size_ = static_cast<uint64_t>(end);
     drop_pos_ = 0;
     evict_pos_ = 0;
+    writeback_pos_ = 0;
     ready_ = true;
     writing_ = false;
     return true;
@@ -424,6 +443,7 @@ void PackedScan::start_build(const std::string& path, uint32_t table_id, int dim
     size_ = kHeaderSize;
     drop_pos_ = 0;
     evict_pos_ = 0;
+    writeback_pos_ = 0;
     ready_ = false;
     writing_ = true;
     write_header(false);
@@ -464,7 +484,7 @@ void PackedScan::append_row(int64_t pk, const std::vector<ValType>& mid_types,
         wbuf_.append(reinterpret_cast<const char*>(vec), static_cast<size_t>(dim_) * 4);
     }
     ++n_;
-    if (wbuf_.size() >= kReadWindow) flush_wbuf();
+    if (wbuf_.size() >= kWriteWindow) flush_wbuf();
 }
 
 void PackedScan::finish_build() {
@@ -473,6 +493,7 @@ void PackedScan::finish_build() {
     write_header(true);
     if (::fdatasync(fd_) != 0) throw DbError("internal_error", "packed scan fsync failed");
     evict_pos_ = 0;
+    writeback_pos_ = 0;
     drop_pos_ = 0;
     drop_cache();
     writing_ = false;
@@ -523,4 +544,3 @@ bool PackedScan::Cursor::next() {
 }
 
 }  // namespace mvdb
- // namespace mvdb

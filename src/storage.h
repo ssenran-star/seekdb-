@@ -206,8 +206,10 @@ private:
 
 void sync_dir(const std::string& dir);
 
-// On-disk packed snapshot for over-memory exact scans. Built lazily on the
-// first cold query (not on the write/COMMIT path). Rows are a tight
+// On-disk packed snapshot for over-memory exact scans. Built at shutdown
+// after the write burst (and lazily on the first cold query if no valid
+// file is present). Not built on COMMIT/autocommit, and not for tables
+// that still fit in the in-memory FastScan path. Rows are a tight
 // sequential layout: rec_size + pk + scalar mid columns + float32[dim].
 // Crash recovery still uses the WAL; this file is a cache and is ignored
 // unless its header matches the current log size and committed_max.
@@ -277,6 +279,7 @@ private:
     uint64_t committed_max_ = 0;
     uint64_t drop_pos_ = 0;
     uint64_t evict_pos_ = 0;
+    uint64_t writeback_pos_ = 0;
     uint64_t rbuf_off_ = 0;
     size_t rbuf_len_ = 0;
     bool ready_ = false;
@@ -285,6 +288,7 @@ private:
     static constexpr uint32_t kVersion = 1;
     static constexpr uint64_t kHeaderSize = 4096;
     static constexpr size_t kReadWindow = 2ull << 20;
+    static constexpr size_t kWriteWindow = 8ull << 20;
 };
 
 }  // namespace mvdb

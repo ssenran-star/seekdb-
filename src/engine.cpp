@@ -731,6 +731,7 @@ void Engine::ensure_packed_scan(Table& t) {
         }
     }
     t.packed->finish_build();
+    sync_dir(data_dir_);
     log_.drop_cache();
     t.packed_epoch = cache_epoch_;
 }
@@ -1387,6 +1388,7 @@ ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
                         }
                     }
                     t.packed->finish_build();
+                    sync_dir(data_dir_);
                     t.packed_epoch = cache_epoch_;
                 }
 
@@ -1672,10 +1674,26 @@ void Engine::shutdown() {
         txn_writes_.clear();
         cur_txn_ = 0;
     }
+    // Durable WAL first so a packed snapshot header (log size +
+    // committed_max) matches what a restarted query process recovers.
+    // COMMIT/autocommit fsync is unchanged; this only covers a possible
+    // shutdown abort record.
+    log_.sync();
     for (auto& [id, t] : tables_) {
+        int dim = t.schema.vector_index >= 0
+                      ? static_cast<int>(t.schema.cols[static_cast<size_t>(t.schema.vector_index)].len)
+                      : 0;
+        // Over-memory tables only; the 10k FastScan path stays untouched.
+        if (table_too_big_for_fastscan(static_cast<int64_t>(t.latest.size()), dim)) {
+            try {
+                ensure_packed_scan(t);
+            } catch (...) {
+                // Snapshot is a cache; a failed build must not fail shutdown.
+                if (t.packed) t.packed->close();
+            }
+        }
         if (t.packed) t.packed->close();
     }
-    log_.sync();
     log_.close();
 }
 
