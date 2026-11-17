@@ -583,3 +583,56 @@ N=250000 DIM=256 bash /workspace/work/qps_measure.sh
    （流内去 dataset 原始向量，blob 已含 dataset，读侧 GetDataset 兜底）。
 5. 组装最终提交：validated 基点 + 被验证的每一项；任何 recall 判定超门槛
    的项一律回退。提交分支仍是 amd-cagra-submit（当前 7f0d2f22e 安全版）。
+
+---
+
+## 18. 新实例实测判读（2026-11-17 下午，公平交错计时）
+
+### 18.1 自环剔除生效：bf 双维 OK，go
+
+| 维度 | frozen | current(25/50) | **bf(self-drop)** | nd |
+|---|---|---|---|---|
+| 128d recall@100 | 0.9762 | 0.9731 (Δ0.0031) | **0.9744 (Δ0.0018 OK)** | 0.9713 (Δ0.0049) |
+| 256d recall@100 | 0.8719 | 0.8692 (Δ0.0027) | **0.8728 (Δ-0.0009 OK, 优于基线)** | 0.8679 (Δ0.0040) |
+| 128d build_ms | 41787 | 11224 | **6281** | 9114 |
+| 256d build_ms | 41800 | 19106 | **10523** | 16406 |
+
+自环剔除把 delta 从 0.0045/0.0035 压到 **0.0018/-0.0009**——召回预算彻底打开。
+
+### 18.2 FP16 距离段：白捡 2×，召回纹丝不动 → 写入 bridge 默认
+
+| 维度 | fp32 自检索 | fp16 自检索 | RECALLK 对比 |
+|---|---|---|---|
+| 128d | 6063ms | **3246ms (1.87×)** | 0.9744 vs 0.9745（相同） |
+| 256d | 10332ms | **4937ms (2.09×)** | 0.8728 vs 0.8728（相同） |
+
+SELF_HIT=1.0000 全过。bridge build_bf 已默认 CAGRA_FP16=1（查询仍 fp32 FromArgs，
+语义零变化；CAGRA_FP16=0 可关）。**待复验**：重跑 exp_delta 确认 bridge 内嵌路径
+与 bf_test 一致（RUNS=2 即可）。
+
+### 18.3 itopk 杠杆盖棺：连 bf 图也救不了 384
+
+| itopk | 128d Δ | 256d Δ | SEARCH_MS(100 查) |
+|---|---|---|---|
+| 512 | 0.0015 OK | -0.0009 OK | 22.3 / 25.9 |
+| 384 | **0.0221 OVER** | **0.0623 OVER** | 20.5 / 23.2 |
+| 256 | 0.0727 OVER | 0.1607 OVER | 19.0 / 20.9 |
+
+itopk=384 召回直接掉 0.02+，与图质量无关（CAGRA 搜索本质依赖大 itopk）。
+查询分的参数路径正式关闭；剩余查询分只能靠 adaptor 侧微优化（~0.1-0.4 分）。
+
+### 18.4 seekdb 全量编译成功 + F 测量就位
+
+build_seekdb 通过（JOBS=48 自适应没再爆内存），seekdb 二进制 1.37GB，observer
+起在 2881。e2e 10K×128 冒烟：CREATE INDEX 窗口 1.24s + 首查 0.041s。
+发现 qps/e2e 维度协调 bug（e2e 写死 128、qps 用 256 探针）已修——e2e 现支持
+N/DIM 环境变量并按维度建表，qps 增加行数/维度预检。
+
+**下一步（按序）**：
+```bash
+RUNS=2 bash /workspace/work/exp_delta.sh                        # bridge FP16 复验
+N=250000 DIM=256 bash /workspace/work/e2e_measure.sh            # ★ 250K 真实 F/B 分解
+N=250000 DIM=256 bash /workspace/work/qps_measure.sh            # 查询比
+```
+e2e 的 250K CREATE INDEX 时间减 bridge_test 的 build（6.3/10.5s）= F 的真实值，
+决定快照去重（OBCUVS04）还值不值得上。

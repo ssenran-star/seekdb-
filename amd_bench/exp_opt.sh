@@ -25,7 +25,7 @@ fi
 
 echo "=== compile opt_test ==="
 "$CXX" -O2 -std=c++17 -o opt_test opt_test.cpp \
-  -I/opt/hipvs/include -I/opt/rocm/include \
+  -I/opt/hipvs/include -I/opt/hipvs/include/cuvs -I/opt/rocm/include \
   -L/opt/hipvs/lib -lcuvs_c -lcuvs -Wl,-rpath,/opt/hipvs/lib -ldl 2>opt_compile.log
 rc=$?
 if [ $rc -ne 0 ]; then

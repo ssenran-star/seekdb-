@@ -30,6 +30,19 @@ if ! timeout 1 bash -c 'echo > /dev/tcp/127.0.0.1/2881' 2>/dev/null; then
 fi
 $MYSQL -e "use $DB; show index from items;" | head -5 || {
   echo "run e2e_measure.sh first (creates table + loads data + builds index)"; exit 1; }
+# verify the loaded table matches the requested shape before burning 4096 queries
+CNT=$($MYSQL -e "use $DB; select count(*) from items;" 2>/dev/null | tail -1)
+if [ "$CNT" != "$N" ]; then
+  echo "row count mismatch: table has $CNT rows, expected $N"
+  echo "  -> run:  N=$N DIM=$DIM bash $WORK/e2e_measure.sh   (recreates table at the right shape)"
+  exit 1
+fi
+PROBE=$(python3 -c "import struct; d=struct.unpack('<${DIM}f', open('$QUERY','rb').read($((DIM*4)))); print('['+','.join('%.7f'%v for v in d)+']')")
+if ! $MYSQL -e "use $DB; SELECT id FROM items ORDER BY l2_distance(v, '$PROBE') APPROXIMATE LIMIT 1;" >/dev/null 2>&1; then
+  echo "probe query failed (likely dimension mismatch: table built for another dim)"
+  echo "  -> run:  N=$N DIM=$DIM bash $WORK/e2e_measure.sh"
+  exit 1
+fi
 
 echo "=== 1. generate $NQ single-row query SQL (cycle 100 probe vectors) ==="
 python3 - "$QUERY" "$DIM" "$NQ" "$DB" > "$WORK/q.sql" <<'PY'

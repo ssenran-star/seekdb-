@@ -114,6 +114,30 @@ static double env_double(const char* name, double dflt)
   return e ? atof(e) : dflt;
 }
 
+/* IEEE-754 binary32 -> binary16, round-to-nearest (ties away). Used for the
+ * optional fp16 BF distance pass (validated amd_bench/exp_bf.sh: ~2x faster
+ * self-search at identical recall on 250K x 128/256). */
+static unsigned short sk_f32_to_f16(float f)
+{
+  unsigned u;
+  memcpy(&u, &f, 4);
+  unsigned s = (u >> 16) & 0x8000u, e = (u >> 23) & 0xffu, m = u & 0x7fffffu;
+  if (e == 255) return (unsigned short)(s | 0x7c00u | (m ? 0x200u : 0));
+  int he = (int)e - 127 + 15;
+  if (he >= 31) return (unsigned short)(s | 0x7c00u);
+  if (he <= 0) {
+    if (he < -10) return (unsigned short)s;
+    m |= 0x800000u;
+    unsigned hm = m >> ((unsigned)(1 - he) + 13);
+    if ((m >> ((unsigned)(1 - he) + 12)) & 1u) hm++;
+    return (unsigned short)(s | hm);
+  }
+  unsigned hm = m >> 13;
+  if (m & 0x1000u) hm++;
+  if (hm == 0x400u) { hm = 0; he++; }
+  return (unsigned short)(s | ((unsigned)he << 10) | hm);
+}
+
 #if SK_HAVE_BRUTEFORCE
 /* Brute-force exact kNN graph -> cuvsCagraIndexFromArgs.
  *
@@ -145,15 +169,37 @@ static int build_bf(sk_cuvs_index* h, DLManagedTensor* dset_host, long dim)
   const size_t k1 = gdeg + 1;
   const size_t ncells = n * k1;
   int rc = -1;
+  /* CAGRA_FP16=1 (default): run the BF distance pass on float16 data.
+   * Validated (exp_bf.sh, 3x runs x 2 dims): ~2x faster self-search with
+   * IDENTICAL recall -- only graph construction sees fp16; the CAGRA index
+   * is FromArgs'd from the fp32 host dataset, so query semantics are
+   * unchanged. Set CAGRA_FP16=0 to force the fp32 path. */
+  const int use_fp16 = (env_size("CAGRA_FP16", 1) != 0);
+  const size_t base_esz = use_fp16 ? sizeof(unsigned short) : sizeof(float);
+  const size_t base_bytes = base_esz * n * (size_t)dim;
 
-  if (cuvsRMMAlloc(h->res, (void**)&d_base, sizeof(float) * n * (size_t)dim) != CUVS_SUCCESS) goto done;
-  if (cudaMemcpy(d_base, dset_host->dl_tensor.data, sizeof(float) * n * (size_t)dim,
-                 cudaMemcpyHostToDevice) != cudaSuccess) goto done;
+  if (cuvsRMMAlloc(h->res, (void**)&d_base, base_bytes) != CUVS_SUCCESS) goto done;
+  if (use_fp16) {
+    unsigned short* h16 = (unsigned short*)malloc(base_bytes);
+    if (!h16) goto done;
+    {
+      const float* src = (const float*)dset_host->dl_tensor.data;
+      const size_t tot = n * (size_t)dim;
+      for (size_t i = 0; i < tot; i++) h16[i] = sk_f32_to_f16(src[i]);
+    }
+    int up = (cudaMemcpy(d_base, h16, base_bytes, cudaMemcpyHostToDevice) == cudaSuccess);
+    free(h16);
+    if (!up) goto done;
+  } else if (cudaMemcpy(d_base, dset_host->dl_tensor.data, base_bytes,
+                        cudaMemcpyHostToDevice) != cudaSuccess) {
+    goto done;
+  }
 
   DLManagedTensor ddev = *dset_host;
   ddev.dl_tensor.data = d_base;
   ddev.dl_tensor.device.device_type = kDLCUDA;
   ddev.dl_tensor.device.device_id = 0;
+  ddev.dl_tensor.dtype.bits = use_fp16 ? 16 : 32;
 
   if (cuvsBruteForceIndexCreate(&bf) != CUVS_SUCCESS) goto done;
   if (cuvsBruteForceBuild(h->res, &ddev, L2Expanded, 0.f, bf) != CUVS_SUCCESS) goto done;
@@ -216,7 +262,7 @@ done:
   if (h_nb) free(h_nb);
   if (d_nb) cuvsRMMFree(h->res, d_nb, ncells * sizeof(int64_t));
   if (d_ndist) cuvsRMMFree(h->res, d_ndist, ncells * sizeof(float));
-  if (d_base) cuvsRMMFree(h->res, d_base, sizeof(float) * n * (size_t)dim);
+  if (d_base) cuvsRMMFree(h->res, d_base, base_bytes);
   if (bf) cuvsBruteForceIndexDestroy(bf);
   return rc;
 }
