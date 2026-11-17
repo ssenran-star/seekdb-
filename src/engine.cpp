@@ -5,6 +5,10 @@
 #include <cstring>
 #include <cctype>
 #include <queue>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <functional>
 
 #include "simd.h"
 
@@ -44,8 +48,43 @@ bool cmp_op(const std::string& op, int ord) {
 }
 }  // namespace
 
+
+void Engine::start_helper() {
+    if (helper_started_) return;
+    helper_started_ = true;
+    helper_th_ = std::thread([this] {
+        for (;;) {
+            std::unique_lock<std::mutex> lk(helper_mu_);
+            helper_cv_.wait(lk, [&] { return helper_stop_ || helper_has_job_; });
+            if (helper_stop_ && !helper_has_job_) return;
+            auto fn = std::move(helper_fn_);
+            helper_has_job_ = false;
+            lk.unlock();
+            fn();
+            lk.lock();
+            helper_done_ = true;
+            helper_cv_.notify_one();
+        }
+    });
+}
+
+void Engine::run_with_helper(std::function<void()> helper, std::function<void()> mainwork) {
+    start_helper();
+    {
+        std::lock_guard<std::mutex> lk(helper_mu_);
+        helper_fn_ = std::move(helper);
+        helper_has_job_ = true;
+        helper_done_ = false;
+    }
+    helper_cv_.notify_one();
+    mainwork();
+    std::unique_lock<std::mutex> lk(helper_mu_);
+    helper_cv_.wait(lk, [&] { return helper_done_; });
+}
+
 void Engine::open(const std::string& data_dir) {
     log_.open(data_dir);
+    start_helper();
     struct TxnInfo {
         bool data = false;
         bool commit = false;
@@ -672,12 +711,50 @@ ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
                         std::push_heap(cands_.begin(), cands_.begin() + static_cast<std::ptrdiff_t>(K), entry_worse);
                     }
                 };
+                auto fill_range = [&](int64_t lo, int64_t hi, std::vector<Cand>& out) {
+                    out.resize(K);
+                    size_t nfill = 0;
+                    auto worse = [&](const Cand& a, const Cand& b) {
+                        if (a.dsq != b.dsq) return st.order_desc ? (a.dsq > b.dsq) : (a.dsq < b.dsq);
+                        return a.pk < b.pk;
+                    };
+                    auto better = [&](float dsq, int64_t pk) {
+                        if (dsq != out[0].dsq)
+                            return st.order_desc ? (dsq > out[0].dsq) : (dsq < out[0].dsq);
+                        return pk < out[0].pk;
+                    };
+                    for (int64_t i = lo; i < hi; i++) {
+                        const float* vp = &sc.vecs[static_cast<size_t>(i) * static_cast<size_t>(dim)];
+                        float dsq;
+                        if (nfill == K && !st.order_desc)
+                            dsq = l2_sq_fast_abort(vp, quse, dim, out[0].dsq);
+                        else
+                            dsq = l2_sq_fast(vp, quse, dim);
+                        int64_t pk = sc.pks[static_cast<size_t>(i)];
+                        if (nfill < K) {
+                            out[nfill++] = {dsq, pk, static_cast<int32_t>(i)};
+                            if (nfill == K)
+                                std::make_heap(out.begin(), out.begin() + static_cast<std::ptrdiff_t>(K), worse);
+                        } else if (better(dsq, pk)) {
+                            std::pop_heap(out.begin(), out.begin() + static_cast<std::ptrdiff_t>(K), worse);
+                            out[K - 1] = {dsq, pk, static_cast<int32_t>(i)};
+                            std::push_heap(out.begin(), out.begin() + static_cast<std::ptrdiff_t>(K), worse);
+                        }
+                    }
+                    out.resize(nfill);
+                };
                 if (where.empty()) {
-                    const float* base = sc.vecs.data();
-                    for (int64_t i = 0; i < sc.n; i++) {
-                        if (i + 16 < sc.n)
-                            __builtin_prefetch(base + static_cast<size_t>(i + 16) * static_cast<size_t>(dim), 0, 3);
-                        consider(i);
+                    if (sc.n >= 2048 && !st.order_desc) {
+                        std::vector<Cand> left, right;
+                        int64_t mid = sc.n / 2;
+                        run_with_helper([&] { fill_range(0, mid, left); },
+                                        [&] { fill_range(mid, sc.n, right); });
+                        cands_.clear();
+                        cands_.insert(cands_.end(), left.begin(), left.end());
+                        cands_.insert(cands_.end(), right.begin(), right.end());
+                        top_n = cands_.size();
+                    } else {
+                        for (int64_t i = 0; i < sc.n; i++) consider(i);
                     }
                 } else {
                     bool use_prefilter = false;
@@ -698,12 +775,7 @@ ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
                     if (use_prefilter) {
                         auto it = sc.veq[static_cast<size_t>(pf_vi)].find(pf_val);
                         if (it != sc.veq[static_cast<size_t>(pf_vi)].end()) {
-                            const auto& ids = it->second;
-                            for (size_t k = 0; k < ids.size(); ++k) {
-                                if (k + 8 < ids.size())
-                                    __builtin_prefetch(&sc.vecs[static_cast<size_t>(ids[k + 8]) * static_cast<size_t>(dim)], 0, 3);
-                                consider(ids[k]);
-                            }
+                            for (int32_t i : it->second) consider(i);
                         }
                     } else {
                         for (int64_t i = 0; i < sc.n; i++) {
@@ -717,6 +789,7 @@ ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
                     if (a.dsq != b.dsq) return st.order_desc ? (a.dsq > b.dsq) : (a.dsq < b.dsq);
                     return a.pk < b.pk;
                 });
+                if (cands_.size() > K) cands_.resize(K);
             } else {
                 cands_.clear();
                 for (int64_t i = 0; i < sc.n; i++) {
@@ -885,6 +958,15 @@ ExecResult Engine::execute(const std::string& sql, const std::string& search_mod
 }
 
 void Engine::shutdown() {
+    if (helper_started_) {
+        {
+            std::lock_guard<std::mutex> lk(helper_mu_);
+            helper_stop_ = true;
+        }
+        helper_cv_.notify_one();
+        if (helper_th_.joinable()) helper_th_.join();
+        helper_started_ = false;
+    }
     if (cur_txn_ != 0) {
         log_.append(REC_ABORT, cur_txn_, 0, "");
         aborted_.insert(cur_txn_);

@@ -1,5 +1,9 @@
 #pragma once
+#include <condition_variable>
+#include <functional>
 #include <memory>
+#include <mutex>
+#include <thread>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -93,6 +97,17 @@ private:
     uint64_t cur_txn_ = 0;
     uint32_t cur_stmt_ = 0;
     std::unordered_set<uint32_t> stmt_aborted_;
+
+    void start_helper();
+    void run_with_helper(std::function<void()> helper, std::function<void()> mainwork);
+    std::thread helper_th_;
+    std::mutex helper_mu_;
+    std::condition_variable helper_cv_;
+    std::function<void()> helper_fn_;
+    bool helper_has_job_ = false;
+    bool helper_done_ = true;
+    bool helper_stop_ = false;
+    bool helper_started_ = false;
 };
 
 }  // namespace mvdb
