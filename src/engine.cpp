@@ -771,10 +771,73 @@ ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
                             }
                         }
                     }
+                    auto fill_ids = [&](const int32_t* ids, size_t lo, size_t hi, std::vector<Cand>& out) {
+                        out.resize(K);
+                        size_t nfill = 0;
+                        auto worse = [&](const Cand& a, const Cand& b) {
+                            if (a.dsq != b.dsq) return st.order_desc ? (a.dsq > b.dsq) : (a.dsq < b.dsq);
+                            return a.pk < b.pk;
+                        };
+                        auto better = [&](float dsq, int64_t pk) {
+                            if (dsq != out[0].dsq)
+                                return st.order_desc ? (dsq > out[0].dsq) : (dsq < out[0].dsq);
+                            return pk < out[0].pk;
+                        };
+                        for (size_t k = lo; k < hi; ++k) {
+                            int64_t i = ids[k];
+                            const float* vp = &sc.vecs[static_cast<size_t>(i) * static_cast<size_t>(dim)];
+                            float dsq;
+                            if (nfill == K && !st.order_desc)
+                                dsq = l2_sq_fast_abort(vp, quse, dim, out[0].dsq);
+                            else
+                                dsq = l2_sq_fast(vp, quse, dim);
+                            int64_t pk = sc.pks[static_cast<size_t>(i)];
+                            if (nfill < K) {
+                                out[nfill++] = {dsq, pk, static_cast<int32_t>(i)};
+                                if (nfill == K)
+                                    std::make_heap(out.begin(), out.begin() + static_cast<std::ptrdiff_t>(K), worse);
+                            } else if (better(dsq, pk)) {
+                                std::pop_heap(out.begin(), out.begin() + static_cast<std::ptrdiff_t>(K), worse);
+                                out[K - 1] = {dsq, pk, static_cast<int32_t>(i)};
+                                std::push_heap(out.begin(), out.begin() + static_cast<std::ptrdiff_t>(K), worse);
+                            }
+                        }
+                        out.resize(nfill);
+                    };
+                    auto merge_parts = [&](std::vector<Cand>& left, std::vector<Cand>& right) {
+                        cands_.clear();
+                        cands_.insert(cands_.end(), left.begin(), left.end());
+                        cands_.insert(cands_.end(), right.begin(), right.end());
+                        top_n = cands_.size();
+                    };
                     if (use_prefilter) {
                         auto it = sc.veq[static_cast<size_t>(pf_vi)].find(pf_val);
                         if (it != sc.veq[static_cast<size_t>(pf_vi)].end()) {
-                            for (int32_t i : it->second) consider(i);
+                            const auto& ids = it->second;
+                            if (ids.size() >= 512 && !st.order_desc) {
+                                std::vector<Cand> left, right;
+                                size_t mid = ids.size() / 2;
+                                run_with_helper([&] { fill_ids(ids.data(), 0, mid, left); },
+                                                [&] { fill_ids(ids.data(), mid, ids.size(), right); });
+                                merge_parts(left, right);
+                            } else {
+                                for (int32_t i : ids) consider(i);
+                            }
+                        }
+                    } else if (sc.n >= 2048 && !st.order_desc) {
+                        std::vector<int32_t> ids;
+                        ids.reserve(static_cast<size_t>(sc.n));
+                        for (int64_t i = 0; i < sc.n; i++) {
+                            if (scan_match(i)) ids.push_back(static_cast<int32_t>(i));
+                        }
+                        if (ids.size() >= 512) {
+                            std::vector<Cand> left, right;
+                            size_t mid = ids.size() / 2;
+                            run_with_helper([&] { fill_ids(ids.data(), 0, mid, left); },
+                                            [&] { fill_ids(ids.data(), mid, ids.size(), right); });
+                            merge_parts(left, right);
+                        } else {
+                            for (int32_t i : ids) consider(i);
                         }
                     } else {
                         for (int64_t i = 0; i < sc.n; i++) {
