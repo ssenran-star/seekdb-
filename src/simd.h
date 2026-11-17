@@ -123,8 +123,81 @@ inline float l2_sq_avx512_abort(const float* a, const float* b, int n, float thr
     return r;
 }
 
+__attribute__((target("avx512f")))
+inline float l2_sq_avx512_128(const float* a, const float* b) {
+    __m512 s0 = _mm512_setzero_ps();
+    __m512 s1 = _mm512_setzero_ps();
+    for (int i = 0; i < 128; i += 32) {
+        __m512 d0 = _mm512_sub_ps(_mm512_loadu_ps(a + i), _mm512_loadu_ps(b + i));
+        __m512 d1 = _mm512_sub_ps(_mm512_loadu_ps(a + i + 16), _mm512_loadu_ps(b + i + 16));
+        s0 = _mm512_fmadd_ps(d0, d0, s0);
+        s1 = _mm512_fmadd_ps(d1, d1, s1);
+    }
+    return _mm512_reduce_add_ps(_mm512_add_ps(s0, s1));
+}
+
+__attribute__((target("avx512f")))
+inline float l2_sq_avx512_128_abort(const float* a, const float* b, float thresh) {
+    __m512 s0 = _mm512_setzero_ps();
+    __m512 s1 = _mm512_setzero_ps();
+    for (int i = 0; i < 64; i += 32) {
+        __m512 d0 = _mm512_sub_ps(_mm512_loadu_ps(a + i), _mm512_loadu_ps(b + i));
+        __m512 d1 = _mm512_sub_ps(_mm512_loadu_ps(a + i + 16), _mm512_loadu_ps(b + i + 16));
+        s0 = _mm512_fmadd_ps(d0, d0, s0);
+        s1 = _mm512_fmadd_ps(d1, d1, s1);
+    }
+    float part = _mm512_reduce_add_ps(_mm512_add_ps(s0, s1));
+    if (part > thresh) return part;
+    for (int i = 64; i < 128; i += 32) {
+        __m512 d0 = _mm512_sub_ps(_mm512_loadu_ps(a + i), _mm512_loadu_ps(b + i));
+        __m512 d1 = _mm512_sub_ps(_mm512_loadu_ps(a + i + 16), _mm512_loadu_ps(b + i + 16));
+        s0 = _mm512_fmadd_ps(d0, d0, s0);
+        s1 = _mm512_fmadd_ps(d1, d1, s1);
+    }
+    return _mm512_reduce_add_ps(_mm512_add_ps(s0, s1));
+}
+
+__attribute__((target("avx2,fma")))
+inline float l2_sq_avx2_128(const float* a, const float* b) {
+    __m256 s0 = _mm256_setzero_ps();
+    __m256 s1 = _mm256_setzero_ps();
+    for (int i = 0; i < 128; i += 16) {
+        __m256 d0 = _mm256_sub_ps(_mm256_loadu_ps(a + i), _mm256_loadu_ps(b + i));
+        __m256 d1 = _mm256_sub_ps(_mm256_loadu_ps(a + i + 8), _mm256_loadu_ps(b + i + 8));
+        s0 = _mm256_fmadd_ps(d0, d0, s0);
+        s1 = _mm256_fmadd_ps(d1, d1, s1);
+    }
+    return hsum256(_mm256_add_ps(s0, s1));
+}
+
+__attribute__((target("avx2,fma")))
+inline float l2_sq_avx2_128_abort(const float* a, const float* b, float thresh) {
+    __m256 s0 = _mm256_setzero_ps();
+    __m256 s1 = _mm256_setzero_ps();
+    for (int i = 0; i < 64; i += 16) {
+        __m256 d0 = _mm256_sub_ps(_mm256_loadu_ps(a + i), _mm256_loadu_ps(b + i));
+        __m256 d1 = _mm256_sub_ps(_mm256_loadu_ps(a + i + 8), _mm256_loadu_ps(b + i + 8));
+        s0 = _mm256_fmadd_ps(d0, d0, s0);
+        s1 = _mm256_fmadd_ps(d1, d1, s1);
+    }
+    float part = hsum256(_mm256_add_ps(s0, s1));
+    if (part > thresh) return part;
+    for (int i = 64; i < 128; i += 16) {
+        __m256 d0 = _mm256_sub_ps(_mm256_loadu_ps(a + i), _mm256_loadu_ps(b + i));
+        __m256 d1 = _mm256_sub_ps(_mm256_loadu_ps(a + i + 8), _mm256_loadu_ps(b + i + 8));
+        s0 = _mm256_fmadd_ps(d0, d0, s0);
+        s1 = _mm256_fmadd_ps(d1, d1, s1);
+    }
+    return hsum256(_mm256_add_ps(s0, s1));
+}
+
 inline float l2_sq_fast(const float* a, const float* b, int n) {
     int lvl = cpu_simd_level();
+    if (n == 128) {
+        if (lvl >= 3) return l2_sq_avx512_128(a, b);
+        if (lvl >= 2) return l2_sq_avx2_128(a, b);
+        return l2_sq_scalar(a, b, n);
+    }
     if (lvl >= 3) return l2_sq_avx512(a, b, n);
     if (lvl >= 2) return l2_sq_avx2(a, b, n);
     return l2_sq_scalar(a, b, n);
@@ -132,6 +205,10 @@ inline float l2_sq_fast(const float* a, const float* b, int n) {
 
 inline float l2_sq_fast_abort(const float* a, const float* b, int n, float thresh) {
     int lvl = cpu_simd_level();
+    if (n == 128) {
+        if (lvl >= 3) return l2_sq_avx512_128_abort(a, b, thresh);
+        if (lvl >= 2) return l2_sq_avx2_128_abort(a, b, thresh);
+    }
     if (lvl >= 3) return l2_sq_avx512_abort(a, b, n, thresh);
     if (lvl >= 2) return l2_sq_avx2_abort(a, b, n, thresh);
     float sum = 0;

@@ -1,6 +1,8 @@
 #include "engine.h"
 
 #include <algorithm>
+#include <cstdlib>
+#include <cstring>
 #include <cctype>
 #include <queue>
 
@@ -426,7 +428,7 @@ void Engine::build_fast_scan(Table& t) {
     sc.icol_of.assign(t.schema.cols.size(), -1);
     sc.vcol_of.assign(t.schema.cols.size(), -1);
     sc.dim = dim;
-    if (n > 500000 || (dim > 0 && n * dim * 4 > 512LL * 1024 * 1024)) {
+    if (std::getenv("MVDB_NO_FASTSCAN") || n > 500000 || (dim > 0 && n * dim * 4 > 512LL * 1024 * 1024)) {
         sc.n = 0; sc.epoch = cache_epoch_;
         return;
     }
@@ -646,13 +648,19 @@ ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
                         return st.order_desc ? (dsq > cands_[0].dsq) : (dsq < cands_[0].dsq);
                     return pk < cands_[0].pk;
                 };
+                alignas(64) float qalign[512];
+                const float* quse = qvec;
+                if (qvec && dim > 0 && dim <= 512) {
+                    std::memcpy(qalign, qvec, static_cast<size_t>(dim) * sizeof(float));
+                    quse = qalign;
+                }
                 auto consider = [&](int64_t i) {
                     const float* vp = &sc.vecs[static_cast<size_t>(i) * static_cast<size_t>(dim)];
                     float dsq;
                     if (top_n == K && !st.order_desc)
-                        dsq = l2_sq_fast_abort(vp, qvec, dim, cands_[0].dsq);
+                        dsq = l2_sq_fast_abort(vp, quse, dim, cands_[0].dsq);
                     else
-                        dsq = l2_sq_fast(vp, qvec, dim);
+                        dsq = l2_sq_fast(vp, quse, dim);
                     int64_t pk = sc.pks[static_cast<size_t>(i)];
                     if (top_n < K) {
                         cands_[top_n++] = {dsq, pk, static_cast<int32_t>(i)};
@@ -665,7 +673,12 @@ ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
                     }
                 };
                 if (where.empty()) {
-                    for (int64_t i = 0; i < sc.n; i++) consider(i);
+                    const float* base = sc.vecs.data();
+                    for (int64_t i = 0; i < sc.n; i++) {
+                        if (i + 16 < sc.n)
+                            __builtin_prefetch(base + static_cast<size_t>(i + 16) * static_cast<size_t>(dim), 0, 3);
+                        consider(i);
+                    }
                 } else {
                     bool use_prefilter = false;
                     int pf_vi = -1;
@@ -685,7 +698,12 @@ ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
                     if (use_prefilter) {
                         auto it = sc.veq[static_cast<size_t>(pf_vi)].find(pf_val);
                         if (it != sc.veq[static_cast<size_t>(pf_vi)].end()) {
-                            for (int32_t i : it->second) consider(i);
+                            const auto& ids = it->second;
+                            for (size_t k = 0; k < ids.size(); ++k) {
+                                if (k + 8 < ids.size())
+                                    __builtin_prefetch(&sc.vecs[static_cast<size_t>(ids[k + 8]) * static_cast<size_t>(dim)], 0, 3);
+                                consider(ids[k]);
+                            }
                         }
                     } else {
                         for (int64_t i = 0; i < sc.n; i++) {
@@ -740,30 +758,88 @@ ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
         }
     }
     if (!use_ann && !fast_done) {
-        for (auto& [pk, off] : t.latest) {
-            const Row* row = resolve_row(t, pk);
-            if (!row || !row_matches(*row, where)) continue;
-            out.push_back(collect(pk, *row));
-        }
-        std::sort(out.begin(), out.end(), [&](const OutRow& a, const OutRow& b) {
-            if (st.has_order) {
-                int ord = 0;
-                if (order_dist) {
-                    double da = a.dists[order_item], db = b.dists[order_item];
-                    ord = (da > db) - (da < db);
-                } else if (a.order_cell.kind == Cell::INT) {
-                    ord = (a.order_cell.i > b.order_cell.i) - (a.order_cell.i < b.order_cell.i);
-                } else {
-                    ord = a.order_cell.s.compare(b.order_cell.s);
-                    ord = (ord > 0) - (ord < 0);
-                }
-                if (st.order_desc) ord = -ord;
-                if (ord != 0) return ord < 0;
+        if (order_dist && st.has_limit && st.limit > 0 && st.limit <= 4096) {
+            size_t K = static_cast<size_t>(st.limit);
+            cands_.resize(K);
+            size_t top_n = 0;
+            const Vector& qv = item_qvec[order_item];
+            int dim = static_cast<int>(qv.size());
+            alignas(64) float qalign[512];
+            const float* quse = qv.data();
+            if (dim > 0 && dim <= 512) {
+                std::memcpy(qalign, qv.data(), static_cast<size_t>(dim) * sizeof(float));
+                quse = qalign;
             }
-            return a.pk < b.pk;
-        });
-        if (st.has_limit && static_cast<int64_t>(out.size()) > st.limit)
-            out.resize(static_cast<size_t>(st.limit));
+            int vcol = item_col[order_item];
+            auto entry_worse = [&](const Cand& a, const Cand& b) {
+                if (a.dsq != b.dsq) return st.order_desc ? (a.dsq > b.dsq) : (a.dsq < b.dsq);
+                return a.pk < b.pk;
+            };
+            auto better_than_top = [&](float dsq, int64_t pk) {
+                if (dsq != cands_[0].dsq)
+                    return st.order_desc ? (dsq > cands_[0].dsq) : (dsq < cands_[0].dsq);
+                return pk < cands_[0].pk;
+            };
+            for (auto& [pk, off] : t.latest) {
+                const Row* row = resolve_row(t, pk);
+                if (!row || !row_matches(*row, where)) continue;
+                const auto& vec = (*row)[vcol].v;
+                float dsq;
+                if (top_n == K && !st.order_desc)
+                    dsq = l2_sq_fast_abort(vec.data(), quse, dim, cands_[0].dsq);
+                else
+                    dsq = l2_sq_fast(vec.data(), quse, dim);
+                if (top_n < K) {
+                    cands_[top_n++] = {dsq, pk, 0};
+                    if (top_n == K)
+                        std::make_heap(cands_.begin(), cands_.begin() + static_cast<std::ptrdiff_t>(K), entry_worse);
+                } else if (better_than_top(dsq, pk)) {
+                    std::pop_heap(cands_.begin(), cands_.begin() + static_cast<std::ptrdiff_t>(K), entry_worse);
+                    cands_[K - 1] = {dsq, pk, 0};
+                    std::push_heap(cands_.begin(), cands_.begin() + static_cast<std::ptrdiff_t>(K), entry_worse);
+                }
+            }
+            cands_.resize(top_n);
+            std::sort(cands_.begin(), cands_.end(), [&](const Cand& a, const Cand& b) {
+                if (a.dsq != b.dsq) return st.order_desc ? (a.dsq > b.dsq) : (a.dsq < b.dsq);
+                return a.pk < b.pk;
+            });
+            for (auto& c : cands_) {
+                const Row* row = resolve_row(t, c.pk);
+                if (!row) continue;
+                OutRow o = collect(c.pk, *row);
+                if (order_item >= 0) {
+                    o.cells[static_cast<size_t>(order_item)].d = std::sqrt(static_cast<double>(c.dsq));
+                    o.dists[static_cast<size_t>(order_item)] = o.cells[static_cast<size_t>(order_item)].d;
+                }
+                out.push_back(std::move(o));
+            }
+        } else {
+            for (auto& [pk, off] : t.latest) {
+                const Row* row = resolve_row(t, pk);
+                if (!row || !row_matches(*row, where)) continue;
+                out.push_back(collect(pk, *row));
+            }
+            std::sort(out.begin(), out.end(), [&](const OutRow& a, const OutRow& b) {
+                if (st.has_order) {
+                    int ord = 0;
+                    if (order_dist) {
+                        double da = a.dists[order_item], db = b.dists[order_item];
+                        ord = (da > db) - (da < db);
+                    } else if (a.order_cell.kind == Cell::INT) {
+                        ord = (a.order_cell.i > b.order_cell.i) - (a.order_cell.i < b.order_cell.i);
+                    } else {
+                        ord = a.order_cell.s.compare(b.order_cell.s);
+                        ord = (ord > 0) - (ord < 0);
+                    }
+                    if (st.order_desc) ord = -ord;
+                    if (ord != 0) return ord < 0;
+                }
+                return a.pk < b.pk;
+            });
+            if (st.has_limit && static_cast<int64_t>(out.size()) > st.limit)
+                out.resize(static_cast<size_t>(st.limit));
+        }
     }
 
     ExecResult r;
