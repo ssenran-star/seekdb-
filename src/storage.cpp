@@ -328,15 +328,15 @@ void AlignedBuf::append(const void* src, size_t n) {
 namespace {
 int open_maybe_direct(const char* path, int flags, int mode, bool* direct) {
     *direct = false;
+    int fd = -1;
 #if defined(O_DIRECT) && O_DIRECT != 0
-    int fd = ::open(path, flags | O_DIRECT, mode);
+    fd = ::open(path, flags | O_DIRECT, mode);
     if (fd >= 0) {
         *direct = true;
         return fd;
     }
 #endif
-    int fd = ::open(path, flags, mode);
-    *direct = false;
+    fd = ::open(path, flags, mode);
     return fd;
 }
 }  // namespace
