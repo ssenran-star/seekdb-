@@ -863,8 +863,7 @@ int ObDDLScheduler::init()
       OB_MALLOC_BIG_BLOCK_SIZE, "ddl_task", DDL_TASK_MEMORY_LIMIT))) {
   } else if (OB_FAIL(task_queue_.init(MAX_TASK_NUM))) {
   } else if (OB_FAIL(manager_reg_heart_beat_task_.init())) {
-  } else if (OB_FAIL(ObServerThreadHelper::create("DDLTaskExecutor",
-             lib::is_mini_mode() ? 2 : 8))) {
+  } else if (OB_FAIL(ObServerThreadHelper::create("DDLTaskExecutor", 8))) {
   } else if (OB_FAIL(ddl_builder_.init())) {
   } else if (OB_FAIL(scan_task_.init())) {
   } else if (OB_FAIL(heart_beat_check_task_.init())) {
