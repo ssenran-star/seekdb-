@@ -31,6 +31,14 @@ for dim in ${DIMS:-128 256}; do
         ./bf_test 250000 "$dim" 128 2>&1
     echo "  (exit=$?)"
   done
+  echo "--- FP16 distance pass (FP16=1, NEIGHBOR_BITS=64, 3 runs) ---"
+  for i in $(seq 1 "$RUNS"); do
+    echo "--- fp16 run $i ---"
+    env BASE_F32="$data/base.f32" QUERY_F32="$data/query.f32" GT_I32="$data/gt.i32" \
+        GT_Q=100 GT_K=100 NEIGHBOR_BITS=64 FP16=1 \
+        ./bf_test 250000 "$dim" 128 2>&1
+    echo "  (exit=$?)"
+  done
   echo "--- dtype fallback check (NEIGHBOR_BITS=32, 1 run) ---"
   env BASE_F32="$data/base.f32" QUERY_F32="$data/query.f32" GT_I32="$data/gt.i32" \
       GT_Q=100 GT_K=100 NEIGHBOR_BITS=32 \

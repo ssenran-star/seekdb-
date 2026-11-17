@@ -527,3 +527,59 @@ namespace cuvs::neighbors::cagra::helpers {
 
 **判定规则（exp_opt）**：OPT_RK ≥ NOOPT_RK+0.002 且 OPT_MS ≲3s → build_bf 采纳
 pruned 图（delta 预期 ≤0.001，双保险）；否则维持 self-drop 版 bf。
+
+---
+
+## 17. 总攻 runbook（一次实例会话提分方案）
+
+### 17.1 剩余火力与分数上限
+
+| 杠杆 | 预期 | 机制 | 验证 |
+|---|---|---|---|
+| ① bf 图 itopk 降档 | **查询分 +2（唯一确定可满分项）** | itopk 512→256 在 legacy 图召回崩（0.87→0.71），bf 精确图连通性更好可能撑住；GPU 游走 3.65→~2ms | exp_itopk_bf.sh（15 分钟） |
+| ② FP16 建图 | 构建分 +2~3 | BF 自检索内存瓶颈，fp16 距离计算 ~2× 提速；图仍 fp32 FromArgs，查询零风险 | exp_bf.sh FP16=1 组 |
+| ③ 砍 F | 构建分 +1~2 | F≈27s 占窗口 ~40%；快照 dataset 双写 642→386MB；首查重载优化 | e2e_measure F 分解后 |
+| ④ RobustPrune 补回 | 召回余量→解锁① | helpers::optimize 签名已确认（host uint32） | exp_opt.sh + dump§7 |
+
+分数模型：总分 = 4 + 14·ln(构建比)/ln3 + 2·ln(查询比)/ln1.5。三个实测点反推
+F≈27s ⇒ 纯构建上限 ~2.56×（12 分）——但 F 拟合 ±30% 不确定，真实基线更慢则
+3.0× 仍在桌上。①②③④全打满：**现实 16~18，搏 20**。
+
+### 17.2 会话流程（按序，全程贴回输出）
+
+```bash
+mkdir -p /workspace/work && cd /workspace/work
+curl -fsSL "https://api.github.com/repos/ssenran-star/seekdb-/contents/amd_bench/boot_r2.sh?ref=amd-cagra-submit" | python3 -c "import sys,json,base64;open('boot_r2.sh','wb').write(base64.b64decode(json.load(sys.stdin)['content']))"
+bash boot_r2.sh
+
+# 1. 基线校准 + bf 自环剔除验证（判定 bf delta <= 0.003）
+RUNS=3 bash /workspace/work/exp_delta.sh
+
+# 2. ★ 查询分胜负手：itopk 在 bf 图上的召回
+bash /workspace/work/exp_itopk_bf.sh
+
+# 3. 构建提速：FP16 距离段
+bash /workspace/work/exp_bf.sh
+
+# 4. RobustPrune 召回增益（若 dump§7 显示 raft 头存在）
+bash /workspace/work/dump_hipvs_headers.sh
+bash /workspace/work/exp_opt.sh
+
+# 5. F 分解（JOBS 已自适应；约 30-60 分钟编译）
+bash /workspace/work/build_seekdb.sh
+bash /workspace/work/start_seekdb.sh && bash /workspace/work/e2e_measure.sh
+N=250000 DIM=256 bash /workspace/work/qps_measure.sh
+```
+
+### 17.3 决策规则
+
+1. exp_itopk_bf：取**两维 delta ≤0.003 的最低 itopk** 写回 bridge 默认
+   （seekdb_cuvs_search 的 CAGRA_ITOPK 默认值）→ qps_measure 复测查询比。
+   预期 itopk=256 可用 → 查询比 1.3~1.5×（+1.3~2 分）。
+2. exp_bf FP16：若 RECALLK 降幅 <0.002 且 BF_SEARCH_MS 减半 → build_bf 的
+   距离段改 fp16（仅建图；FromArgs 仍 fp32）。
+3. exp_opt：OPT_RK ≥ NOOPT_RK+0.002 → 图剪枝进 build_bf（召回余量，支撑 1）。
+4. e2e 的 F 分解里找最大可压缩项（快照 I/O / 扫描 / 首查）→ OBCUVS04
+   （流内去 dataset 原始向量，blob 已含 dataset，读侧 GetDataset 兜底）。
+5. 组装最终提交：validated 基点 + 被验证的每一项；任何 recall 判定超门槛
+   的项一律回退。提交分支仍是 amd-cagra-submit（当前 7f0d2f22e 安全版）。

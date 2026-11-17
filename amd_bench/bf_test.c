@@ -76,15 +76,54 @@ int main(int argc, char **argv) {
   cuvsResources_t res;
   if (cuvsResourcesCreate(&res) != CUVS_SUCCESS) { fprintf(stderr, "RES_FAIL\n"); return 5; }
 
-  /* ---- 0. dataset on DEVICE (cuvsBruteForceBuild requires it) ---- */
+  /* ---- 0. dataset on DEVICE (cuvsBruteForceBuild requires it) ----
+   * FP16=1: feed the BF distance pass a float16 dataset (memory-bound self
+   * search is ~2x faster). The CAGRA graph is still FromArgs'd with the
+   * float32 host dataset, so query-time refinement and semantics are
+   * unchanged -- only graph construction sees the reduced precision. */
+  int use_fp16 = (getenv("FP16") && atoi(getenv("FP16"))) ? 1 : 0;
+  if (use_fp16) printf("mode: FP16 distance pass (graph FromArgs stays fp32)\n");
   float *d_base = 0;
-  if (cuvsRMMAlloc(res, (void **)&d_base, (size_t)n * dim * 4) != CUVS_SUCCESS) {
+  size_t dev_bytes = (size_t)n * dim * (use_fp16 ? 2 : 4);
+  if (cuvsRMMAlloc(res, (void **)&d_base, dev_bytes) != CUVS_SUCCESS) {
     fprintf(stderr, "RMM_FAIL\n"); return 5;
   }
-  cudaMemcpy(d_base, base, (size_t)n * dim * 4, cudaMemcpyHostToDevice);
+  if (use_fp16) {
+    unsigned short *h16 = (unsigned short *)malloc((size_t)n * dim * 2);
+    for (size_t i = 0; i < (size_t)n * dim; i++) {
+      float f = base[i];
+      unsigned u; memcpy(&u, &f, 4);
+      unsigned s = (u >> 16) & 0x8000u, e = (u >> 23) & 0xffu, m = u & 0x7fffffu;
+      unsigned short h;
+      if (e == 255) { h = (unsigned short)(s | 0x7c00u | (m ? 0x200u : 0)); }
+      else {
+        int he = (int)e - 127 + 15;
+        if (he >= 31) { h = (unsigned short)(s | 0x7c00u); }
+        else if (he <= 0) {
+          if (he < -10) { h = (unsigned short)s; }
+          else {
+            m |= 0x800000u;
+            unsigned hm = m >> ((unsigned)(1 - he) + 13);
+            if ((m >> ((unsigned)(1 - he) + 12)) & 1u) hm++;
+            h = (unsigned short)(s | hm);
+          }
+        } else {
+          unsigned hm = m >> 13;
+          if (m & 0x1000u) hm++;
+          if (hm == 0x400u) { hm = 0; he++; if (he >= 31) h = (unsigned short)(s | 0x7c00u); else h = (unsigned short)(s | ((unsigned)he << 10) | hm); }
+          else h = (unsigned short)(s | ((unsigned)he << 10) | hm);
+        }
+      }
+      h16[i] = h;
+    }
+    cudaMemcpy(d_base, h16, dev_bytes, cudaMemcpyHostToDevice);
+    free(h16);
+  } else {
+    cudaMemcpy(d_base, base, dev_bytes, cudaMemcpyHostToDevice);
+  }
 
   DLManagedTensor dataset;
-  init_tensor(&dataset, d_base, n, dim, 1, kDLFloat, 32);
+  init_tensor(&dataset, d_base, n, dim, 1, kDLFloat, use_fp16 ? 16 : 32);
 
   /* ---- 1. brute-force build ---- */
   printf("stage: bf_build (device dataset) ...\n");
