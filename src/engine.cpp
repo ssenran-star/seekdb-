@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cctype>
 #include <queue>
-#include <thread>
 
 #include "simd.h"
 
@@ -423,18 +422,27 @@ void Engine::build_fast_scan(Table& t) {
     if (sc.epoch == cache_epoch_) return;
     int dim = t.schema.vector_index >= 0 ? static_cast<int>(t.schema.cols[t.schema.vector_index].len) : 0;
     int64_t n = static_cast<int64_t>(t.latest.size());
-    sc.pks.clear(); sc.vecs.clear(); sc.rows.clear(); sc.vcols.clear();
+    sc.pks.clear(); sc.vecs.clear(); sc.icols.clear(); sc.vcols.clear(); sc.veq.clear();
+    sc.icol_of.assign(t.schema.cols.size(), -1);
+    sc.vcol_of.assign(t.schema.cols.size(), -1);
     sc.dim = dim;
     if (n > 500000 || (dim > 0 && n * dim * 4 > 512LL * 1024 * 1024)) {
         sc.n = 0; sc.epoch = cache_epoch_;
         return;
     }
-    sc.pks.reserve(n); sc.rows.reserve(n);
-    if (dim > 0) sc.vecs.reserve(static_cast<size_t>(n) * dim);
-    for (auto& c : t.schema.cols) {
-        if (c.type == ValType::VARCHAR) sc.vcols.emplace_back();
+    sc.pks.reserve(n);
+    if (dim > 0) sc.vecs.reserve(static_cast<size_t>(n) * static_cast<size_t>(dim));
+    for (size_t c = 0; c < t.schema.cols.size(); ++c) {
+        if (t.schema.cols[c].type == ValType::BIGINT) {
+            sc.icol_of[c] = static_cast<int>(sc.icols.size());
+            sc.icols.emplace_back();
+            sc.icols.back().reserve(n);
+        } else if (t.schema.cols[c].type == ValType::VARCHAR) {
+            sc.vcol_of[c] = static_cast<int>(sc.vcols.size());
+            sc.vcols.emplace_back();
+            sc.vcols.back().reserve(n);
+        }
     }
-    for (auto& vc : sc.vcols) vc.reserve(n);
     for (auto& [pk, off] : t.latest) {
         const Row* row = resolve_row(t, pk);
         if (!row) continue;
@@ -443,15 +451,22 @@ void Engine::build_fast_scan(Table& t) {
             const auto& v = (*row)[t.schema.vector_index].v;
             sc.vecs.insert(sc.vecs.end(), v.begin(), v.end());
         }
-        size_t vi = 0;
-        for (size_t c = 0; c < t.schema.cols.size(); c++) {
-            if (t.schema.cols[c].type == ValType::VARCHAR)
-                sc.vcols[vi++].push_back((*row)[c].s);
+        for (size_t c = 0; c < t.schema.cols.size(); ++c) {
+            int ii = sc.icol_of[c];
+            if (ii >= 0) sc.icols[ii].push_back((*row)[c].i);
+            int vi = sc.vcol_of[c];
+            if (vi >= 0) sc.vcols[vi].push_back((*row)[c].s);
         }
-        sc.rows.push_back(*row);
     }
     sc.n = static_cast<int64_t>(sc.pks.size());
+    sc.veq.resize(sc.vcols.size());
+    for (size_t vi = 0; vi < sc.vcols.size(); ++vi) {
+        auto& idx = sc.veq[vi];
+        for (int64_t i = 0; i < sc.n; ++i)
+            idx[sc.vcols[vi][static_cast<size_t>(i)]].push_back(static_cast<int32_t>(i));
+    }
     sc.epoch = cache_epoch_;
+    log_.drop_cache();
 }
 
 ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
@@ -560,6 +575,64 @@ ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
         if (sc.n > 0) {
             int dim = sc.dim;
             const float* qvec = order_dist ? item_qvec[order_item].data() : nullptr;
+            auto scan_match = [&](int64_t i) -> bool {
+                for (auto& [idx, pred] : where) {
+                    int ord = 0;
+                    if (s.cols[idx].type == ValType::BIGINT) {
+                        if (pred.literal.kind != Literal::INT)
+                            throw DbError("type_mismatch", "BIGINT comparison needs integer");
+                        int64_t v = sc.icols[sc.icol_of[idx]][static_cast<size_t>(i)];
+                        ord = (v > pred.literal.i) - (v < pred.literal.i);
+                    } else if (s.cols[idx].type == ValType::VARCHAR) {
+                        if (pred.literal.kind != Literal::STRING)
+                            throw DbError("type_mismatch", "VARCHAR comparison needs string");
+                        const std::string& v = sc.vcols[sc.vcol_of[idx]][static_cast<size_t>(i)];
+                        ord = v.compare(pred.literal.s);
+                        ord = (ord > 0) - (ord < 0);
+                    } else {
+                        throw DbError("unsupported_sql", "vector column in WHERE");
+                    }
+                    if (!cmp_op(pred.op, ord)) return false;
+                }
+                return true;
+            };
+            auto project = [&](int32_t i, float dsq) {
+                OutRow o;
+                o.pk = sc.pks[static_cast<size_t>(i)];
+                o.cells.reserve(items.size());
+                for (size_t k = 0; k < items.size(); ++k) {
+                    if (items[k].is_distance) {
+                        Cell cell;
+                        cell.kind = Cell::REAL;
+                        if (static_cast<int>(k) == order_item) {
+                            cell.d = std::sqrt(static_cast<double>(dsq));
+                        } else if (dim > 0) {
+                            const float* vp = &sc.vecs[static_cast<size_t>(i) * static_cast<size_t>(dim)];
+                            Vector tmp(vp, vp + dim);
+                            cell.d = l2_distance(tmp, item_qvec[k]);
+                        } else {
+                            cell.d = 0;
+                        }
+                        o.cells.push_back(std::move(cell));
+                    } else {
+                        int col = item_col[k];
+                        Cell c;
+                        if (s.cols[col].type == ValType::BIGINT) {
+                            c.kind = Cell::INT;
+                            c.i = sc.icols[sc.icol_of[col]][static_cast<size_t>(i)];
+                        } else if (s.cols[col].type == ValType::VARCHAR) {
+                            c.kind = Cell::STR;
+                            c.s = sc.vcols[sc.vcol_of[col]][static_cast<size_t>(i)];
+                        } else if (dim > 0) {
+                            c.kind = Cell::VEC;
+                            const float* vp = &sc.vecs[static_cast<size_t>(i) * static_cast<size_t>(dim)];
+                            c.v.assign(vp, vp + dim);
+                        }
+                        o.cells.push_back(std::move(c));
+                    }
+                }
+                return o;
+            };
             if (order_dist && st.has_limit && st.limit > 0 && st.limit <= 4096) {
                 size_t K = static_cast<size_t>(st.limit);
                 cands_.resize(K);
@@ -573,19 +646,26 @@ ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
                         return st.order_desc ? (dsq > cands_[0].dsq) : (dsq < cands_[0].dsq);
                     return pk < cands_[0].pk;
                 };
-                if (where.empty()) {
-                    for (int64_t i = 0; i < sc.n; i++) {
-                        float dsq = l2_sq_fast(&sc.vecs[i * dim], qvec, dim);
-                        if (top_n < K) {
-                            cands_[top_n++] = {dsq, sc.pks[i], static_cast<int32_t>(i)};
-                            if (top_n == K)
-                                std::make_heap(cands_.begin(), cands_.begin() + K, entry_worse);
-                        } else if (better_than_top(dsq, sc.pks[i])) {
-                            std::pop_heap(cands_.begin(), cands_.begin() + K, entry_worse);
-                            cands_[K - 1] = {dsq, sc.pks[i], static_cast<int32_t>(i)};
-                            std::push_heap(cands_.begin(), cands_.begin() + K, entry_worse);
-                        }
+                auto consider = [&](int64_t i) {
+                    const float* vp = &sc.vecs[static_cast<size_t>(i) * static_cast<size_t>(dim)];
+                    float dsq;
+                    if (top_n == K && !st.order_desc)
+                        dsq = l2_sq_fast_abort(vp, qvec, dim, cands_[0].dsq);
+                    else
+                        dsq = l2_sq_fast(vp, qvec, dim);
+                    int64_t pk = sc.pks[static_cast<size_t>(i)];
+                    if (top_n < K) {
+                        cands_[top_n++] = {dsq, pk, static_cast<int32_t>(i)};
+                        if (top_n == K)
+                            std::make_heap(cands_.begin(), cands_.begin() + static_cast<std::ptrdiff_t>(K), entry_worse);
+                    } else if (better_than_top(dsq, pk)) {
+                        std::pop_heap(cands_.begin(), cands_.begin() + static_cast<std::ptrdiff_t>(K), entry_worse);
+                        cands_[K - 1] = {dsq, pk, static_cast<int32_t>(i)};
+                        std::push_heap(cands_.begin(), cands_.begin() + static_cast<std::ptrdiff_t>(K), entry_worse);
                     }
+                };
+                if (where.empty()) {
+                    for (int64_t i = 0; i < sc.n; i++) consider(i);
                 } else {
                     bool use_prefilter = false;
                     int pf_vi = -1;
@@ -594,10 +674,8 @@ ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
                         int col = where[0].first;
                         if (s.cols[col].type == ValType::VARCHAR &&
                             where[0].second.literal.kind == Literal::STRING) {
-                            int vi = 0;
-                            for (int c = 0; c < col; c++)
-                                if (s.cols[c].type == ValType::VARCHAR) vi++;
-                            if (vi < static_cast<int>(sc.vcols.size())) {
+                            int vi = sc.vcol_of[col];
+                            if (vi >= 0) {
                                 use_prefilter = true;
                                 pf_vi = vi;
                                 pf_val = where[0].second.literal.s;
@@ -605,33 +683,14 @@ ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
                         }
                     }
                     if (use_prefilter) {
-                        const auto& col_data = sc.vcols[pf_vi];
-                        for (int64_t i = 0; i < sc.n; i++) {
-                            if (col_data[i] != pf_val) continue;
-                            float dsq = l2_sq_fast(&sc.vecs[i * dim], qvec, dim);
-                            if (top_n < K) {
-                                cands_[top_n++] = {dsq, sc.pks[i], static_cast<int32_t>(i)};
-                                if (top_n == K)
-                                    std::make_heap(cands_.begin(), cands_.begin() + K, entry_worse);
-                            } else if (better_than_top(dsq, sc.pks[i])) {
-                                std::pop_heap(cands_.begin(), cands_.begin() + K, entry_worse);
-                                cands_[K - 1] = {dsq, sc.pks[i], static_cast<int32_t>(i)};
-                                std::push_heap(cands_.begin(), cands_.begin() + K, entry_worse);
-                            }
+                        auto it = sc.veq[static_cast<size_t>(pf_vi)].find(pf_val);
+                        if (it != sc.veq[static_cast<size_t>(pf_vi)].end()) {
+                            for (int32_t i : it->second) consider(i);
                         }
                     } else {
                         for (int64_t i = 0; i < sc.n; i++) {
-                            if (!row_matches(sc.rows[i], where)) continue;
-                            float dsq = l2_sq_fast(&sc.vecs[i * dim], qvec, dim);
-                            if (top_n < K) {
-                                cands_[top_n++] = {dsq, sc.pks[i], static_cast<int32_t>(i)};
-                                if (top_n == K)
-                                    std::make_heap(cands_.begin(), cands_.begin() + K, entry_worse);
-                            } else if (better_than_top(dsq, sc.pks[i])) {
-                                std::pop_heap(cands_.begin(), cands_.begin() + K, entry_worse);
-                                cands_[K - 1] = {dsq, sc.pks[i], static_cast<int32_t>(i)};
-                                std::push_heap(cands_.begin(), cands_.begin() + K, entry_worse);
-                            }
+                            if (!scan_match(i)) continue;
+                            consider(i);
                         }
                     }
                 }
@@ -643,11 +702,11 @@ ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
             } else {
                 cands_.clear();
                 for (int64_t i = 0; i < sc.n; i++) {
-                    if (!row_matches(sc.rows[i], where)) continue;
+                    if (!scan_match(i)) continue;
                     Cand c;
-                    c.pk = sc.pks[i];
+                    c.pk = sc.pks[static_cast<size_t>(i)];
                     c.idx = static_cast<int32_t>(i);
-                    c.dsq = order_dist ? l2_sq_fast(&sc.vecs[i * dim], qvec, dim) : 0.0f;
+                    c.dsq = order_dist ? l2_sq_fast(&sc.vecs[static_cast<size_t>(i) * static_cast<size_t>(dim)], qvec, dim) : 0.0f;
                     cands_.push_back(c);
                 }
                 auto cand_less = [&](const Cand& a, const Cand& b) {
@@ -656,10 +715,12 @@ ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
                         if (order_dist) {
                             ord = (a.dsq > b.dsq) - (a.dsq < b.dsq);
                         } else if (s.cols[order_col].type == ValType::BIGINT) {
-                            int64_t va = sc.rows[a.idx][order_col].i, vb = sc.rows[b.idx][order_col].i;
+                            int64_t va = sc.icols[sc.icol_of[order_col]][static_cast<size_t>(a.idx)];
+                            int64_t vb = sc.icols[sc.icol_of[order_col]][static_cast<size_t>(b.idx)];
                             ord = (va > vb) - (va < vb);
                         } else {
-                            ord = sc.rows[a.idx][order_col].s.compare(sc.rows[b.idx][order_col].s);
+                            ord = sc.vcols[sc.vcol_of[order_col]][static_cast<size_t>(a.idx)].compare(
+                                sc.vcols[sc.vcol_of[order_col]][static_cast<size_t>(b.idx)]);
                             ord = (ord > 0) - (ord < 0);
                         }
                         if (st.order_desc) ord = -ord;
@@ -674,25 +735,7 @@ ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
                     std::sort(cands_.begin(), cands_.end(), cand_less);
                 if (K < cands_.size()) cands_.resize(K);
             }
-            for (auto& c : cands_) {
-                const Row& row = sc.rows[c.idx];
-                OutRow o;
-                o.pk = c.pk;
-                o.cells.reserve(items.size());
-                for (size_t k = 0; k < items.size(); ++k) {
-                    if (items[k].is_distance) {
-                        Cell cell;
-                        cell.kind = Cell::REAL;
-                        cell.d = (static_cast<int>(k) == order_item)
-                            ? std::sqrt(static_cast<double>(c.dsq))
-                            : l2_distance(row[item_col[k]].v, item_qvec[k]);
-                        o.cells.push_back(std::move(cell));
-                    } else {
-                        o.cells.push_back(to_cell(row[item_col[k]]));
-                    }
-                }
-                out.push_back(std::move(o));
-            }
+            for (auto& c : cands_) out.push_back(project(c.idx, c.dsq));
             fast_done = true;
         }
     }

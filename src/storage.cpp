@@ -1,3 +1,4 @@
+#include <cstring>
 #include "storage.h"
 
 #include <fcntl.h>
@@ -78,35 +79,59 @@ void Log::open(const std::string& dir) {
     }
 }
 
+void Log::flush_buf() {
+    if (wbuf_.empty() || fd_ < 0) return;
+    write_full(fd_, wbuf_.data(), wbuf_.size());
+    wbuf_.clear();
+}
+
+void Log::read_abs(uint64_t off, char* p, size_t n) {
+    uint64_t flushed = size_ - wbuf_.size();
+    if (off + n <= flushed) {
+        read_full(fd_, off, p, n);
+        return;
+    }
+    if (off >= flushed) {
+        std::memcpy(p, wbuf_.data() + (off - flushed), n);
+        return;
+    }
+    size_t first = static_cast<size_t>(flushed - off);
+    read_full(fd_, off, p, first);
+    std::memcpy(p + first, wbuf_.data(), n - first);
+}
+
 uint64_t Log::append(uint8_t type, uint64_t txn, uint32_t stmt, const std::string& payload) {
     uint32_t body_len = static_cast<uint32_t>(13 + payload.size());
-    std::string frame;
-    frame.reserve(4 + body_len + 4);
-    frame.append(reinterpret_cast<const char*>(&body_len), 4);
-    frame.append(reinterpret_cast<const char*>(&txn), 8);
-    frame.append(reinterpret_cast<const char*>(&stmt), 4);
-    frame.push_back(static_cast<char>(type));
-    frame += payload;
-    frame.append(reinterpret_cast<const char*>(&kEndMagic), 4);
+    uint32_t total = 4 + body_len + 4;
     uint64_t off = size_;
-    write_full(fd_, frame.data(), frame.size());
-    size_ += frame.size();
-    // page cache is charged to the container memcg; drop written ranges periodically
-    // or large loads OOM under the 2GiB limit (dirty pages outrun writeback)
-    if (size_ - drop_pos_ >= 64ull * 1024ull * 1024ull) {
-        ::posix_fadvise(fd_, static_cast<off_t>(drop_pos_),
-                        static_cast<off_t>(size_ - drop_pos_), POSIX_FADV_DONTNEED);
-        drop_pos_ = size_;
-    }
+    size_t start = wbuf_.size();
+    wbuf_.resize(start + total);
+    char* p = &wbuf_[start];
+    std::memcpy(p, &body_len, 4);
+    std::memcpy(p + 4, &txn, 8);
+    std::memcpy(p + 12, &stmt, 4);
+    p[16] = static_cast<char>(type);
+    if (!payload.empty()) std::memcpy(p + 17, payload.data(), payload.size());
+    std::memcpy(p + 17 + payload.size(), &kEndMagic, 4);
+    size_ += total;
+    if (wbuf_.size() >= (1u << 20)) flush_buf();
     return off;
 }
 
 void Log::sync() {
+    flush_buf();
     if (fd_ >= 0 && ::fdatasync(fd_) != 0)
         throw DbError("internal_error", "fsync failed");
+    // Official M includes page cache; drop durable ranges after each commit.
+    if (fd_ >= 0 && size_ > drop_pos_) {
+        ::posix_fadvise(fd_, static_cast<off_t>(drop_pos_),
+                        static_cast<off_t>(size_ - drop_pos_), POSIX_FADV_DONTNEED);
+        drop_pos_ = size_;
+    }
 }
 
 void Log::drop_cache() {
+    flush_buf();
     if (fd_ >= 0) {
         ::posix_fadvise(fd_, 0, 0, POSIX_FADV_DONTNEED);
         drop_pos_ = size_;
@@ -118,12 +143,12 @@ void Log::scan(const std::function<void(const RecordView&)>& cb) {
     while (off < size_) {
         if (size_ - off < 4) break;
         uint32_t body_len = 0;
-        read_full(fd_, off, reinterpret_cast<char*>(&body_len), 4);
+        read_abs(off, reinterpret_cast<char*>(&body_len), 4);
         if (body_len < 13 || body_len > kMaxRecord || off + 4 + body_len + 4 > size_) break;
         std::string body(body_len, '\0');
-        read_full(fd_, off + 4, body.data(), body_len);
+        read_abs(off + 4, body.data(), body_len);
         uint32_t end_magic = 0;
-        read_full(fd_, off + 4 + body_len, reinterpret_cast<char*>(&end_magic), 4);
+        read_abs(off + 4 + body_len, reinterpret_cast<char*>(&end_magic), 4);
         if (end_magic != kEndMagic) break;
         RecordView rv;
         rv.offset = off;
@@ -144,13 +169,13 @@ void Log::scan(const std::function<void(const RecordView&)>& cb) {
 
 RecordView Log::read_at(uint64_t offset) {
     uint32_t body_len = 0;
-    read_full(fd_, offset, reinterpret_cast<char*>(&body_len), 4);
+    read_abs(offset, reinterpret_cast<char*>(&body_len), 4);
     if (body_len < 13 || body_len > kMaxRecord)
         throw DbError("internal_error", "bad record length");
     std::string body(body_len, '\0');
-    read_full(fd_, offset + 4, body.data(), body_len);
+    read_abs(offset + 4, body.data(), body_len);
     uint32_t end_magic = 0;
-    read_full(fd_, offset + 4 + body_len, reinterpret_cast<char*>(&end_magic), 4);
+    read_abs(offset + 4 + body_len, reinterpret_cast<char*>(&end_magic), 4);
     if (end_magic != kEndMagic) throw DbError("internal_error", "bad record magic");
     RecordView rv;
     rv.offset = offset;
@@ -163,9 +188,11 @@ RecordView Log::read_at(uint64_t offset) {
 
 void Log::close() {
     if (fd_ >= 0) {
+        try { flush_buf(); } catch (...) {}
         ::close(fd_);
         fd_ = -1;
     }
+    wbuf_.clear();
 }
 
 }  // namespace mvdb

@@ -77,44 +77,55 @@ inline float fast_parse_float(const char* s, const char** end) {
     return sign * val;
 }
 
+inline bool is_ascii_space(char c) {
+    return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+}
+
 inline Vector parse_vector_literal(const std::string& raw, uint32_t dim) {
-    std::string t = trim(raw);
-    if (t.size() < 2 || t.front() != '[' || t.back() != ']')
+    const char* s = raw.data();
+    const char* e = s + raw.size();
+    while (s < e && is_ascii_space(*s)) ++s;
+    while (e > s && is_ascii_space(e[-1])) --e;
+    if (e - s < 2 || *s != '[' || e[-1] != ']')
         throw DbError("invalid_vector", "vector literal must be bracketed");
-    std::string body = t.substr(1, t.size() - 2);
+    ++s;
+    --e;
+    while (s < e && is_ascii_space(*s)) ++s;
+    while (e > s && is_ascii_space(e[-1])) --e;
     Vector out;
-    size_t pos = 0;
-    if (trim(body).empty()) {
+    out.reserve(dim);
+    if (s >= e) {
         if (dim != 0) throw DbError("dimension_mismatch", "empty vector literal");
         return out;
     }
-    while (true) {
-        size_t comma = body.find(',', pos);
-        std::string tok = trim(body.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos));
-        if (tok.empty()) throw DbError("invalid_vector", "empty vector element");
+    while (s < e) {
+        while (s < e && is_ascii_space(*s)) ++s;
+        if (s >= e) throw DbError("invalid_vector", "empty vector element");
+        const char* tok = s;
         const char* endp = nullptr;
-        float f = fast_parse_float(tok.c_str(), &endp);
-        if (endp == tok.c_str()) {
+        float f = fast_parse_float(tok, &endp);
+        if (endp == tok) {
             errno = 0;
             char* end2 = nullptr;
-            double d = std::strtod(tok.c_str(), &end2);
-            if (end2 == tok.c_str() || *end2 != '\0')
-                throw DbError("invalid_vector", "non-numeric vector element: " + tok);
+            double d = std::strtod(const_cast<char*>(tok), &end2);
+            if (end2 == tok)
+                throw DbError("invalid_vector", "non-numeric vector element");
+            endp = end2;
             if (std::isnan(d) || std::isinf(d))
                 throw DbError("invalid_vector", "NaN/Infinity not allowed");
             if (d > std::numeric_limits<float>::max() || d < -std::numeric_limits<float>::max())
                 throw DbError("invalid_vector", "float32 overflow");
             f = static_cast<float>(d);
             if (std::isinf(f)) throw DbError("invalid_vector", "float32 overflow");
-        } else if (*endp != '\0') {
-            throw DbError("invalid_vector", "non-numeric vector element: " + tok);
-        } else {
-            if (std::isnan(f) || std::isinf(f))
-                throw DbError("invalid_vector", "NaN/Infinity not allowed");
+        } else if (std::isnan(f) || std::isinf(f)) {
+            throw DbError("invalid_vector", "NaN/Infinity not allowed");
         }
+        s = endp;
+        while (s < e && is_ascii_space(*s)) ++s;
         out.push_back(f);
-        if (comma == std::string::npos) break;
-        pos = comma + 1;
+        if (s >= e) break;
+        if (*s != ',') throw DbError("invalid_vector", "non-numeric vector element");
+        ++s;
     }
     if (out.size() != dim)
         throw DbError("dimension_mismatch", "vector dimension mismatch");

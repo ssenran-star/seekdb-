@@ -46,8 +46,11 @@ private:
             int dim = 0;
             std::vector<int64_t> pks;
             std::vector<float> vecs;
-            std::vector<Row> rows;
+            std::vector<int> icol_of;
+            std::vector<int> vcol_of;
+            std::vector<std::vector<int64_t>> icols;
             std::vector<std::vector<std::string>> vcols;
+            std::vector<std::unordered_map<std::string, std::vector<int32_t>>> veq;
         };
         FastScan scan;
     };

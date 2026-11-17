@@ -121,10 +121,13 @@ public:
     uint64_t size() const { return size_; }
 
 private:
+    void flush_buf();
+    void read_abs(uint64_t off, char* p, size_t n);
     int fd_ = -1;
     std::string path_;
     uint64_t size_ = 0;
     uint64_t drop_pos_ = 0;
+    std::string wbuf_;
 };
 
 void sync_dir(const std::string& dir);

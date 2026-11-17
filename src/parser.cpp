@@ -35,22 +35,36 @@ public:
         if (c == '\'') {
             t.kind = Token::STRING;
             ++pos_;
-            std::string out;
+            size_t start = pos_;
+            bool escaped = false;
             while (true) {
                 if (pos_ >= s_.size()) throw DbError("syntax_error", "unterminated string");
-                char ch = s_[pos_++];
-                if (ch == '\'') {
-                    if (pos_ < s_.size() && s_[pos_] == '\'') {
-                        out += '\'';
-                        ++pos_;
+                if (s_[pos_] == '\'') {
+                    if (pos_ + 1 < s_.size() && s_[pos_ + 1] == '\'') {
+                        escaped = true;
+                        pos_ += 2;
                     } else {
                         break;
                     }
                 } else {
-                    out += ch;
+                    ++pos_;
                 }
             }
-            t.text = out;
+            if (!escaped) {
+                t.text.assign(s_, start, pos_ - start);
+            } else {
+                t.text.clear();
+                t.text.reserve(pos_ - start);
+                for (size_t i = start; i < pos_; ) {
+                    if (s_[i] == '\'' && i + 1 < pos_ && s_[i + 1] == '\'') {
+                        t.text += '\'';
+                        i += 2;
+                    } else {
+                        t.text += s_[i++];
+                    }
+                }
+            }
+            ++pos_;  // closing quote
             return t;
         }
         if (std::isdigit(static_cast<unsigned char>(c)) ||
