@@ -182,6 +182,12 @@ public:
     void sync();
     void drop_cache();
     void drop_upto(uint64_t off);
+    // Disable kernel readahead so a one-pass WAL scan cannot charge the
+    // rest of the file in page cache ahead of drop_upto.
+    void advise_noreadahead();
+    // Extra fdatasync + DONTNEED after a large unsynced flush burst.
+    // Does not replace COMMIT/autocommit fsync.
+    void maybe_sync_evict();
     void scan(const std::function<void(const RecordView&)>& cb);
     RecordView read_at(uint64_t offset);
     void close();
@@ -199,9 +205,11 @@ private:
     std::string rbuf_;
     uint64_t size_ = 0;
     uint64_t drop_pos_ = 0;
+    uint64_t unsynced_ = 0;
     uint64_t rbuf_off_ = 0;
     size_t rbuf_len_ = 0;
     static constexpr size_t kReadWindow = 2ull << 20;
+    static constexpr uint64_t kSyncEvictEvery = 16ull << 20;
 };
 
 void sync_dir(const std::string& dir);
@@ -227,7 +235,10 @@ public:
     void append_row(int64_t pk, const std::vector<ValType>& mid_types,
                     const int64_t* mid_i, const std::string_view* mid_s,
                     const float* vec);
+    void set_reuse_key(uint64_t log_size, uint64_t committed_max);
     void finish_build();
+    void abort_build();
+    bool writing() const { return writing_; }
 
     struct RowView {
         int64_t pk = 0;
@@ -279,8 +290,6 @@ private:
     uint64_t committed_max_ = 0;
     uint64_t drop_pos_ = 0;
     uint64_t evict_pos_ = 0;
-    uint64_t writeback_pos_ = 0;
-    uint64_t durable_pos_ = 0;
     uint64_t rbuf_off_ = 0;
     size_t rbuf_len_ = 0;
     bool ready_ = false;

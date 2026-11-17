@@ -140,6 +140,7 @@ void Log::flush_buf() {
     if (!wbuf_.empty()) {
         invalidate_read_buf();
         write_full(fd_, wbuf_.data(), wbuf_.size());
+        unsynced_ += wbuf_.size();
         wbuf_.clear();
     }
 }
@@ -155,7 +156,10 @@ uint64_t Log::append(uint8_t type, uint64_t txn, uint32_t stmt, const std::strin
     wbuf_ += payload;
     wbuf_.append(reinterpret_cast<const char*>(&kEndMagic), 4);
     size_ += 4 + static_cast<uint64_t>(body_len) + 4;
-    if (wbuf_.size() >= 1024 * 1024) flush_buf();
+    if (wbuf_.size() >= 1024 * 1024) {
+        flush_buf();
+        maybe_sync_evict();
+    }
     return off;
 }
 
@@ -163,8 +167,11 @@ void Log::sync() {
     if (fd_ >= 0) {
         flush_buf();
         if (::fdatasync(fd_) != 0) throw DbError("internal_error", "fsync failed");
-        // Official M includes page cache; drop durable, page-aligned ranges.
-        drop_upto(size_);
+        // Official M includes page cache. After a durable COMMIT, drop the
+        // whole file (not just the page-aligned prefix) so write-phase
+        // cache cannot accumulate the full WAL across many autocommits.
+        drop_cache();
+        unsynced_ = 0;
     }
 }
 
@@ -185,6 +192,24 @@ void Log::drop_upto(uint64_t off) {
     ::posix_fadvise(fd_, static_cast<off_t>(start),
                     static_cast<off_t>(end - start), POSIX_FADV_DONTNEED);
     drop_pos_ = end;
+}
+
+void Log::advise_noreadahead() {
+    if (fd_ >= 0) {
+        ::posix_fadvise(fd_, 0, 0, POSIX_FADV_RANDOM);
+        ::posix_fadvise(fd_, 0, 0, POSIX_FADV_NOREUSE);
+    }
+}
+
+void Log::maybe_sync_evict() {
+    // Extra durability + eviction for a long uncommitted (or slowly
+    // committed) write burst. COMMIT/autocommit still calls sync().
+    if (fd_ < 0 || unsynced_ < kSyncEvictEvery) return;
+    flush_buf();
+    if (::fdatasync(fd_) != 0) throw DbError("internal_error", "fsync failed");
+    ::posix_fadvise(fd_, 0, 0, POSIX_FADV_DONTNEED);
+    drop_pos_ = size_;
+    unsynced_ = 0;
 }
 
 void Log::scan(const std::function<void(const RecordView&)>& cb) {
@@ -250,6 +275,7 @@ RecordView Log::read_at(uint64_t offset) {
 void Log::close() {
     if (fd_ >= 0) {
         flush_buf();
+        ::posix_fadvise(fd_, 0, 0, POSIX_FADV_DONTNEED);
         rbuf_len_ = 0;
         rbuf_off_ = 0;
         rbuf_.clear();
@@ -265,6 +291,7 @@ void PackedScan::close() {
         if (writing_) {
             try { flush_wbuf(); } catch (...) {}
         }
+        ::posix_fadvise(fd_, 0, 0, POSIX_FADV_DONTNEED);
         rbuf_len_ = 0;
         rbuf_off_ = 0;
         rbuf_.clear();
@@ -355,54 +382,20 @@ bool PackedScan::ensure_in_buf(uint64_t off, size_t n) {
 }
 
 void PackedScan::evict_written() {
-    // Pipeline writeback of the just-flushed window, then evict an 8MiB-lagged
-    // prefix so page cache cannot hold the full snapshot (and the WAL window
-    // being scanned) at once. DONTNEED only evicts clean pages: prefer a
-    // range wait, but also fdatasync every 32MiB from the start of the file
-    // because sync_file_range can return 0 without actually cleaning pages
-    // on some container filesystems, after which evict_pos_ would otherwise
-    // advance and never retry.
+    // After each 8MiB flush, fdatasync the snapshot and DONTNEED the
+    // durable prefix. The build only writes (it does not read back), so
+    // there is no need to keep a lagged cached window. fdatasync is used
+    // instead of sync_file_range because the latter can report success
+    // without actually cleaning pages on some container filesystems,
+    // after which DONTNEED would leave the snapshot in official M.
     if (fd_ < 0 || size_ <= kHeaderSize) return;
     constexpr uint64_t page = 4096;
-    uint64_t aligned = size_ & ~(page - 1);
-    if (aligned <= evict_pos_ && aligned <= writeback_pos_) return;
-#if defined(__linux__)
-    if (aligned > writeback_pos_) {
-        off_t len = static_cast<off_t>(aligned - writeback_pos_);
-        if (len > 0)
-            ::sync_file_range(fd_, static_cast<off_t>(writeback_pos_), len,
-                              SYNC_FILE_RANGE_WRITE);
-        writeback_pos_ = aligned;
-    }
-    uint64_t evict_to = writeback_pos_ > kWriteWindow
-                            ? (writeback_pos_ - kWriteWindow) & ~(page - 1)
-                            : 0;
-    if (evict_to > evict_pos_) {
-        off_t start = static_cast<off_t>(evict_pos_);
-        off_t len = static_cast<off_t>(evict_to - evict_pos_);
-        int rc = ::sync_file_range(fd_, start, len,
-                                   SYNC_FILE_RANGE_WRITE | SYNC_FILE_RANGE_WAIT_AFTER);
-        if (rc != 0) ::fdatasync(fd_);
-        ::posix_fadvise(fd_, start, len, POSIX_FADV_DONTNEED);
-        evict_pos_ = evict_to;
-    }
-    constexpr uint64_t kDurableEvery = 32ull << 20;
-    if (writeback_pos_ >= durable_pos_ + kDurableEvery) {
-        ::fdatasync(fd_);
-        uint64_t evict_all = writeback_pos_ > kWriteWindow
-                                 ? (writeback_pos_ - kWriteWindow) & ~(page - 1)
-                                 : writeback_pos_;
-        if (evict_all > 0) {
-            ::posix_fadvise(fd_, 0, static_cast<off_t>(evict_all), POSIX_FADV_DONTNEED);
-            evict_pos_ = evict_all;
-        }
-        durable_pos_ = writeback_pos_;
-    }
-#else
-    evict_pos_ = aligned;
-    writeback_pos_ = aligned;
-    durable_pos_ = aligned;
-#endif
+    uint64_t evict_to = size_ & ~(page - 1);
+    if (evict_to <= evict_pos_) return;
+    if (::fdatasync(fd_) != 0) throw DbError("internal_error", "packed scan fsync failed");
+    ::posix_fadvise(fd_, 0, static_cast<off_t>(evict_to), POSIX_FADV_DONTNEED);
+    evict_pos_ = evict_to;
+    if (evict_to > drop_pos_) drop_pos_ = evict_to;
 }
 
 void PackedScan::flush_wbuf() {
@@ -454,8 +447,6 @@ bool PackedScan::try_open_existing(const std::string& path, uint32_t table_id, i
     size_ = static_cast<uint64_t>(end);
     drop_pos_ = 0;
     evict_pos_ = 0;
-    writeback_pos_ = 0;
-    durable_pos_ = 0;
     ready_ = true;
     writing_ = false;
     return true;
@@ -476,8 +467,6 @@ void PackedScan::start_build(const std::string& path, uint32_t table_id, int dim
     size_ = kHeaderSize;
     drop_pos_ = 0;
     evict_pos_ = 0;
-    writeback_pos_ = 0;
-    durable_pos_ = 0;
     ready_ = false;
     writing_ = true;
     wbuf_.clear();
@@ -523,14 +512,25 @@ void PackedScan::append_row(int64_t pk, const std::vector<ValType>& mid_types,
     if (wbuf_.size() >= kWriteWindow) flush_wbuf();
 }
 
+void PackedScan::set_reuse_key(uint64_t log_size, uint64_t committed_max) {
+    log_size_ = log_size;
+    committed_max_ = committed_max;
+}
+
+void PackedScan::abort_build() {
+    std::string p = path_;
+    writing_ = false;
+    ready_ = false;
+    close();
+    if (!p.empty()) ::unlink(p.c_str());
+}
+
 void PackedScan::finish_build() {
     if (!writing_) return;
     flush_wbuf();
     write_header(true);
     if (::fdatasync(fd_) != 0) throw DbError("internal_error", "packed scan fsync failed");
     evict_pos_ = 0;
-    writeback_pos_ = 0;
-    durable_pos_ = 0;
     drop_pos_ = 0;
     drop_cache();
     wbuf_.shrink_to_fit();

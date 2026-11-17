@@ -103,6 +103,10 @@ private:
                              int64_t* mid_i, std::string_view* mid_s,
                              const float*& vec, int& dim);
     void ensure_packed_scan(Table& t);
+    void populate_packed_from_latest(Table& t);
+    void maybe_incremental_packed(Table& t, const std::vector<Row>* new_rows);
+    void abort_incremental_packed(Table& t);
+    void maybe_incremental_after_txn();
     struct Cand { float dsq; int64_t pk; int32_t idx; };
     std::vector<Cand> cands_;
 

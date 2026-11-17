@@ -140,6 +140,26 @@ int table_dim(const TableSchema& s) {
     return s.vector_index >= 0 ? static_cast<int>(s.cols[static_cast<size_t>(s.vector_index)].len) : 0;
 }
 
+void append_packed_row(PackedScan& packed, const TableSchema& s, const Row& row,
+                       const std::vector<ValType>& mid_types,
+                       const std::vector<int>& mid_cols) {
+    int64_t pk = row[static_cast<size_t>(s.pk_index)].i;
+    std::vector<int64_t> mid_i(mid_types.size());
+    std::vector<std::string_view> mid_s(mid_types.size());
+    size_t ii = 0, ss = 0;
+    for (size_t k = 0; k < mid_cols.size(); ++k) {
+        const Value& v = row[static_cast<size_t>(mid_cols[k])];
+        if (mid_types[k] == ValType::BIGINT) mid_i[ii++] = v.i;
+        else mid_s[ss++] = std::string_view(v.s);
+    }
+    const float* vec = nullptr;
+    if (s.vector_index >= 0) {
+        const Vector& vv = row[static_cast<size_t>(s.vector_index)].v;
+        if (!vv.empty()) vec = vv.data();
+    }
+    packed.append_row(pk, mid_types, mid_i.data(), mid_s.data(), vec);
+}
+
 void trim_heap() {
 #if defined(__linux__)
     ::malloc_trim(0);
@@ -265,6 +285,7 @@ void Engine::open(const std::string& data_dir) {
     for (auto& [id, t] : tables_)
         if (!t.schema.ann_index_name.empty()) rebuild_ann(t);
     log_.drop_cache();
+    log_.advise_noreadahead();
 }
 
 Engine::Table& Engine::get_table(const std::string& name) {
@@ -515,7 +536,10 @@ ExecResult Engine::exec_insert(const Statement& st) {
             cache_put(s.table_id, pk, off, std::move(row));
         if (!is_auto) txn_writes_.emplace_back(s.table_id, pk);
     }
-    if (is_auto) append_commit(txn);
+    if (is_auto) {
+        append_commit(txn);
+        maybe_incremental_packed(t, &staged);
+    }
     ExecResult r;
     r.affected = static_cast<int64_t>(staged.size());
     return r;
@@ -565,6 +589,7 @@ ExecResult Engine::exec_update(const Statement& st) {
         if (!is_auto) txn_writes_.emplace_back(s.table_id, pk);
     }
     if (is_auto) append_commit(txn);
+    if (t.packed && t.packed->writing()) abort_incremental_packed(t);
     ExecResult r;
     r.affected = static_cast<int64_t>(matches.size());
     return r;
@@ -599,6 +624,7 @@ ExecResult Engine::exec_delete(const Statement& st) {
         if (!is_auto) txn_writes_.emplace_back(s.table_id, pk);
     }
     if (is_auto) append_commit(txn);
+    if (t.packed && t.packed->writing()) abort_incremental_packed(t);
     ExecResult r;
     r.affected = static_cast<int64_t>(matches.size());
     return r;
@@ -723,26 +749,10 @@ bool Engine::decode_visible_scan(Table& t, int64_t pk,
     return false;
 }
 
-void Engine::ensure_packed_scan(Table& t) {
-    int dim = t.schema.vector_index >= 0
-                  ? static_cast<int>(t.schema.cols[static_cast<size_t>(t.schema.vector_index)].len)
-                  : 0;
-    if (t.packed && t.packed->ready() && t.packed_epoch == cache_epoch_) return;
-    if (!t.packed) t.packed = std::make_unique<PackedScan>();
-    const std::string path = data_dir_ + "/mvdb.scan." + std::to_string(t.schema.table_id);
-    if (t.packed->try_open_existing(path, t.schema.table_id, dim, log_.size(), committed_max_)) {
-        t.packed_epoch = cache_epoch_;
-        return;
-    }
-    // Fresh build rereads the WAL and writes a packed file about the same
-    // size as the vectors. Drop the insert-time cache and already-durable
-    // WAL pages first so memory.peak is not row_cache + WAL + snapshot.
-    release_insert_cache();
-    log_.drop_cache();
+void Engine::populate_packed_from_latest(Table& t) {
     std::vector<ValType> mid_types;
     std::vector<int> mid_cols;
     mid_layout(t.schema, mid_types, mid_cols);
-    t.packed->start_build(path, t.schema.table_id, dim, log_.size(), committed_max_);
     std::vector<std::pair<uint64_t, int64_t>> recs;
     recs.reserve(t.latest.size());
     for (auto& [pk, off] : t.latest) recs.emplace_back(off, pk);
@@ -764,6 +774,109 @@ void Engine::ensure_packed_scan(Table& t) {
             last_drop = off;
         }
     }
+}
+
+void Engine::abort_incremental_packed(Table& t) {
+    if (t.packed) t.packed->abort_build();
+    t.packed_epoch = 0;
+}
+
+void Engine::maybe_incremental_packed(Table& t, const std::vector<Row>* new_rows) {
+    // Over-memory insert-only path: keep a packed snapshot growing after
+    // each COMMIT so shutdown does not re-read the full WAL while also
+    // writing a full snapshot. 10k / FastScan tables never enter here.
+    if (!table_too_big_for_fastscan(static_cast<int64_t>(t.latest.size()), table_dim(t.schema)))
+        return;
+    try {
+        if (t.packed && t.packed->writing()) {
+            if (new_rows && !new_rows->empty()) {
+                std::vector<ValType> mid_types;
+                std::vector<int> mid_cols;
+                mid_layout(t.schema, mid_types, mid_cols);
+                for (const Row& row : *new_rows)
+                    append_packed_row(*t.packed, t.schema, row, mid_types, mid_cols);
+            }
+            return;
+        }
+        int dim = table_dim(t.schema);
+        if (!t.packed) t.packed = std::make_unique<PackedScan>();
+        const std::string path = data_dir_ + "/mvdb.scan." + std::to_string(t.schema.table_id);
+        release_insert_cache();
+        log_.drop_cache();
+        log_.advise_noreadahead();
+        t.packed->start_build(path, t.schema.table_id, dim, log_.size(), committed_max_);
+        populate_packed_from_latest(t);
+        log_.drop_cache();
+        if (t.packed) t.packed->drop_cache();
+        trim_heap();
+    } catch (...) {
+        // Snapshot is a cache; a failed incremental build must not fail INSERT.
+        abort_incremental_packed(t);
+    }
+}
+
+void Engine::maybe_incremental_after_txn() {
+    // Called after an explicit COMMIT, while txn_writes_ is still populated.
+    std::vector<uint32_t> tids;
+    for (auto& [tid, pk] : txn_writes_) {
+        if (std::find(tids.begin(), tids.end(), tid) == tids.end()) tids.push_back(tid);
+    }
+    for (uint32_t tid : tids) {
+        auto it = tables_.find(tid);
+        if (it == tables_.end()) continue;
+        Table& t = it->second;
+        if (!table_too_big_for_fastscan(static_cast<int64_t>(t.latest.size()), table_dim(t.schema)))
+            continue;
+        try {
+            if (t.packed && t.packed->writing()) {
+                std::vector<ValType> mid_types;
+                std::vector<int> mid_cols;
+                mid_layout(t.schema, mid_types, mid_cols);
+                for (auto& [id, pk] : txn_writes_) {
+                    if (id != tid) continue;
+                    const Row* row = resolve_row(t, pk);
+                    if (row) append_packed_row(*t.packed, t.schema, *row, mid_types, mid_cols);
+                }
+            } else {
+                maybe_incremental_packed(t, nullptr);
+            }
+        } catch (...) {
+            abort_incremental_packed(t);
+        }
+    }
+}
+
+void Engine::ensure_packed_scan(Table& t) {
+    int dim = t.schema.vector_index >= 0
+                  ? static_cast<int>(t.schema.cols[static_cast<size_t>(t.schema.vector_index)].len)
+                  : 0;
+    if (t.packed && t.packed->ready() && t.packed_epoch == cache_epoch_) return;
+    if (t.packed && t.packed->writing()) {
+        // Incremental snapshot already has every committed row. Finalize
+        // with the current reuse key so a restarted query process can open it.
+        t.packed->set_reuse_key(log_.size(), committed_max_);
+        t.packed->finish_build();
+        sync_dir(data_dir_);
+        log_.drop_cache();
+        if (t.packed) t.packed->drop_cache();
+        trim_heap();
+        t.packed_epoch = cache_epoch_;
+        return;
+    }
+    if (!t.packed) t.packed = std::make_unique<PackedScan>();
+    const std::string path = data_dir_ + "/mvdb.scan." + std::to_string(t.schema.table_id);
+    if (t.packed->try_open_existing(path, t.schema.table_id, dim, log_.size(), committed_max_)) {
+        t.packed_epoch = cache_epoch_;
+        return;
+    }
+    // Fresh build rereads the WAL and writes a packed file about the same
+    // size as the vectors. Drop the insert-time cache and already-durable
+    // WAL pages first so memory.peak is not row_cache + WAL + snapshot.
+    release_insert_cache();
+    log_.drop_cache();
+    log_.advise_noreadahead();
+    t.packed->start_build(path, t.schema.table_id, dim, log_.size(), committed_max_);
+    populate_packed_from_latest(t);
     t.packed->finish_build();
     sync_dir(data_dir_);
     log_.drop_cache();
@@ -1319,6 +1432,9 @@ ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
                 return o;
             };
 
+            if (t.packed && t.packed->writing()) {
+                try { ensure_packed_scan(t); } catch (...) {}
+            }
             bool packed_ready = t.packed && t.packed->ready() && t.packed_epoch == cache_epoch_;
             if (!packed_ready) {
                 if (!t.packed) t.packed = std::make_unique<PackedScan>();
@@ -1670,6 +1786,7 @@ ExecResult Engine::execute(const std::string& sql, const std::string& search_mod
             bump_cache();
             if (cur_txn_ == 0) throw DbError("no_transaction", "no active transaction");
             append_commit(cur_txn_);
+            maybe_incremental_after_txn();
             cur_txn_ = 0;
             stmt_aborted_.clear();
             txn_writes_.clear();
