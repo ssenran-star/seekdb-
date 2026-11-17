@@ -44,6 +44,18 @@ void read_full(int fd, uint64_t off, char* p, size_t n) {
         n -= static_cast<size_t>(r);
     }
 }
+
+// Drop page-aligned file-cache for [off, off+n). Partial edge pages are
+// left in place so a later window can still share them.
+void evict_file_range(int fd, uint64_t off, size_t n) {
+    if (fd < 0 || n == 0) return;
+    constexpr uint64_t page = 4096;
+    uint64_t start = (off + page - 1) & ~(page - 1);
+    uint64_t end = (off + n) & ~(page - 1);
+    if (end <= start) return;
+    ::posix_fadvise(fd, static_cast<off_t>(start),
+                    static_cast<off_t>(end - start), POSIX_FADV_DONTNEED);
+}
 }  // namespace
 
 void sync_dir(const std::string& dir) {
@@ -114,12 +126,13 @@ bool Log::ensure_in_buf(uint64_t off, size_t n) {
     read_full(fd_, off, rbuf_.data(), want);
     rbuf_off_ = off;
     rbuf_len_ = want;
-    // Re-reading a previously dropped range brings pages back into the
-    // cache; rewind drop_pos_ so later drop_upto() can release them again
-    // (important for the 2nd+ over-memory query after drop_cache()).
+    // Data is now in rbuf_; evict the file pages so official memory.peak
+    // does not hold a WAL window in page cache on top of the heap copy.
+    // A packed-snapshot rebuild can then evict WAL as it is scanned.
+    evict_file_range(fd_, off, want);
     constexpr uint64_t page = 4096;
-    uint64_t aligned = off & ~(page - 1);
-    if (aligned < drop_pos_) drop_pos_ = aligned;
+    uint64_t evicted_to = (off + want) & ~(page - 1);
+    if (evicted_to > drop_pos_) drop_pos_ = evicted_to;
     return true;
 }
 
@@ -334,31 +347,35 @@ bool PackedScan::ensure_in_buf(uint64_t off, size_t n) {
     read_full(fd_, off, rbuf_.data(), want);
     rbuf_off_ = off;
     rbuf_len_ = want;
+    evict_file_range(fd_, off, want);
     constexpr uint64_t page = 4096;
-    uint64_t aligned = off & ~(page - 1);
-    if (aligned < drop_pos_) drop_pos_ = aligned;
+    uint64_t evicted_to = (off + want) & ~(page - 1);
+    if (evicted_to > drop_pos_) drop_pos_ = evicted_to;
     return true;
 }
 
 void PackedScan::evict_written() {
-    // Leave a small dirty tail so mid-build flushes can start writeback
-    // without WAIT_AFTER on every window. DONTNEED only evicts clean
-    // pages, so the lagged prefix is waited on (or fdatasync'd if the
-    // range wait fails) to keep memory.peak from holding WAL + the
-    // whole snapshot.
-    constexpr uint64_t keep = 2ull << 20;
-    if (fd_ < 0 || size_ <= kHeaderSize + keep) return;
-    uint64_t issue_to = (size_ - keep) & ~4095ull;
+    // Pipeline writeback of the just-flushed window, then evict an 8MiB-lagged
+    // prefix so page cache cannot hold the full snapshot (and the WAL window
+    // being scanned) at once. DONTNEED only evicts clean pages: prefer a
+    // range wait, but also fdatasync every 32MiB from the start of the file
+    // because sync_file_range can return 0 without actually cleaning pages
+    // on some container filesystems, after which evict_pos_ would otherwise
+    // advance and never retry.
+    if (fd_ < 0 || size_ <= kHeaderSize) return;
+    constexpr uint64_t page = 4096;
+    uint64_t aligned = size_ & ~(page - 1);
+    if (aligned <= evict_pos_ && aligned <= writeback_pos_) return;
 #if defined(__linux__)
-    if (issue_to > writeback_pos_) {
-        off_t len = static_cast<off_t>(issue_to - writeback_pos_);
+    if (aligned > writeback_pos_) {
+        off_t len = static_cast<off_t>(aligned - writeback_pos_);
         if (len > 0)
             ::sync_file_range(fd_, static_cast<off_t>(writeback_pos_), len,
                               SYNC_FILE_RANGE_WRITE);
-        writeback_pos_ = issue_to;
+        writeback_pos_ = aligned;
     }
-    uint64_t evict_to = writeback_pos_ > keep
-                            ? (writeback_pos_ - keep) & ~4095ull
+    uint64_t evict_to = writeback_pos_ > kWriteWindow
+                            ? (writeback_pos_ - kWriteWindow) & ~(page - 1)
                             : 0;
     if (evict_to > evict_pos_) {
         off_t start = static_cast<off_t>(evict_pos_);
@@ -369,9 +386,22 @@ void PackedScan::evict_written() {
         ::posix_fadvise(fd_, start, len, POSIX_FADV_DONTNEED);
         evict_pos_ = evict_to;
     }
+    constexpr uint64_t kDurableEvery = 32ull << 20;
+    if (writeback_pos_ >= durable_pos_ + kDurableEvery) {
+        ::fdatasync(fd_);
+        uint64_t evict_all = writeback_pos_ > kWriteWindow
+                                 ? (writeback_pos_ - kWriteWindow) & ~(page - 1)
+                                 : writeback_pos_;
+        if (evict_all > 0) {
+            ::posix_fadvise(fd_, 0, static_cast<off_t>(evict_all), POSIX_FADV_DONTNEED);
+            evict_pos_ = evict_all;
+        }
+        durable_pos_ = writeback_pos_;
+    }
 #else
-    evict_pos_ = issue_to;
-    writeback_pos_ = issue_to;
+    evict_pos_ = aligned;
+    writeback_pos_ = aligned;
+    durable_pos_ = aligned;
 #endif
 }
 
@@ -425,6 +455,7 @@ bool PackedScan::try_open_existing(const std::string& path, uint32_t table_id, i
     drop_pos_ = 0;
     evict_pos_ = 0;
     writeback_pos_ = 0;
+    durable_pos_ = 0;
     ready_ = true;
     writing_ = false;
     return true;
@@ -446,8 +477,11 @@ void PackedScan::start_build(const std::string& path, uint32_t table_id, int dim
     drop_pos_ = 0;
     evict_pos_ = 0;
     writeback_pos_ = 0;
+    durable_pos_ = 0;
     ready_ = false;
     writing_ = true;
+    wbuf_.clear();
+    wbuf_.reserve(kWriteWindow);
     write_header(false);
     if (::lseek(fd_, static_cast<off_t>(kHeaderSize), SEEK_SET) < 0)
         throw DbError("internal_error", "cannot seek packed scan file");
@@ -496,8 +530,10 @@ void PackedScan::finish_build() {
     if (::fdatasync(fd_) != 0) throw DbError("internal_error", "packed scan fsync failed");
     evict_pos_ = 0;
     writeback_pos_ = 0;
+    durable_pos_ = 0;
     drop_pos_ = 0;
     drop_cache();
+    wbuf_.shrink_to_fit();
     writing_ = false;
     ready_ = true;
 }

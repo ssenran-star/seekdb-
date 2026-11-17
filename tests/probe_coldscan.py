@@ -3,6 +3,14 @@
 binary or protocol_check. Typical AMD run (needs a 2g memory cgroup):
 
   python3 tests/probe_coldscan.py ./build/minivectordb --n 2000000 --dim 256
+
+SUMMARY fields:
+  proc.hwm_kb / proc.rss_kb are process-local (VmHWM / last VmRSS from
+  /proc/<pid>/status), sampled during write+queries. These are trustworthy
+  on a shared instance. proc.write_hwm_kb and proc.query_hwm_kb are the
+  per-phase peaks (write includes shutdown snapshot build).
+  mem.peak_kb is cgroup memory.peak: instance-wide and never reset, so it
+  is secondary and can be monotonically inflated by other jobs.
 """
 import argparse
 import json
@@ -11,11 +19,13 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 
 def mem_peak_kb():
     # Prefer cgroup memory.peak when the process is already in a 2g cgroup.
+    # This is cgroup-wide and is not reset between runs; treat as secondary.
     for path in (
         "/sys/fs/cgroup/memory.peak",
         "/sys/fs/cgroup/memory/memory.max_usage_in_bytes",
@@ -28,6 +38,57 @@ def mem_peak_kb():
         except OSError:
             pass
     return None
+
+
+def proc_status_mem_kb(pid):
+    """Return (VmHWM_kb, VmRSS_kb) for pid, or (None, None). Already in kB."""
+    try:
+        with open("/proc/%d/status" % pid) as f:
+            txt = f.read()
+    except OSError:
+        return None, None
+    hwm = rss = None
+    for line in txt.splitlines():
+        if line.startswith("VmHWM:"):
+            hwm = int(line.split()[1])
+        elif line.startswith("VmRSS:"):
+            rss = int(line.split()[1])
+        if hwm is not None and rss is not None:
+            break
+    return hwm, rss
+
+
+class ProcMemTracker:
+    """Poll /proc/<pid>/status so shutdown-time VmHWM is not missed."""
+
+    def __init__(self, pid, interval=0.02):
+        self.pid = pid
+        self.interval = interval
+        self.hwm_kb = 0
+        self.rss_kb = 0
+        self._stop = threading.Event()
+        self._th = threading.Thread(target=self._loop, name="proc-mem", daemon=True)
+        self._th.start()
+
+    def _sample(self):
+        hwm, rss = proc_status_mem_kb(self.pid)
+        if hwm is not None:
+            self.hwm_kb = max(self.hwm_kb, hwm)
+        if rss is not None:
+            self.rss_kb = rss
+            self.hwm_kb = max(self.hwm_kb, rss)
+
+    def _loop(self):
+        while not self._stop.is_set():
+            self._sample()
+            self._stop.wait(self.interval)
+
+    def stop(self):
+        self._sample()
+        self._stop.set()
+        self._th.join(timeout=2)
+        self._sample()
+        return self.hwm_kb, self.rss_kb
 
 
 def io_bytes(pid):
@@ -67,6 +128,9 @@ class Session:
         self.p.stdin.flush()
         rec = json.loads(self.p.stdout.readline())
         assert rec.get("ok"), rec
+        # Snapshot build has finished and the process is still alive.
+        # Sample VmHWM before wait() reaps it and /proc/<pid> disappears.
+        self.final_hwm, self.final_rss = proc_status_mem_kb(self.p.pid)
         self.p.wait(timeout=600)
 
 
@@ -99,6 +163,7 @@ def main():
 
     t0 = time.perf_counter()
     p = spawn()
+    write_trk = ProcMemTracker(p.pid)
     s = Session(p)
     s.req(f"CREATE TABLE big (id BIGINT PRIMARY KEY, cat VARCHAR(16), e VECTOR({args.dim}));")
     batch = 100
@@ -108,12 +173,18 @@ def main():
             rows.append(f"({i},'c{i % 8}','{vecs[i % 8]}')")
         s.req("INSERT INTO big VALUES " + ",".join(rows) + ";")
     s.shutdown()
+    write_hwm, write_rss = write_trk.stop()
+    if s.final_hwm is not None:
+        write_hwm = max(write_hwm, s.final_hwm)
+    if s.final_rss is not None:
+        write_rss = s.final_rss
     t_write = time.perf_counter() - t0
     logsz = os.path.getsize(os.path.join(data, "mvdb.log"))
-    print(f"WRITE {t_write:.3f}s log={logsz} n={args.n} dim={args.dim}", flush=True)
+    print(f"WRITE {t_write:.3f}s log={logsz} n={args.n} dim={args.dim} proc.hwm_kb={write_hwm} proc.rss_kb={write_rss}", flush=True)
 
     q = "[" + ",".join(["0.1"] * args.dim) + "]"
     p = spawn()
+    query_trk = ProcMemTracker(p.pid)
     s = Session(p)
     times = []
     for qi in range(args.queries):
@@ -127,12 +198,21 @@ def main():
         print(f"QUERY{qi+1} {dt:.3f}s", flush=True)
     rbytes, wbytes = io_bytes(p.pid)
     s.shutdown()
+    query_hwm, query_rss = query_trk.stop()
+    if s.final_hwm is not None:
+        query_hwm = max(query_hwm, s.final_hwm)
+    if s.final_rss is not None:
+        query_rss = s.final_rss
     peak = mem_peak_kb()
     snap = os.path.join(data, "mvdb.scan.1")
     snapsz = os.path.getsize(snap) if os.path.exists(snap) else 0
+    proc_hwm = max(write_hwm, query_hwm)
     print(
         f"SUMMARY T_write={t_write:.3f}s T_query={times} "
-        f"B_read={rbytes} B_write={wbytes} mem.peak_kb={peak} snap={snapsz}"
+        f"B_read={rbytes} B_write={wbytes} "
+        f"proc.hwm_kb={proc_hwm} proc.rss_kb={query_rss} "
+        f"proc.write_hwm_kb={write_hwm} proc.query_hwm_kb={query_hwm} "
+        f"mem.peak_kb={peak} snap={snapsz}"
     )
     if not args.data_dir:
         shutil.rmtree(data, ignore_errors=True)

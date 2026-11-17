@@ -767,6 +767,8 @@ void Engine::ensure_packed_scan(Table& t) {
     t.packed->finish_build();
     sync_dir(data_dir_);
     log_.drop_cache();
+    if (t.packed) t.packed->drop_cache();
+    trim_heap();
     t.packed_epoch = cache_epoch_;
 }
 
@@ -1424,6 +1426,7 @@ ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
                     t.packed->finish_build();
                     sync_dir(data_dir_);
                     t.packed_epoch = cache_epoch_;
+                    trim_heap();
                 }
 
                 if (t.packed) t.packed->drop_cache();

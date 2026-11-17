@@ -280,6 +280,7 @@ private:
     uint64_t drop_pos_ = 0;
     uint64_t evict_pos_ = 0;
     uint64_t writeback_pos_ = 0;
+    uint64_t durable_pos_ = 0;
     uint64_t rbuf_off_ = 0;
     size_t rbuf_len_ = 0;
     bool ready_ = false;
