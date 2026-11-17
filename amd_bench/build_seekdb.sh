@@ -12,13 +12,15 @@ echo "build_seekdb.sh v3 (2026-11-16 22:40) -- strip-components tarball"
 WORK=/workspace/work
 SRC=/workspace/seekdb-src
 REF=${REF:-amd-cagra-submit}
-# OB unity TUs can eat 2-3GB each; -j64 on a <=128GB box OOM-thrashes and
-# looks like a silent hang. Size jobs from MemAvailable unless overridden.
+# OB unity/codegen TUs peak at 4-6GB each and the final seekdb link needs
+# 20GB+ headroom; a /3 estimate blew up a big box at 99.9% RAM (took the
+# Jupyter kernel with it). /8 plus a hard cap of 48 keeps the box usable.
 if [ -z "${JOBS:-}" ]; then
   ncpu=$(nproc 2>/dev/null || echo 32)
   memg=$(awk '/MemAvailable/ {print int($2/1048576)}' /proc/meminfo 2>/dev/null || echo 64)
   [ "$memg" -lt 3 ] && memg=64
-  bymem=$((memg / 3)); [ "$bymem" -lt 4 ] && bymem=4
+  bymem=$((memg / 8)); [ "$bymem" -lt 4 ] && bymem=4
+  [ "$bymem" -gt 48 ] && bymem=48
   [ "$ncpu" -gt "$bymem" ] && ncpu=$bymem
   JOBS=$ncpu
 fi
