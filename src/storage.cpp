@@ -123,11 +123,7 @@ void Log::sync() {
     if (fd_ >= 0 && ::fdatasync(fd_) != 0)
         throw DbError("internal_error", "fsync failed");
     // Official M includes page cache; drop durable ranges after each commit.
-    if (fd_ >= 0 && size_ > drop_pos_) {
-        ::posix_fadvise(fd_, static_cast<off_t>(drop_pos_),
-                        static_cast<off_t>(size_ - drop_pos_), POSIX_FADV_DONTNEED);
-        drop_pos_ = size_;
-    }
+    drop_upto(size_);
 }
 
 void Log::drop_cache() {
@@ -138,8 +134,21 @@ void Log::drop_cache() {
     }
 }
 
+void Log::drop_upto(uint64_t off) {
+    if (fd_ < 0 || off <= drop_pos_) return;
+    constexpr uint64_t page = 4096;
+    uint64_t start = (drop_pos_ + page - 1) & ~(page - 1);
+    uint64_t end = off & ~(page - 1);
+    if (end <= start) return;
+    ::posix_fadvise(fd_, static_cast<off_t>(start),
+                    static_cast<off_t>(end - start), POSIX_FADV_DONTNEED);
+    drop_pos_ = end;
+}
+
 void Log::scan(const std::function<void(const RecordView&)>& cb) {
     uint64_t off = kHeaderSize;
+    uint64_t last_drop = off;
+    constexpr uint64_t kDropEvery = 8ull << 20;
     while (off < size_) {
         if (size_ - off < 4) break;
         uint32_t body_len = 0;
@@ -158,6 +167,10 @@ void Log::scan(const std::function<void(const RecordView&)>& cb) {
         rv.payload = body.substr(13);
         cb(rv);
         off += 4 + body_len + 4;
+        if (off - last_drop >= kDropEvery) {
+            drop_upto(off);
+            last_drop = off;
+        }
     }
     if (off < size_) {
         if (::ftruncate(fd_, static_cast<off_t>(off)) != 0)

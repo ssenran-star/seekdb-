@@ -183,6 +183,31 @@ bool Engine::visible(uint64_t txn, uint32_t stmt) const {
     return txn <= committed_max_ && aborted_.count(txn) == 0;
 }
 
+bool Engine::load_row(Table& t, int64_t pk, Row& out) {
+    auto it = t.latest.find(pk);
+    if (it == t.latest.end()) return false;
+    uint64_t off = it->second;
+    while (off != 0) {
+        RecordView rv = log_.read_at(off);
+        ByteBuf b;
+        b.data = rv.payload;
+        b.get_u32();
+        b.get_i64();
+        uint64_t prev = b.get_u64();
+        if (rv.type == REC_DELETE) {
+            if (visible(rv.txn, rv.stmt)) return false;
+            off = prev;
+            continue;
+        }
+        if (visible(rv.txn, rv.stmt)) {
+            out = b.get_row(t.schema.cols.size());
+            return true;
+        }
+        off = prev;
+    }
+    return false;
+}
+
 const Row* Engine::resolve_row(Table& t, int64_t pk) {
     auto it = t.latest.find(pk);
     if (it == t.latest.end()) return nullptr;
@@ -194,36 +219,19 @@ const Row* Engine::resolve_row(Table& t, int64_t pk) {
     auto& tc = row_cache_[t.schema.table_id];
     auto cit = tc.find(pk);
     if (cit != tc.end() && cit->second.offset == it->second) return &cit->second.row;
+    Row parsed;
+    if (!load_row(t, pk, parsed)) return nullptr;
     uint64_t head = it->second;
-    uint64_t off = head;
-    while (off != 0) {
-        RecordView rv = log_.read_at(off);
-        ByteBuf b;
-        b.data = rv.payload;
-        b.get_u32();
-        b.get_i64();
-        uint64_t prev = b.get_u64();
-        if (rv.type == REC_DELETE) {
-            if (visible(rv.txn, rv.stmt)) return nullptr;
-            off = prev;
-            continue;
-        }
-        if (visible(rv.txn, rv.stmt)) {
-            Row parsed = b.get_row(t.schema.cols.size());
-            size_t bytes = 64;
-            for (auto& v : parsed) bytes += v.s.size() + v.v.size() * 4 + 16;
-            constexpr size_t kCacheCap = 256ull * 1024ull * 1024ull;
-            if (cache_bytes_ + bytes > kCacheCap) {
-                row_cache_.clear();
-                cache_bytes_ = 0;
-            }
-            row_cache_[t.schema.table_id][pk] = CachedRow{head, std::move(parsed)};
-            cache_bytes_ += bytes;
-            return &row_cache_[t.schema.table_id][pk].row;
-        }
-        off = prev;
+    size_t bytes = 64;
+    for (auto& v : parsed) bytes += v.s.size() + v.v.size() * 4 + 16;
+    constexpr size_t kCacheCap = 256ull * 1024ull * 1024ull;
+    if (cache_bytes_ + bytes > kCacheCap) {
+        row_cache_.clear();
+        cache_bytes_ = 0;
     }
-    return nullptr;
+    row_cache_[t.schema.table_id][pk] = CachedRow{head, std::move(parsed)};
+    cache_bytes_ += bytes;
+    return &row_cache_[t.schema.table_id][pk].row;
 }
 
 bool Engine::row_matches(const Row& row,
@@ -266,9 +274,21 @@ void Engine::append_commit(uint64_t txn) {
 void Engine::rebuild_ann(Table& t) {
     t.ann = std::make_unique<Hnsw>();
     if (t.schema.vector_index < 0) return;
-    for (auto& [pk, off] : t.latest) {
-        const Row* row = resolve_row(t, pk);
-        if (row) t.ann->insert(pk, (*row)[t.schema.vector_index].v);
+    std::vector<std::pair<uint64_t, int64_t>> recs;
+    recs.reserve(t.latest.size());
+    for (auto& [pk, off] : t.latest) recs.emplace_back(off, pk);
+    std::sort(recs.begin(), recs.end());
+    Row row;
+    uint64_t last = 0;
+    constexpr uint64_t kDropEvery = 8ull << 20;
+    int vcol = t.schema.vector_index;
+    for (auto& [off, pk] : recs) {
+        if (!load_row(t, pk, row)) continue;
+        t.ann->insert(pk, row[static_cast<size_t>(vcol)].v);
+        if (off - last >= kDropEvery) {
+            log_.drop_upto(off);
+            last = off;
+        }
     }
 }
 
@@ -483,19 +503,19 @@ void Engine::build_fast_scan(Table& t) {
             sc.vcols.back().reserve(n);
         }
     }
+    Row row;
     for (auto& [pk, off] : t.latest) {
-        const Row* row = resolve_row(t, pk);
-        if (!row) continue;
+        if (!load_row(t, pk, row)) continue;
         sc.pks.push_back(pk);
         if (dim > 0) {
-            const auto& v = (*row)[t.schema.vector_index].v;
+            const auto& v = row[t.schema.vector_index].v;
             sc.vecs.insert(sc.vecs.end(), v.begin(), v.end());
         }
         for (size_t c = 0; c < t.schema.cols.size(); ++c) {
             int ii = sc.icol_of[c];
-            if (ii >= 0) sc.icols[ii].push_back((*row)[c].i);
+            if (ii >= 0) sc.icols[ii].push_back(row[c].i);
             int vi = sc.vcol_of[c];
-            if (vi >= 0) sc.vcols[vi].push_back((*row)[c].s);
+            if (vi >= 0) sc.vcols[vi].push_back(row[c].s);
         }
     }
     sc.n = static_cast<int64_t>(sc.pks.size());
@@ -506,6 +526,10 @@ void Engine::build_fast_scan(Table& t) {
             idx[sc.vcols[vi][static_cast<size_t>(i)]].push_back(static_cast<int32_t>(i));
     }
     sc.epoch = cache_epoch_;
+    // FastScan already holds a packed copy; drop the decoded row cache and WAL pages.
+    row_cache_.clear();
+    cache_bytes_ = 0;
+    cache_seen_epoch_ = cache_epoch_;
     log_.drop_cache();
 }
 
@@ -915,10 +939,16 @@ ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
                     return st.order_desc ? (dsq > cands_[0].dsq) : (dsq < cands_[0].dsq);
                 return pk < cands_[0].pk;
             };
-            for (auto& [pk, off] : t.latest) {
-                const Row* row = resolve_row(t, pk);
-                if (!row || !row_matches(*row, where)) continue;
-                const auto& vec = (*row)[vcol].v;
+            std::vector<std::pair<uint64_t, int64_t>> recs;
+            recs.reserve(t.latest.size());
+            for (auto& [pk, off] : t.latest) recs.emplace_back(off, pk);
+            std::sort(recs.begin(), recs.end());
+            Row row;
+            uint64_t last_drop = 0;
+            constexpr uint64_t kDropEvery = 8ull << 20;
+            for (auto& [off, pk] : recs) {
+                if (!load_row(t, pk, row) || !row_matches(row, where)) continue;
+                const auto& vec = row[static_cast<size_t>(vcol)].v;
                 float dsq;
                 if (top_n == K && !st.order_desc)
                     dsq = l2_sq_fast_abort(vec.data(), quse, dim, cands_[0].dsq);
@@ -933,7 +963,12 @@ ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
                     cands_[K - 1] = {dsq, pk, 0};
                     std::push_heap(cands_.begin(), cands_.begin() + static_cast<std::ptrdiff_t>(K), entry_worse);
                 }
+                if (off - last_drop >= kDropEvery) {
+                    log_.drop_upto(off);
+                    last_drop = off;
+                }
             }
+            log_.drop_cache();
             cands_.resize(top_n);
             std::sort(cands_.begin(), cands_.end(), [&](const Cand& a, const Cand& b) {
                 if (a.dsq != b.dsq) return st.order_desc ? (a.dsq > b.dsq) : (a.dsq < b.dsq);

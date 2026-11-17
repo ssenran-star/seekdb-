@@ -62,6 +62,7 @@ private:
     Table& get_table(const std::string& name);
     bool visible(uint64_t txn, uint32_t stmt) const;
     const Row* resolve_row(Table& t, int64_t pk);
+    bool load_row(Table& t, int64_t pk, Row& out);
     bool row_matches(const Row& row,
                      const std::vector<std::pair<int, Predicate>>& where);
     void append_commit(uint64_t txn);
