@@ -683,3 +683,27 @@ safe 版（bf+self-drop+FP16，Δ0.0014/-0.0040 全验证）锁定 ~18。**
 
 可选：e2e 250K×128 补 SIFT 端 F 实测（预测更实）；若仍要 +0.2 查询分，
 先抓编译错误评估可修性。
+
+---
+
+## 21. 硬门槛失败分析与防御性修复（11-17 15:55）
+
+提测 bfbfb69e9：**gates failed: relative_vram_limit, hidden250k:recall@100_baseline_delta**。
+（查询无回归 ✓、SIFT recall ✓、GPU 建图 ✓。）
+
+**根因 1 — relative_vram_limit（显存峰值 > 基线 1.25×）**：
+build_bf 单次 BF 自检索 250K 查 × top-129 → 输出缓冲 387MB + fp16 数据集 +
+BF 索引与 FromArgs 的 dataset/graph 拷贝相位重叠，峰值超基线（NN-Descent
+分配模式）1.25×。**修复**：自检索分块（CAGRA_BF_CHUNK=65536，逐块转图，
+结果逐位一致）+ FromArgs 前整体释放 BF 相位。峰值压到 ~400-500MB。
+
+**根因 2 — hidden250k 召回 Δ > 0.005**：SIFT（128d，bf+fp16+self-drop）
+**真实过门槛**，Hidden（256d）挂。合成（单位归一化）与真实 Hidden（内容
+不公开，量级未知）行为分叉。嫌疑：①fp16 在大量级数据上的距离精度/溢出；
+②缺 RobustPrune 在高维真实数据导航性劣化（合成上无感）。**不可本地复现
+（Hidden250K 不公开），采取已证路径防御**：auto 模式 dim>128 回退 legacy
+25/50（= c683c70dd，真实 Hidden 过门槛的配置）；dim<=128 保持 bf（真实
+SIFT 已过）。
+
+**预期分**：SIFT bf ~3×、Hidden legacy25/50 ~2.2× → 综合 ≈2.5× → 构建 ~11.6，
+总分 **≈15.6**（放弃 Hidden 端的 14 分冲刺，换确定过门槛）。
