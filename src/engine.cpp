@@ -253,7 +253,7 @@ void Engine::open(const std::string& data_dir) {
                 uint32_t tid = b.get_u32();
                 int64_t pk = b.get_i64();
                 auto it = tables_.find(tid);
-                if (it != tables_.end()) it->second.latest[pk] = rv.offset;
+                if (it != tables_.end()) it->second.latest.set(pk, rv.offset);
                 txns[rv.txn].data = true;
                 break;
             }
@@ -304,9 +304,8 @@ bool Engine::visible(uint64_t txn, uint32_t stmt) const {
 }
 
 bool Engine::load_row(Table& t, int64_t pk, Row& out) {
-    auto it = t.latest.find(pk);
-    if (it == t.latest.end()) return false;
-    uint64_t off = it->second;
+    uint64_t off = 0;
+    if (!t.latest.get(pk, off)) return false;
     while (off != 0) {
         RecordView rv = log_.read_at(off);
         ByteBuf b;
@@ -329,12 +328,11 @@ bool Engine::load_row(Table& t, int64_t pk, Row& out) {
 }
 
 const Row* Engine::resolve_row(Table& t, int64_t pk) {
-    auto it = t.latest.find(pk);
-    if (it == t.latest.end()) return nullptr;
+    uint64_t head = 0;
+    if (!t.latest.get(pk, head)) return nullptr;
     auto& tc = row_cache_[t.schema.table_id];
     auto cit = tc.find(pk);
-    if (cit != tc.end() && cit->second.offset == it->second) return &cit->second.row;
-    uint64_t head = it->second;
+    if (cit != tc.end() && cit->second.offset == head) return &cit->second.row;
     uint64_t off = head;
     while (off != 0) {
         RecordView rv = log_.read_at(off);
@@ -358,12 +356,16 @@ const Row* Engine::resolve_row(Table& t, int64_t pk) {
 }
 
 Row* Engine::cache_put(uint32_t tid, int64_t pk, uint64_t head, Row row) {
-    size_t bytes = 64;
-    for (auto& v : row) bytes += v.s.size() + v.v.size() * 4 + 16;
-    constexpr size_t kCacheCap = 256ull * 1024ull * 1024ull;
+    // Count map-node / Row / Value overhead, not just payload. 24MiB is
+    // enough for the 10k FastScan build and keeps the 600k write HWM from
+    // sitting at a 256MiB decoded-row cache that is discarded later.
+    size_t bytes = 128;
+    for (auto& v : row) bytes += v.s.size() + v.v.size() * 4 + 64;
+    constexpr size_t kCacheCap = 24ull * 1024ull * 1024ull;
     if (cache_bytes_ + bytes > kCacheCap) {
         row_cache_.clear();
         cache_bytes_ = 0;
+        trim_heap();
     }
     auto& slot = row_cache_[tid][pk];
     slot = CachedRow{head, std::move(row)};
@@ -418,10 +420,10 @@ void Engine::append_commit(uint64_t txn) {
 void Engine::rebuild_ann(Table& t) {
     t.ann = std::make_unique<Hnsw>();
     if (t.schema.vector_index < 0) return;
-    for (auto& [pk, off] : t.latest) {
+    t.latest.for_each([&](int64_t pk, uint64_t) {
         const Row* row = resolve_row(t, pk);
         if (row) t.ann->insert(pk, (*row)[t.schema.vector_index].v);
-    }
+    });
 }
 
 ExecResult Engine::exec_create_table(const Statement& st) {
@@ -517,15 +519,15 @@ ExecResult Engine::exec_insert(const Statement& st) {
     ByteBuf ins;
     for (auto& row : staged) {
         int64_t pk = row[s.pk_index].i;
-        auto it = t.latest.find(pk);
-        uint64_t prev = it == t.latest.end() ? 0 : it->second;
+        uint64_t prev = 0;
+        t.latest.get(pk, prev);
         ins.data.clear();
         ins.put_u32(s.table_id);
         ins.put_i64(pk);
         ins.put_u64(prev);
         ins.put_row(row);
         uint64_t off = log_.append(REC_INSERT, txn, stmt, ins.data);
-        t.latest[pk] = off;
+        t.latest.set(pk, off);
         if (t.ann && s.vector_index >= 0) t.ann->insert(pk, row[s.vector_index].v);
         // Over-memory tables are served by packed scan, not row_cache_.
         // Stop retaining decoded insert rows once FastScan is off so the
@@ -558,26 +560,26 @@ ExecResult Engine::exec_update(const Statement& st) {
     std::vector<std::pair<int, Predicate>> where;
     for (auto& p : st.where) where.emplace_back(find_col(s, p.column), p);
     std::vector<std::pair<int64_t, Row>> matches;
-    for (auto& [pk, off] : t.latest) {
+    t.latest.for_each([&](int64_t pk, uint64_t) {
         const Row* row = resolve_row(t, pk);
-        if (!row || !row_matches(*row, where)) continue;
+        if (!row || !row_matches(*row, where)) return;
         matches.emplace_back(pk, *row);
-    }
+    });
     bool is_auto = false;
     uint64_t txn = statement_txn(is_auto);
     uint32_t stmt = ++cur_stmt_;
     for (auto& [pk, old] : matches) {
         Row row = old;
         for (auto& [idx, val] : sets) row[idx] = val;
-        auto it = t.latest.find(pk);
-        uint64_t prev = it == t.latest.end() ? 0 : it->second;
+        uint64_t prev = 0;
+        t.latest.get(pk, prev);
         ByteBuf b;
         b.put_u32(s.table_id);
         b.put_i64(pk);
         b.put_u64(prev);
         b.put_row(row);
         uint64_t off = log_.append(REC_UPDATE, txn, stmt, b.data);
-        t.latest[pk] = off;
+        t.latest.set(pk, off);
         if (t.ann && s.vector_index >= 0) {
             t.ann->erase(pk);
             t.ann->insert(pk, row[s.vector_index].v);
@@ -602,23 +604,23 @@ ExecResult Engine::exec_delete(const Statement& st) {
     std::vector<std::pair<int, Predicate>> where;
     for (auto& p : st.where) where.emplace_back(find_col(s, p.column), p);
     std::vector<int64_t> matches;
-    for (auto& [pk, off] : t.latest) {
+    t.latest.for_each([&](int64_t pk, uint64_t) {
         const Row* row = resolve_row(t, pk);
-        if (!row || !row_matches(*row, where)) continue;
+        if (!row || !row_matches(*row, where)) return;
         matches.push_back(pk);
-    }
+    });
     bool is_auto = false;
     uint64_t txn = statement_txn(is_auto);
     uint32_t stmt = ++cur_stmt_;
     for (int64_t pk : matches) {
-        auto it = t.latest.find(pk);
-        uint64_t prev = it == t.latest.end() ? 0 : it->second;
+        uint64_t prev = 0;
+        t.latest.get(pk, prev);
         ByteBuf b;
         b.put_u32(s.table_id);
         b.put_i64(pk);
         b.put_u64(prev);
         uint64_t off = log_.append(REC_DELETE, txn, stmt, b.data);
-        t.latest[pk] = off;
+        t.latest.set(pk, off);
         if (t.ann) t.ann->erase(pk);
         row_cache_[s.table_id].erase(pk);
         if (!is_auto) txn_writes_.emplace_back(s.table_id, pk);
@@ -649,9 +651,9 @@ void Engine::build_fast_scan(Table& t) {
     for (auto& vc : sc.vcols) vc.reserve(n);
     sc.vidx.assign(sc.vcols.size(), {});
     uint32_t tid = t.schema.table_id;
-    for (auto& [pk, off] : t.latest) {
+    t.latest.for_each([&](int64_t pk, uint64_t) {
         const Row* row = resolve_row(t, pk);
-        if (!row) continue;
+        if (!row) return;
         sc.pks.push_back(pk);
         if (dim > 0) {
             const auto& v = (*row)[t.schema.vector_index].v;
@@ -676,7 +678,7 @@ void Engine::build_fast_scan(Table& t) {
         // copy, so peak RSS is ~FastScan not row_cache + FastScan.
         auto tcit = row_cache_.find(tid);
         if (tcit != row_cache_.end()) tcit->second.erase(pk);
-    }
+    });
     sc.n = static_cast<int64_t>(sc.pks.size());
     sc.epoch = cache_epoch_;
     // The scan snapshot now serves queries; free the decoded-row cache so
@@ -693,9 +695,8 @@ bool Engine::decode_visible_scan(Table& t, int64_t pk,
                                  const float*& vec, int& dim) {
     (void)mid_types;
     (void)mid_cols;
-    auto it = t.latest.find(pk);
-    if (it == t.latest.end()) return false;
-    uint64_t off = it->second;
+    uint64_t off = 0;
+    if (!t.latest.get(pk, off)) return false;
     while (off != 0) {
         RecordView rv = log_.read_at(off);
         ByteBuf b;
@@ -753,27 +754,34 @@ void Engine::populate_packed_from_latest(Table& t) {
     std::vector<ValType> mid_types;
     std::vector<int> mid_cols;
     mid_layout(t.schema, mid_types, mid_cols);
-    std::vector<std::pair<uint64_t, int64_t>> recs;
-    recs.reserve(t.latest.size());
-    for (auto& [pk, off] : t.latest) recs.emplace_back(off, pk);
-    std::sort(recs.begin(), recs.end());
     std::vector<int64_t> mid_i(mid_types.size());
     std::vector<std::string_view> mid_s(mid_types.size());
-    const float* vec = nullptr;
-    int vdim = 0;
+    const uint32_t tid = t.schema.table_id;
     uint64_t last_drop = 0;
     constexpr uint64_t kDropEvery = 2ull << 20;
-    for (auto& [off, pk] : recs) {
-        vec = nullptr;
-        vdim = 0;
+    // Walk the WAL in offset order instead of materializing a 16-byte
+    // (offset, pk) vector of every live row. decode_visible_scan reuses
+    // the same 2MiB read window because records are already in order.
+    log_.scan([&](const RecordView& rv) {
+        if (rv.type != REC_INSERT && rv.type != REC_UPDATE) return;
+        ByteBuf b;
+        b.wrap(rv.payload, rv.payload_len);
+        if (rv.payload_len < 4) return;
+        uint32_t rec_tid = b.get_u32();
+        if (rec_tid != tid) return;
+        int64_t pk = b.get_i64();
+        uint64_t head = 0;
+        if (!t.latest.get(pk, head) || head != rv.offset) return;
+        const float* vec = nullptr;
+        int vdim = 0;
         if (!decode_visible_scan(t, pk, mid_types, mid_cols, mid_i.data(), mid_s.data(), vec, vdim))
-            continue;
+            return;
         t.packed->append_row(pk, mid_types, mid_i.data(), mid_s.data(), vec);
-        if (off - last_drop >= kDropEvery) {
-            log_.drop_upto(off);
-            last_drop = off;
+        if (rv.offset - last_drop >= kDropEvery) {
+            log_.drop_upto(rv.offset);
+            last_drop = rv.offset;
         }
-    }
+    }, false);
 }
 
 void Engine::abort_incremental_packed(Table& t) {
@@ -1520,7 +1528,7 @@ ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
                     t.packed->start_build(path, s.table_id, dim_est, log_.size(), committed_max_);
                     std::vector<std::pair<uint64_t, int64_t>> recs;
                     recs.reserve(t.latest.size());
-                    for (auto& [pk, off] : t.latest) recs.emplace_back(off, pk);
+                    t.latest.for_each([&](int64_t pk, uint64_t off) { recs.emplace_back(off, pk); });
                     std::sort(recs.begin(), recs.end());
                     const float* vec = nullptr;
                     int vdim = 0;
@@ -1632,7 +1640,7 @@ ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
             };
             std::vector<std::pair<uint64_t, int64_t>> recs;
             recs.reserve(t.latest.size());
-            for (auto& [pk, off] : t.latest) recs.emplace_back(off, pk);
+            t.latest.for_each([&](int64_t pk, uint64_t off) { recs.emplace_back(off, pk); });
             std::sort(recs.begin(), recs.end());
             Row row;
             uint64_t last_drop = 0;
@@ -1698,7 +1706,7 @@ ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
             if (st.has_limit && st.limit > 0 && by_pk) {
                 std::vector<int64_t> pks;
                 pks.reserve(t.latest.size());
-                for (auto& [pk, off] : t.latest) pks.push_back(pk);
+                t.latest.for_each([&](int64_t pk, uint64_t) { pks.push_back(pk); });
                 if (st.has_order && st.order_desc)
                     std::sort(pks.begin(), pks.end(), std::greater<int64_t>());
                 else
@@ -1714,7 +1722,7 @@ ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
             } else if (st.has_limit && st.limit > 0) {
                 std::vector<std::pair<uint64_t, int64_t>> recs;
                 recs.reserve(t.latest.size());
-                for (auto& [pk, off] : t.latest) recs.emplace_back(off, pk);
+                t.latest.for_each([&](int64_t pk, uint64_t off) { recs.emplace_back(off, pk); });
                 std::sort(recs.begin(), recs.end());
                 Row row;
                 uint64_t last_drop = 0;
@@ -1742,7 +1750,7 @@ ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
             } else {
                 std::vector<std::pair<uint64_t, int64_t>> recs;
                 recs.reserve(t.latest.size());
-                for (auto& [pk, off] : t.latest) recs.emplace_back(off, pk);
+                t.latest.for_each([&](int64_t pk, uint64_t off) { recs.emplace_back(off, pk); });
                 std::sort(recs.begin(), recs.end());
                 Row row;
                 uint64_t last_drop = 0;

@@ -43,6 +43,99 @@ inline bool operator==(const AlignAlloc<T, A>&, const AlignAlloc<U, A>&) noexcep
 template <typename T, typename U, std::size_t A>
 inline bool operator!=(const AlignAlloc<T, A>&, const AlignAlloc<U, A>&) noexcept { return false; }
 
+// Compact PK -> WAL-offset map. Sequential / dense BIGINT keys (the
+// 10k and 600k probes, and typical official loads) live in a flat
+// vector at 8 bytes/row instead of an unordered_map node (~40-48B plus
+// buckets). Sparse or huge-gap keys fall back to the hash map.
+class LatestMap {
+public:
+    bool get(int64_t pk, uint64_t& off) const {
+        if (has_base_) {
+            const int64_t idx = pk - base_;
+            if (idx >= 0 && idx < static_cast<int64_t>(slots_.size())) {
+                const uint64_t v = slots_[static_cast<size_t>(idx)];
+                if (v != 0) {
+                    off = v;
+                    return true;
+                }
+            }
+        }
+        auto it = overflow_.find(pk);
+        if (it == overflow_.end()) return false;
+        off = it->second;
+        return true;
+    }
+
+    void set(int64_t pk, uint64_t off) {
+        if (try_dense(pk)) {
+            uint64_t& slot = slots_[static_cast<size_t>(pk - base_)];
+            if (slot == 0) {
+                auto oit = overflow_.find(pk);
+                if (oit != overflow_.end()) overflow_.erase(oit);
+                else ++n_;
+            }
+            slot = off;
+            return;
+        }
+        auto [it, inserted] = overflow_.emplace(pk, off);
+        if (inserted) ++n_;
+        else it->second = off;
+    }
+
+    size_t size() const { return n_; }
+    bool empty() const { return n_ == 0; }
+
+    template <typename Fn>
+    void for_each(Fn&& fn) const {
+        if (has_base_) {
+            for (size_t i = 0; i < slots_.size(); ++i) {
+                if (slots_[i] != 0)
+                    fn(base_ + static_cast<int64_t>(i), slots_[i]);
+            }
+        }
+        for (const auto& kv : overflow_) fn(kv.first, kv.second);
+    }
+
+private:
+    static constexpr int64_t kMaxSlots = 4ll << 20;
+    static constexpr int64_t kMaxExtend = 4096;
+
+    bool try_dense(int64_t pk) {
+        if (!has_base_) {
+            has_base_ = true;
+            base_ = pk;
+            slots_.assign(1, 0);
+            return true;
+        }
+        const int64_t idx = pk - base_;
+        if (idx >= 0 && idx < static_cast<int64_t>(slots_.size())) return true;
+        if (idx >= 0) {
+            const int64_t need = idx + 1;
+            const int64_t grow = need - static_cast<int64_t>(slots_.size());
+            if (need <= kMaxSlots && grow <= (kMaxExtend > static_cast<int64_t>(slots_.size()) ? kMaxExtend : static_cast<int64_t>(slots_.size()))) {
+                slots_.resize(static_cast<size_t>(need), 0);
+                return true;
+            }
+            return false;
+        }
+        // Extend left: pk is below base_.
+        const int64_t grow = -idx;
+        const int64_t need = static_cast<int64_t>(slots_.size()) + grow;
+        if (need <= kMaxSlots && grow <= (kMaxExtend > static_cast<int64_t>(slots_.size()) ? kMaxExtend : static_cast<int64_t>(slots_.size()))) {
+            slots_.insert(slots_.begin(), static_cast<size_t>(grow), 0);
+            base_ = pk;
+            return true;
+        }
+        return false;
+    }
+
+    std::vector<uint64_t> slots_;
+    std::unordered_map<int64_t, uint64_t> overflow_;
+    int64_t base_ = 0;
+    size_t n_ = 0;
+    bool has_base_ = false;
+};
+
 struct Cell {
     enum Kind { INT, STR, VEC, REAL } kind = INT;
     int64_t i = 0;
@@ -67,7 +160,7 @@ public:
 private:
     struct Table {
         TableSchema schema;
-        std::unordered_map<int64_t, uint64_t> latest;
+        LatestMap latest;
         std::unique_ptr<Hnsw> ann;
         uint64_t create_txn = 0;
         uint64_t index_txn = 0;

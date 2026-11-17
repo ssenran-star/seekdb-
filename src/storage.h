@@ -188,7 +188,7 @@ public:
     // Extra fdatasync + DONTNEED after a large unsynced flush burst.
     // Does not replace COMMIT/autocommit fsync.
     void maybe_sync_evict();
-    void scan(const std::function<void(const RecordView&)>& cb);
+    void scan(const std::function<void(const RecordView&)>& cb, bool truncate_tail = true);
     RecordView read_at(uint64_t offset);
     void close();
     uint64_t size() const { return size_; }
@@ -213,6 +213,21 @@ private:
 };
 
 void sync_dir(const std::string& dir);
+
+// 4096-aligned heap buffer for O_DIRECT packed-snapshot I/O.
+struct AlignedBuf {
+    char* p = nullptr;
+    size_t cap = 0;
+    size_t len = 0;
+    AlignedBuf() = default;
+    ~AlignedBuf();
+    AlignedBuf(const AlignedBuf&) = delete;
+    AlignedBuf& operator=(const AlignedBuf&) = delete;
+    void reset();
+    void ensure(size_t n);
+    void append(const void* src, size_t n);
+    void clear() { len = 0; }
+};
 
 // On-disk packed snapshot for over-memory exact scans. Built at shutdown
 // after the write burst (and lazily on the first cold query if no valid
@@ -270,18 +285,18 @@ public:
     int dim() const { return dim_; }
 
 private:
-    void flush_wbuf();
+    void flush_wbuf(bool pad_tail = false);
     void evict_written();
     bool ensure_in_buf(uint64_t off, size_t n);
-    const char* ptr_at(uint64_t off) const { return rbuf_.data() + (off - rbuf_off_); }
+    const char* ptr_at(uint64_t off) const { return rbuf_.p + (off - rbuf_off_); }
     void write_header(bool complete);
     void invalidate_read_buf();
     void drop_upto(uint64_t off);
 
     int fd_ = -1;
     std::string path_;
-    std::string wbuf_;
-    std::string rbuf_;
+    AlignedBuf wbuf_;
+    AlignedBuf rbuf_;
     uint64_t size_ = 0;
     uint64_t n_ = 0;
     int dim_ = 0;
@@ -294,6 +309,7 @@ private:
     size_t rbuf_len_ = 0;
     bool ready_ = false;
     bool writing_ = false;
+    bool direct_ = false;
     static constexpr uint32_t kMagic = 0x4E415350;  // PSAN
     static constexpr uint32_t kVersion = 1;
     static constexpr uint64_t kHeaderSize = 4096;
