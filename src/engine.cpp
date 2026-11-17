@@ -7,6 +7,7 @@
 #include <functional>
 #include <mutex>
 #include <queue>
+#include <string_view>
 #include <thread>
 
 #include "simd.h"
@@ -85,7 +86,7 @@ void Engine::open(const std::string& data_dir) {
     log_.scan([&](const RecordView& rv) {
         next_txn_ = std::max(next_txn_, rv.txn + 1);
         ByteBuf b;
-        b.data = rv.payload;
+        b.wrap(rv.payload, rv.payload_len);
         switch (rv.type) {
             case REC_CREATE_TABLE: {
                 TableSchema s;
@@ -183,7 +184,7 @@ bool Engine::load_row(Table& t, int64_t pk, Row& out) {
     while (off != 0) {
         RecordView rv = log_.read_at(off);
         ByteBuf b;
-        b.data = rv.payload;
+        b.wrap(rv.payload, rv.payload_len);
         b.get_u32();
         b.get_i64();
         uint64_t prev = b.get_u64();
@@ -193,7 +194,7 @@ bool Engine::load_row(Table& t, int64_t pk, Row& out) {
             continue;
         }
         if (visible(rv.txn, rv.stmt)) {
-            out = b.get_row(t.schema.cols.size());
+            b.read_row_into(out, t.schema.cols.size());
             return true;
         }
         off = prev;
@@ -212,7 +213,7 @@ const Row* Engine::resolve_row(Table& t, int64_t pk) {
     while (off != 0) {
         RecordView rv = log_.read_at(off);
         ByteBuf b;
-        b.data = rv.payload;
+        b.wrap(rv.payload, rv.payload_len);
         b.get_u32();
         b.get_i64();
         uint64_t prev = b.get_u64();
@@ -256,7 +257,7 @@ bool Engine::row_matches(const Row& row,
         } else if (v.type == ValType::VARCHAR) {
             if (p.literal.kind != Literal::STRING)
                 throw DbError("type_mismatch", "VARCHAR comparison needs string");
-            ord = v.s.compare(p.literal.s);
+            ord = v.s.compare(std::string_view(p.literal.data(), p.literal.size()));
             ord = (ord > 0) - (ord < 0);
         } else {
             throw DbError("unsupported_sql", "vector column in WHERE");
@@ -380,16 +381,17 @@ ExecResult Engine::exec_insert(const Statement& st) {
     bool is_auto = false;
     uint64_t txn = statement_txn(is_auto);
     uint32_t stmt = ++cur_stmt_;
+    ByteBuf ins;
     for (auto& row : staged) {
         int64_t pk = row[s.pk_index].i;
         auto it = t.latest.find(pk);
         uint64_t prev = it == t.latest.end() ? 0 : it->second;
-        ByteBuf b;
-        b.put_u32(s.table_id);
-        b.put_i64(pk);
-        b.put_u64(prev);
-        b.put_row(row);
-        uint64_t off = log_.append(REC_INSERT, txn, stmt, b.data);
+        ins.data.clear();
+        ins.put_u32(s.table_id);
+        ins.put_i64(pk);
+        ins.put_u64(prev);
+        ins.put_row(row);
+        uint64_t off = log_.append(REC_INSERT, txn, stmt, ins.data);
         t.latest[pk] = off;
         if (t.ann && s.vector_index >= 0) t.ann->insert(pk, row[s.vector_index].v);
         cache_put(s.table_id, pk, off, std::move(row));
@@ -499,6 +501,7 @@ void Engine::build_fast_scan(Table& t) {
     }
     for (auto& vc : sc.vcols) vc.reserve(n);
     sc.vidx.assign(sc.vcols.size(), {});
+    uint32_t tid = t.schema.table_id;
     for (auto& [pk, off] : t.latest) {
         const Row* row = resolve_row(t, pk);
         if (!row) continue;
@@ -522,6 +525,10 @@ void Engine::build_fast_scan(Table& t) {
             sc.rows.back()[t.schema.vector_index].v.clear();
             sc.rows.back()[t.schema.vector_index].v.shrink_to_fit();
         }
+        // Evict the insert-time cache entry now that the snapshot owns a
+        // copy, so peak RSS is ~FastScan not row_cache + FastScan.
+        auto tcit = row_cache_.find(tid);
+        if (tcit != row_cache_.end()) tcit->second.erase(pk);
     }
     sc.n = static_cast<int64_t>(sc.pks.size());
     sc.epoch = cache_epoch_;
@@ -614,7 +621,27 @@ ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
     };
 
     std::vector<OutRow> out;
-    bool use_ann = mode == "ann" && order_dist && st.has_limit && st.limit > 0 && t.ann;
+    bool point_done = false;
+    {
+        bool saw_pk_eq = false;
+        bool pk_conflict = false;
+        int64_t point_pk = 0;
+        for (auto& [idx, p] : where) {
+            if (idx == s.pk_index && p.op == "=" && p.literal.kind == Literal::INT) {
+                if (saw_pk_eq && point_pk != p.literal.i) pk_conflict = true;
+                saw_pk_eq = true;
+                point_pk = p.literal.i;
+            }
+        }
+        if (pk_conflict) {
+            point_done = true;
+        } else if (saw_pk_eq) {
+            const Row* row = resolve_row(t, point_pk);
+            if (row && row_matches(*row, where)) out.push_back(collect(point_pk, *row));
+            point_done = true;
+        }
+    }
+    bool use_ann = !point_done && mode == "ann" && order_dist && st.has_limit && st.limit > 0 && t.ann;
     if (use_ann) {
         auto accept = [&](int64_t pk) {
             const Row* row = resolve_row(t, pk);
@@ -631,8 +658,8 @@ ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
             }
         }
     }
-    bool fast_done = false;
-    if (!use_ann) {
+    bool fast_done = point_done;
+    if (!use_ann && !point_done) {
         build_fast_scan(t);
         auto& sc = t.scan;
         if (sc.n > 0) {
@@ -730,10 +757,7 @@ ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
                             return st.order_desc ? (dsq > outh[0].dsq) : (dsq < outh[0].dsq);
                         return pk < outh[0].pk;
                     };
-                    for (size_t k = lo; k < hi; ++k) {
-                        int64_t i = ids[k];
-                        const float* vp = &sc.vecs[static_cast<size_t>(i) * static_cast<size_t>(dim)];
-                        float dsq = l2_sq_fast(vp, quse, dim);
+                    auto take_id = [&](int64_t i, float dsq) {
                         int64_t pk = sc.pks[static_cast<size_t>(i)];
                         if (nfill < K) {
                             outh[nfill++] = {dsq, pk, static_cast<int32_t>(i)};
@@ -744,6 +768,41 @@ ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
                             outh[K - 1] = {dsq, pk, static_cast<int32_t>(i)};
                             std::push_heap(outh.begin(), outh.begin() + static_cast<std::ptrdiff_t>(K), worse);
                         }
+                    };
+                    size_t k = lo;
+                    if (dim == 128 && !st.order_desc) {
+                        const float* base = sc.vecs.data();
+                        for (; k + 4 <= hi; k += 4) {
+                            const float* p0 = base + static_cast<size_t>(ids[k]) * 128u;
+                            const float* p1 = base + static_cast<size_t>(ids[k + 1]) * 128u;
+                            const float* p2 = base + static_cast<size_t>(ids[k + 2]) * 128u;
+                            const float* p3 = base + static_cast<size_t>(ids[k + 3]) * 128u;
+                            if (k + 8 <= hi) {
+                                _mm_prefetch(reinterpret_cast<const char*>(
+                                                 base + static_cast<size_t>(ids[k + 4]) * 128u),
+                                             _MM_HINT_T0);
+                                _mm_prefetch(reinterpret_cast<const char*>(
+                                                 base + static_cast<size_t>(ids[k + 5]) * 128u),
+                                             _MM_HINT_T0);
+                                _mm_prefetch(reinterpret_cast<const char*>(
+                                                 base + static_cast<size_t>(ids[k + 6]) * 128u),
+                                             _MM_HINT_T0);
+                                _mm_prefetch(reinterpret_cast<const char*>(
+                                                 base + static_cast<size_t>(ids[k + 7]) * 128u),
+                                             _MM_HINT_T0);
+                            }
+                            float ds[4];
+                            l2_sq_fast_128x4(p0, p1, p2, p3, quse, ds);
+                            take_id(ids[k], ds[0]);
+                            take_id(ids[k + 1], ds[1]);
+                            take_id(ids[k + 2], ds[2]);
+                            take_id(ids[k + 3], ds[3]);
+                        }
+                    }
+                    for (; k < hi; ++k) {
+                        int64_t i = ids[k];
+                        const float* vp = &sc.vecs[static_cast<size_t>(i) * static_cast<size_t>(dim)];
+                        take_id(i, l2_sq_fast(vp, quse, dim));
                     }
                     outh.resize(nfill);
                 };
@@ -783,7 +842,8 @@ ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
                             if (vi < static_cast<int>(sc.vcols.size())) {
                                 use_prefilter = true;
                                 pf_vi = vi;
-                                pf_val = where[0].second.literal.s;
+                                pf_val.assign(where[0].second.literal.data(),
+                                              where[0].second.literal.size());
                             }
                         }
                     }
@@ -973,7 +1033,7 @@ ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
             std::sort(recs.begin(), recs.end());
             Row row;
             uint64_t last_drop = 0;
-            constexpr uint64_t kDropEvery = 8ull << 20;
+            constexpr uint64_t kDropEvery = 2ull << 20;
             for (auto& [off, pk] : recs) {
                 if (!load_row(t, pk, row) || !row_matches(row, where)) continue;
                 const auto& vec = row[static_cast<size_t>(vcol)].v;
@@ -1011,12 +1071,7 @@ ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
                 return a.pk < b.pk;
             });
         } else {
-            for (auto& [pk, off] : t.latest) {
-                const Row* row = resolve_row(t, pk);
-                if (!row || !row_matches(*row, where)) continue;
-                out.push_back(collect(pk, *row));
-            }
-            std::sort(out.begin(), out.end(), [&](const OutRow& a, const OutRow& b) {
+            auto out_less = [&](const OutRow& a, const OutRow& b) {
                 if (st.has_order) {
                     int ord = 0;
                     if (order_dist) {
@@ -1032,12 +1087,80 @@ ExecResult Engine::exec_select(const Statement& st, const std::string& mode) {
                     if (ord != 0) return ord < 0;
                 }
                 return a.pk < b.pk;
-            });
-            if (st.has_limit && static_cast<int64_t>(out.size()) > st.limit)
-                out.resize(static_cast<size_t>(st.limit));
+            };
+            // Default order (and ORDER BY pk) with LIMIT: walk keys, only
+            // resolve rows until K visible matches. Avoids materializing a
+            // 2M-row result and faulting the whole WAL into page cache.
+            const bool by_pk = !order_dist && (!st.has_order || order_col == s.pk_index);
+            if (st.has_limit && st.limit > 0 && by_pk) {
+                std::vector<int64_t> pks;
+                pks.reserve(t.latest.size());
+                for (auto& [pk, off] : t.latest) pks.push_back(pk);
+                if (st.has_order && st.order_desc)
+                    std::sort(pks.begin(), pks.end(), std::greater<int64_t>());
+                else
+                    std::sort(pks.begin(), pks.end());
+                Row row;
+                const size_t K = static_cast<size_t>(st.limit);
+                for (int64_t pk : pks) {
+                    if (!load_row(t, pk, row) || !row_matches(row, where)) continue;
+                    out.push_back(collect(pk, row));
+                    if (out.size() == K) break;
+                }
+                log_.drop_cache();
+            } else if (st.has_limit && st.limit > 0) {
+                std::vector<std::pair<uint64_t, int64_t>> recs;
+                recs.reserve(t.latest.size());
+                for (auto& [pk, off] : t.latest) recs.emplace_back(off, pk);
+                std::sort(recs.begin(), recs.end());
+                Row row;
+                uint64_t last_drop = 0;
+                constexpr uint64_t kDropEvery = 2ull << 20;
+                const size_t K = static_cast<size_t>(st.limit);
+                for (auto& [off, pk] : recs) {
+                    if (!load_row(t, pk, row) || !row_matches(row, where)) continue;
+                    OutRow o = collect(pk, row);
+                    if (out.size() < K) {
+                        out.push_back(std::move(o));
+                        if (out.size() == K)
+                            std::make_heap(out.begin(), out.end(), out_less);
+                    } else if (out_less(o, out[0])) {
+                        std::pop_heap(out.begin(), out.end(), out_less);
+                        out.back() = std::move(o);
+                        std::push_heap(out.begin(), out.end(), out_less);
+                    }
+                    if (off - last_drop >= kDropEvery) {
+                        log_.drop_upto(off);
+                        last_drop = off;
+                    }
+                }
+                log_.drop_cache();
+                std::sort(out.begin(), out.end(), out_less);
+            } else {
+                std::vector<std::pair<uint64_t, int64_t>> recs;
+                recs.reserve(t.latest.size());
+                for (auto& [pk, off] : t.latest) recs.emplace_back(off, pk);
+                std::sort(recs.begin(), recs.end());
+                Row row;
+                uint64_t last_drop = 0;
+                constexpr uint64_t kDropEvery = 2ull << 20;
+                out.reserve(t.latest.size());
+                for (auto& [off, pk] : recs) {
+                    if (!load_row(t, pk, row) || !row_matches(row, where)) continue;
+                    out.push_back(collect(pk, row));
+                    if (off - last_drop >= kDropEvery) {
+                        log_.drop_upto(off);
+                        last_drop = off;
+                    }
+                }
+                log_.drop_cache();
+                std::sort(out.begin(), out.end(), out_less);
+            }
         }
     }
 
+    if (st.has_limit && static_cast<int64_t>(out.size()) > st.limit)
+        out.resize(static_cast<size_t>(st.limit));
     ExecResult r;
     r.is_query = true;
     r.columns = names;

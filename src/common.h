@@ -42,12 +42,14 @@ struct DbError : std::runtime_error {
         : std::runtime_error(msg), code(std::move(c)) {}
 };
 
-inline size_t utf8_count(const std::string& s) {
-    size_t n = 0;
-    for (unsigned char c : s)
-        if ((c & 0xC0) != 0x80) ++n;
-    return n;
+inline size_t utf8_count(const char* s, size_t n) {
+    size_t c = 0;
+    for (size_t i = 0; i < n; ++i)
+        if ((static_cast<unsigned char>(s[i]) & 0xC0) != 0x80) ++c;
+    return c;
 }
+
+inline size_t utf8_count(const std::string& s) { return utf8_count(s.data(), s.size()); }
 
 inline std::string trim(const std::string& s) {
     size_t b = s.find_first_not_of(" \t\r\n");
@@ -109,10 +111,9 @@ inline bool fast_parse_float(const char* s, const char* lim, const char** end, f
     return true;
 }
 
-inline Vector parse_vector_literal(const std::string& raw, uint32_t dim) {
-    const char* base = raw.data();
+inline Vector parse_vector_literal(const char* base, size_t len, uint32_t dim) {
     const char* p = base;
-    const char* end = base + raw.size();
+    const char* end = base + len;
     while (p < end && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')) ++p;
     const char* e = end;
     while (e > p && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\r' || e[-1] == '\n')) --e;
@@ -162,6 +163,10 @@ inline Vector parse_vector_literal(const std::string& raw, uint32_t dim) {
     return out;
 }
 
+inline Vector parse_vector_literal(const std::string& raw, uint32_t dim) {
+    return parse_vector_literal(raw.data(), raw.size(), dim);
+}
+
 inline double l2_distance(const Vector& a, const Vector& b) {
     const size_t n = a.size();
     double sum = 0.0;
@@ -191,6 +196,11 @@ struct Literal {
     int64_t i = 0;
     double d = 0.0;
     std::string s;
+    // Optional view into the source SQL. Valid for the duration of execute().
+    const char* p = nullptr;
+    size_t n = 0;
+    const char* data() const { return p ? p : s.data(); }
+    size_t size() const { return p ? n : s.size(); }
 };
 
 inline Value coerce(const Literal& lit, const ColumnDef& col) {
@@ -205,14 +215,14 @@ inline Value coerce(const Literal& lit, const ColumnDef& col) {
         case ValType::VARCHAR:
             if (lit.kind != Literal::STRING)
                 throw DbError("type_mismatch", "VARCHAR column needs string");
-            if (utf8_count(lit.s) > col.len)
+            if (utf8_count(lit.data(), lit.size()) > col.len)
                 throw DbError("varchar_too_long", "string exceeds VARCHAR length");
-            v.s = lit.s;
+            v.s.assign(lit.data(), lit.size());
             break;
         case ValType::VECTOR:
             if (lit.kind != Literal::STRING)
                 throw DbError("type_mismatch", "VECTOR column needs '[...]' literal");
-            v.v = parse_vector_literal(lit.s, col.len);
+            v.v = parse_vector_literal(lit.data(), lit.size(), col.len);
             break;
     }
     return v;

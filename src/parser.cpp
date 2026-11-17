@@ -9,6 +9,8 @@ namespace {
 struct Token {
     enum Kind { IDENT, NUMBER, STRING, PUNCT, END } kind = END;
     std::string text;
+    const char* sp = nullptr;
+    size_t slen = 0;
     int64_t ival = 0;
     double dval = 0;
     bool is_float = false;
@@ -46,7 +48,10 @@ public:
                 ++scan;
             }
             if (!esc) {
-                t.text.assign(s_, pos_, scan - pos_);
+                // Point at the SQL buffer; INSERT of 100 vector literals
+                // otherwise copied ~200KB of raw text per statement.
+                t.sp = s_.data() + pos_;
+                t.slen = scan - pos_;
                 pos_ = scan + 1;
                 return t;
             }
@@ -66,7 +71,9 @@ public:
                     out += ch;
                 }
             }
-            t.text = out;
+            t.text = std::move(out);
+            t.sp = t.text.data();
+            t.slen = t.text.size();
             return t;
         }
         if (std::isdigit(static_cast<unsigned char>(c)) ||
@@ -276,7 +283,15 @@ private:
         }
         if (tok_.kind == Token::STRING) {
             lit.kind = Literal::STRING;
-            lit.s = tok_.text;
+            if (tok_.text.empty() && tok_.sp) {
+                lit.p = tok_.sp;
+                lit.n = tok_.slen;
+            } else if (!tok_.text.empty()) {
+                lit.s = std::move(tok_.text);
+            } else {
+                lit.p = tok_.sp;
+                lit.n = tok_.slen;
+            }
             advance();
             return lit;
         }
@@ -344,7 +359,8 @@ private:
                     expect_punct(",");
                     if (tok_.kind != Token::STRING)
                         throw DbError("syntax_error", "L2_DISTANCE needs vector literal");
-                    item.raw_vec = tok_.text;
+                    if (tok_.sp) item.raw_vec.assign(tok_.sp, tok_.slen);
+                    else item.raw_vec = tok_.text;
                     advance();
                     expect_punct(")");
                 } else {
@@ -429,9 +445,14 @@ private:
 }  // namespace
 
 Statement parse_sql(const std::string& sql) {
-    std::string t = trim(sql);
-    if (t.empty()) throw DbError("syntax_error", "empty statement");
-    Parser p(t);
+    size_t b = 0;
+    while (b < sql.size() &&
+           (sql[b] == ' ' || sql[b] == '\t' || sql[b] == '\r' || sql[b] == '\n'))
+        ++b;
+    if (b >= sql.size()) throw DbError("syntax_error", "empty statement");
+    // Lex directly against the caller's SQL so STRING views stay valid
+    // for the duration of Engine::execute().
+    Parser p(sql);
     return p.parse();
 }
 

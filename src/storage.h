@@ -52,6 +52,12 @@ public:
         }
     }
 
+    void wrap(const char* p, size_t n) {
+        rd_ = p;
+        rd_n_ = n;
+        pos_ = 0;
+    }
+
     uint8_t get_u8() { return read<uint8_t>(); }
     uint32_t get_u32() { return read<uint32_t>(); }
     uint64_t get_u64() { return read<uint64_t>(); }
@@ -59,7 +65,7 @@ public:
     std::string get_str() {
         uint32_t n = get_u32();
         check(n);
-        std::string s = data.substr(pos_, n);
+        std::string s(rd_ + pos_, n);
         pos_ += n;
         return s;
     }
@@ -67,27 +73,52 @@ public:
         uint32_t n = get_u32();
         check(n * sizeof(float));
         Vector v(n);
-        std::memcpy(v.data(), data.data() + pos_, n * sizeof(float));
+        std::memcpy(v.data(), rd_ + pos_, n * sizeof(float));
         pos_ += n * sizeof(float);
         return v;
     }
     Row get_row(size_t ncols) {
         Row row;
-        row.reserve(ncols);
-        for (size_t k = 0; k < ncols; ++k) {
-            Value v;
-            v.type = static_cast<ValType>(get_u8());
-            switch (v.type) {
-                case ValType::BIGINT: v.i = get_i64(); break;
-                case ValType::VARCHAR: v.s = get_str(); break;
-                case ValType::VECTOR: v.v = get_vec(); break;
-                default: throw DbError("internal_error", "bad value type in log");
-            }
-            row.push_back(std::move(v));
-        }
+        read_row_into(row, ncols);
         return row;
     }
-    bool done() const { return pos_ >= data.size(); }
+    void read_row_into(Row& row, size_t ncols) {
+        if (row.size() != ncols) row.resize(ncols);
+        for (size_t k = 0; k < ncols; ++k) {
+            Value& v = row[k];
+            v.type = static_cast<ValType>(get_u8());
+            switch (v.type) {
+                case ValType::BIGINT:
+                    v.i = get_i64();
+                    v.s.clear();
+                    v.v.clear();
+                    break;
+                case ValType::VARCHAR: {
+                    uint32_t n = get_u32();
+                    check(n);
+                    v.s.assign(rd_ + pos_, n);
+                    pos_ += n;
+                    v.i = 0;
+                    v.v.clear();
+                    break;
+                }
+                case ValType::VECTOR: {
+                    uint32_t n = get_u32();
+                    check(n * sizeof(float));
+                    v.v.resize(n);
+                    std::memcpy(v.v.data(), rd_ + pos_, n * sizeof(float));
+                    pos_ += n * sizeof(float);
+                    v.i = 0;
+                    v.s.clear();
+                    break;
+                }
+                default:
+                    throw DbError("internal_error", "bad value type in log");
+            }
+        }
+        if (row.size() > ncols) row.resize(ncols);
+    }
+    bool done() const { return pos_ >= rd_n_; }
 
 private:
     void append(const void* p, size_t n) {
@@ -97,13 +128,15 @@ private:
     T read() {
         check(sizeof(T));
         T v;
-        std::memcpy(&v, data.data() + pos_, sizeof(T));
+        std::memcpy(&v, rd_ + pos_, sizeof(T));
         pos_ += sizeof(T);
         return v;
     }
     void check(size_t n) const {
-        if (pos_ + n > data.size()) throw DbError("internal_error", "log record truncated");
+        if (pos_ + n > rd_n_) throw DbError("internal_error", "log record truncated");
     }
+    const char* rd_ = nullptr;
+    size_t rd_n_ = 0;
     size_t pos_ = 0;
 };
 
@@ -112,7 +145,9 @@ struct RecordView {
     uint64_t txn = 0;
     uint32_t stmt = 0;
     uint8_t type = 0;
-    std::string payload;
+    // Points into Log's read window; valid until the next Log read/scan/append.
+    const char* payload = nullptr;
+    size_t payload_len = 0;
 };
 
 class Log {
@@ -130,11 +165,19 @@ public:
 
 private:
     void flush_buf();
+    void invalidate_read_buf();
+    bool ensure_in_buf(uint64_t off, size_t n);
+    const char* ptr_at(uint64_t off) const { return rbuf_.data() + (off - rbuf_off_); }
+
     int fd_ = -1;
     std::string path_;
     std::string wbuf_;
+    std::string rbuf_;
     uint64_t size_ = 0;
     uint64_t drop_pos_ = 0;
+    uint64_t rbuf_off_ = 0;
+    size_t rbuf_len_ = 0;
+    static constexpr size_t kReadWindow = 2ull << 20;
 };
 
 void sync_dir(const std::string& dir);

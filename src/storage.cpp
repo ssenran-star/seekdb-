@@ -3,6 +3,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 
 namespace mvdb {
@@ -74,12 +75,53 @@ void Log::open(const std::string& dir) {
             throw DbError("internal_error", "bad log header");
         off_t end = ::lseek(fd_, 0, SEEK_END);
         size_ = static_cast<uint64_t>(end);
-        drop_pos_ = size_;
+        // Start drop_pos_ at 0 so recovery/scan can incrementally DONTNEED
+        // already-read prefixes. Setting this to size_ disabled drop_upto
+        // during restart of a large log and let page cache (counted in
+        // official memory.peak) balloon to the full file size.
+        drop_pos_ = 0;
     }
+}
+
+void Log::invalidate_read_buf() {
+    if (rbuf_len_ > 0) {
+        drop_upto(rbuf_off_ + rbuf_len_);
+        rbuf_len_ = 0;
+        rbuf_off_ = 0;
+    }
+}
+
+bool Log::ensure_in_buf(uint64_t off, size_t n) {
+    if (n == 0) return true;
+    if (off >= rbuf_off_ && off + n <= rbuf_off_ + rbuf_len_) return true;
+    if (off + n > size_) return false;
+
+    // Drop the previous window (or its consumed prefix) from page cache.
+    if (rbuf_len_ > 0) {
+        if (off >= rbuf_off_) drop_upto(off);
+        else drop_upto(rbuf_off_ + rbuf_len_);
+    }
+
+    uint64_t avail = size_ - off;
+    size_t want = static_cast<size_t>(std::min<uint64_t>(
+        std::max<uint64_t>(kReadWindow, n), avail));
+    if (want < n) return false;
+    rbuf_.resize(want);
+    read_full(fd_, off, rbuf_.data(), want);
+    rbuf_off_ = off;
+    rbuf_len_ = want;
+    // Re-reading a previously dropped range brings pages back into the
+    // cache; rewind drop_pos_ so later drop_upto() can release them again
+    // (important for the 2nd+ over-memory query after drop_cache()).
+    constexpr uint64_t page = 4096;
+    uint64_t aligned = off & ~(page - 1);
+    if (aligned < drop_pos_) drop_pos_ = aligned;
+    return true;
 }
 
 void Log::flush_buf() {
     if (!wbuf_.empty()) {
+        invalidate_read_buf();
         write_full(fd_, wbuf_.data(), wbuf_.size());
         wbuf_.clear();
     }
@@ -130,33 +172,33 @@ void Log::drop_upto(uint64_t off) {
 
 void Log::scan(const std::function<void(const RecordView&)>& cb) {
     flush_buf();
+    if (fd_ >= 0) ::posix_fadvise(fd_, 0, 0, POSIX_FADV_SEQUENTIAL);
     uint64_t off = kHeaderSize;
-    uint64_t last_drop = off;
-    constexpr uint64_t kDropEvery = 8ull << 20;
     while (off < size_) {
         if (size_ - off < 4) break;
+        if (!ensure_in_buf(off, 4)) break;
         uint32_t body_len = 0;
-        read_full(fd_, off, reinterpret_cast<char*>(&body_len), 4);
+        std::memcpy(&body_len, ptr_at(off), 4);
         if (body_len < 13 || body_len > kMaxRecord || off + 4 + body_len + 4 > size_) break;
-        std::string body(body_len, '\0');
-        read_full(fd_, off + 4, body.data(), body_len);
+        uint64_t rec_sz = 4 + static_cast<uint64_t>(body_len) + 4;
+        if (!ensure_in_buf(off, static_cast<size_t>(rec_sz))) break;
+        const char* rec = ptr_at(off);
         uint32_t end_magic = 0;
-        read_full(fd_, off + 4 + body_len, reinterpret_cast<char*>(&end_magic), 4);
+        std::memcpy(&end_magic, rec + 4 + body_len, 4);
         if (end_magic != kEndMagic) break;
         RecordView rv;
         rv.offset = off;
-        std::memcpy(&rv.txn, body.data(), 8);
-        std::memcpy(&rv.stmt, body.data() + 8, 4);
-        rv.type = static_cast<uint8_t>(body[12]);
-        rv.payload = body.substr(13);
+        std::memcpy(&rv.txn, rec + 4, 8);
+        std::memcpy(&rv.stmt, rec + 12, 4);
+        rv.type = static_cast<uint8_t>(rec[16]);
+        rv.payload = rec + 17;
+        rv.payload_len = body_len - 13;
         cb(rv);
-        off += 4 + body_len + 4;
-        if (off - last_drop >= kDropEvery) {
-            drop_upto(off);
-            last_drop = off;
-        }
+        off += rec_sz;
     }
+    drop_upto(off);
     if (off < size_) {
+        invalidate_read_buf();
         if (::ftruncate(fd_, static_cast<off_t>(off)) != 0)
             throw DbError("internal_error", "cannot truncate torn log tail");
         ::fdatasync(fd_);
@@ -166,27 +208,34 @@ void Log::scan(const std::function<void(const RecordView&)>& cb) {
 
 RecordView Log::read_at(uint64_t offset) {
     flush_buf();
+    if (!ensure_in_buf(offset, 4)) throw DbError("internal_error", "bad record length");
     uint32_t body_len = 0;
-    read_full(fd_, offset, reinterpret_cast<char*>(&body_len), 4);
+    std::memcpy(&body_len, ptr_at(offset), 4);
     if (body_len < 13 || body_len > kMaxRecord)
         throw DbError("internal_error", "bad record length");
-    std::string body(body_len, '\0');
-    read_full(fd_, offset + 4, body.data(), body_len);
+    uint64_t rec_sz = 4 + static_cast<uint64_t>(body_len) + 4;
+    if (!ensure_in_buf(offset, static_cast<size_t>(rec_sz)))
+        throw DbError("internal_error", "log record truncated");
+    const char* rec = ptr_at(offset);
     uint32_t end_magic = 0;
-    read_full(fd_, offset + 4 + body_len, reinterpret_cast<char*>(&end_magic), 4);
+    std::memcpy(&end_magic, rec + 4 + body_len, 4);
     if (end_magic != kEndMagic) throw DbError("internal_error", "bad record magic");
     RecordView rv;
     rv.offset = offset;
-    std::memcpy(&rv.txn, body.data(), 8);
-    std::memcpy(&rv.stmt, body.data() + 8, 4);
-    rv.type = static_cast<uint8_t>(body[12]);
-    rv.payload = body.substr(13);
+    std::memcpy(&rv.txn, rec + 4, 8);
+    std::memcpy(&rv.stmt, rec + 12, 4);
+    rv.type = static_cast<uint8_t>(rec[16]);
+    rv.payload = rec + 17;
+    rv.payload_len = body_len - 13;
     return rv;
 }
 
 void Log::close() {
     if (fd_ >= 0) {
         flush_buf();
+        rbuf_len_ = 0;
+        rbuf_off_ = 0;
+        rbuf_.clear();
         ::close(fd_);
         fd_ = -1;
     }
