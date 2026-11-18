@@ -136,6 +136,15 @@ bool table_too_big_for_fastscan(int64_t n, int dim) {
     return n > 500000 || (dim > 0 && n * static_cast<int64_t>(dim) * 4 > 512LL * 1024 * 1024);
 }
 
+// Start the packed snapshot (and SNAP_ROW WAL) at half the FastScan
+// cutoff so the remaining prefix is not written twice. 10k stays on
+// the in-memory FastScan path: 10000 * 256 * 4 = 10MiB.
+bool should_pack_snapshot(int64_t n, int dim) {
+    if (table_too_big_for_fastscan(n, dim)) return true;
+    if (n > 250000) return true;
+    return dim > 0 && n * static_cast<int64_t>(dim) * 4 > 256LL * 1024 * 1024;
+}
+
 int table_dim(const TableSchema& s) {
     return s.vector_index >= 0 ? static_cast<int>(s.cols[static_cast<size_t>(s.vector_index)].len) : 0;
 }
@@ -936,10 +945,9 @@ void Engine::abort_incremental_packed(Table& t) {
 }
 
 void Engine::maybe_incremental_packed(Table& t, const std::vector<Row>* new_rows) {
-    // Over-memory insert-only path: keep a packed snapshot growing after
-    // each COMMIT so shutdown does not re-read the full WAL while also
-    // writing a full snapshot. 10k / FastScan tables never enter here.
-    if (!table_too_big_for_fastscan(static_cast<int64_t>(t.latest.size()), table_dim(t.schema)))
+    // Start packing before FastScan turns off so later rows are not
+    // written both to the WAL and the snapshot. 10k never enters here.
+    if (!should_pack_snapshot(static_cast<int64_t>(t.latest.size()), table_dim(t.schema)))
         return;
     try {
         if (t.packed && t.packed->ready() && !t.packed->writing())
@@ -987,7 +995,7 @@ void Engine::maybe_incremental_after_txn() {
         auto it = tables_.find(tid);
         if (it == tables_.end()) continue;
         Table& t = it->second;
-        if (!table_too_big_for_fastscan(static_cast<int64_t>(t.latest.size()), table_dim(t.schema)))
+        if (!should_pack_snapshot(static_cast<int64_t>(t.latest.size()), table_dim(t.schema)))
             continue;
         try {
             if (t.packed && t.packed->writing()) {
@@ -1070,15 +1078,11 @@ void Engine::maybe_rotate_wal(bool force) {
     if (cur_txn_ != 0) return;
     bool any_ready = false;
     for (auto& [id, t] : tables_) {
-        if (!table_too_big_for_fastscan(static_cast<int64_t>(t.latest.size()), table_dim(t.schema)))
-            continue;
         if (t.packed && t.packed->ready()) any_ready = true;
     }
     if (!any_ready) return;
     if (!force && log_.size() < kRotateAfter) return;
     for (auto& [id, t] : tables_) {
-        if (!table_too_big_for_fastscan(static_cast<int64_t>(t.latest.size()), table_dim(t.schema)))
-            continue;
         if (t.packed && t.packed->writing()) {
             t.packed->set_reuse_key(log_.size(), committed_max_);
             t.packed->finish_build();
