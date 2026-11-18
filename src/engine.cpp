@@ -136,13 +136,14 @@ bool table_too_big_for_fastscan(int64_t n, int dim) {
     return n > 500000 || (dim > 0 && n * static_cast<int64_t>(dim) * 4 > 512LL * 1024 * 1024);
 }
 
-// Start the packed snapshot (and SNAP_ROW WAL) at half the FastScan
-// cutoff so the remaining prefix is not written twice. 10k stays on
-// the in-memory FastScan path: 10000 * 256 * 4 = 10MiB.
+// Start the packed snapshot (and SNAP_ROW WAL) just after the 10k
+// FastScan safety case. Only that prefix is written twice; later
+// rows are snap-primary, so a 200k table does not pay a second full
+// snapshot copy of every row.
 bool should_pack_snapshot(int64_t n, int dim) {
     if (table_too_big_for_fastscan(n, dim)) return true;
-    if (n > 250000) return true;
-    return dim > 0 && n * static_cast<int64_t>(dim) * 4 > 256LL * 1024 * 1024;
+    if (n > 10000) return true;
+    return false;
 }
 
 int table_dim(const TableSchema& s) {
@@ -1018,7 +1019,11 @@ void Engine::maybe_incremental_packed(Table& t, const std::vector<Row>* new_rows
         if (t.packed) t.packed->drop_cache();
         trim_heap();
         t.packed_epoch = cache_epoch_;
-        maybe_rotate_wal(false);
+        // Prefix may be well under 64MiB once packing starts at 10k.
+        // Force a checkpoint so kill recovery can open PACKED_BASE plus
+        // the SNAP_ROW tail; a stale header alone is not enough if the
+        // still-full prefix WAL has not been rotated.
+        maybe_rotate_wal(true);
     } catch (...) {
         // Snapshot is a cache; a failed incremental build must not fail INSERT.
         abort_incremental_packed(t);
