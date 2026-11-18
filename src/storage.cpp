@@ -802,6 +802,13 @@ void PackedScan::persist_header() {
     if (fd_ < 0) return;
     write_header(true);
     if (::fdatasync(fd_) != 0) throw DbError("internal_error", "packed scan fsync failed");
+    persist_at_ = size_ + kPersistEvery;
+}
+
+void PackedScan::maybe_persist_header(bool force) {
+    if (!writing_ || fd_ < 0) return;
+    if (!force && persist_at_ != 0 && size_ < persist_at_) return;
+    persist_header();
 }
 
 bool PackedScan::cover_row(uint64_t off) {

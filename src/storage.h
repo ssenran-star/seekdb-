@@ -266,6 +266,10 @@ public:
     // Persist size_/n_ after a committed WAL record so a later crash
     // can open the snapshot tail with a cursor.
     void persist_header();
+    // Rewrite the complete header at most every 8MiB (and on
+    // finish/rotate/shutdown). Recovery uses cover_row plus the
+    // on-disk tail, so a slightly stale header is safe.
+    void maybe_persist_header(bool force = false);
     // Extend size_ to cover a committed snap row that lives past the
     // last header (kill recovery).
     bool cover_row(uint64_t off);
@@ -337,11 +341,13 @@ private:
     bool direct_ = false;
     size_t wbuf_counted_ = 0;
     uint64_t data_end_ = 0;
+    uint64_t persist_at_ = 0;
     static constexpr uint32_t kMagic = 0x4E415350;  // PSAN
     static constexpr uint32_t kVersion = 1;
     static constexpr uint64_t kHeaderSize = 4096;
     static constexpr size_t kReadWindow = 2ull << 20;
     static constexpr size_t kWriteWindow = 8ull << 20;
+    static constexpr uint64_t kPersistEvery = 8ull << 20;
 };
 
 }  // namespace mvdb

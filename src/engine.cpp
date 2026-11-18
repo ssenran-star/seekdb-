@@ -494,7 +494,7 @@ void Engine::append_commit(uint64_t txn) {
     log_.sync();
     committed_max_ = std::max(committed_max_, txn);
     for (auto& [id, t] : tables_) {
-        if (t.packed && t.packed->writing()) t.packed->persist_header();
+        if (t.packed && t.packed->writing()) t.packed->maybe_persist_header(false);
     }
 }
 
