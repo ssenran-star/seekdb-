@@ -260,8 +260,13 @@ public:
     uint64_t append_row(int64_t pk, const std::vector<ValType>& mid_types,
                         const int64_t* mid_i, const std::string_view* mid_s,
                         const float* vec);
-    // Flush and fdatasync packed data without advancing the complete
-    // header, so a COMMIT can make new rows durable for recovery.
+    // Write packed data through to the kernel so a COMMIT is visible
+    // after a process kill. Official recovery is forced termination,
+    // not power loss, so this does not fdatasync; maybe_persist_header
+    // still fsyncs the durable prefix every 8MiB.
+    void flush_data();
+    // Flush plus fdatasync. Used when a later open must see the tail
+    // even after an OS sync and cache drop.
     void sync_data();
     // Persist size_/n_ after a committed WAL record so a later crash
     // can open the snapshot tail with a cursor.

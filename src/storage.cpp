@@ -535,17 +535,13 @@ bool PackedScan::ensure_in_buf(uint64_t off, size_t n) {
 }
 
 void PackedScan::evict_written() {
-    // After each 8MiB flush, fdatasync the snapshot and DONTNEED the
-    // durable prefix. The build only writes (it does not read back), so
-    // there is no need to keep a lagged cached window. fdatasync is used
-    // instead of sync_file_range because the latter can report success
-    // without actually cleaning pages on some container filesystems,
-    // after which DONTNEED would leave the snapshot in official M.
+    // DONTNEED the already-fsynced prefix. The caller must have
+    // fdatasync'd first; dropping dirty pages would leave official M
+    // charged and could hide an unsynced tail from a later reopen.
     if (fd_ < 0 || size_ <= kHeaderSize) return;
     constexpr uint64_t page = 4096;
     uint64_t evict_to = size_ & ~(page - 1);
     if (evict_to <= evict_pos_) return;
-    if (::fdatasync(fd_) != 0) throw DbError("internal_error", "packed scan fsync failed");
     ::posix_fadvise(fd_, 0, static_cast<off_t>(evict_to), POSIX_FADV_DONTNEED);
     evict_pos_ = evict_to;
     if (evict_to > drop_pos_) drop_pos_ = evict_to;
@@ -590,7 +586,6 @@ void PackedScan::flush_wbuf(bool pad_tail) {
     wbuf_counted_ = 0;
     wbuf_.clear();
     if (size_ > data_end_) data_end_ = size_;
-    evict_written();
 }
 
 bool PackedScan::try_open_existing(const std::string& path, uint32_t table_id, int dim,
@@ -765,10 +760,9 @@ uint64_t PackedScan::append_row(int64_t pk, const std::vector<ValType>& mid_type
     return off;
 }
 
-void PackedScan::sync_data() {
+void PackedScan::flush_data() {
     if (!writing_ || fd_ < 0) return;
     flush_wbuf(true);
-    if (::fdatasync(fd_) != 0) throw DbError("internal_error", "packed scan fsync failed");
     data_end_ = size_;
     // Restage the last partial page so the next append overwrites O_DIRECT
     // padding instead of leaving a hole in the logical stream.
@@ -792,6 +786,13 @@ void PackedScan::sync_data() {
     }
 }
 
+void PackedScan::sync_data() {
+    flush_data();
+    if (!writing_ || fd_ < 0) return;
+    if (::fdatasync(fd_) != 0) throw DbError("internal_error", "packed scan fsync failed");
+    evict_written();
+}
+
 void PackedScan::set_reuse_key(uint64_t log_size, uint64_t committed_max) {
     log_size_ = log_size;
     committed_max_ = committed_max;
@@ -803,6 +804,7 @@ void PackedScan::persist_header() {
     write_header(true);
     if (::fdatasync(fd_) != 0) throw DbError("internal_error", "packed scan fsync failed");
     persist_at_ = size_ + kPersistEvery;
+    evict_written();
 }
 
 void PackedScan::maybe_persist_header(bool force) {

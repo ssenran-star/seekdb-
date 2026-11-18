@@ -489,7 +489,7 @@ uint64_t Engine::statement_txn(bool& is_autocommit) {
 
 void Engine::append_commit(uint64_t txn) {
     for (auto& [id, t] : tables_) {
-        if (t.packed && t.packed->writing()) t.packed->sync_data();
+        if (t.packed && t.packed->writing()) t.packed->flush_data();
     }
     log_.append(REC_COMMIT, txn, 0, "");
     log_.sync();
