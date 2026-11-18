@@ -18,7 +18,8 @@ enum RecType : uint8_t {
     REC_DELETE = 5,
     REC_COMMIT = 6,
     REC_ABORT = 7,
-    REC_PACKED_BASE = 8
+    REC_PACKED_BASE = 8,
+    REC_SNAP_ROW = 9
 };
 
 class ByteBuf {
@@ -256,9 +257,18 @@ public:
     bool try_open_checkpoint(const std::string& path, uint32_t table_id, int dim);
     void start_build(const std::string& path, uint32_t table_id, int dim,
                      uint64_t log_size, uint64_t committed_max);
-    void append_row(int64_t pk, const std::vector<ValType>& mid_types,
-                    const int64_t* mid_i, const std::string_view* mid_s,
-                    const float* vec);
+    uint64_t append_row(int64_t pk, const std::vector<ValType>& mid_types,
+                        const int64_t* mid_i, const std::string_view* mid_s,
+                        const float* vec);
+    // Flush and fdatasync packed data without advancing the complete
+    // header, so a COMMIT can make new rows durable for recovery.
+    void sync_data();
+    // Persist size_/n_ after a committed WAL record so a later crash
+    // can open the snapshot tail with a cursor.
+    void persist_header();
+    // Extend size_ to cover a committed snap row that lives past the
+    // last header (kill recovery).
+    bool cover_row(uint64_t off);
     void set_reuse_key(uint64_t log_size, uint64_t committed_max);
     void update_reuse_key(uint64_t log_size, uint64_t committed_max);
     void finish_build();
@@ -300,6 +310,7 @@ public:
 
 private:
     void flush_wbuf(bool pad_tail = false);
+    uint64_t readable_end() const;
     void evict_written();
     bool ensure_in_buf(uint64_t off, size_t n);
     const char* ptr_at(uint64_t off) const { return rbuf_.p + (off - rbuf_off_); }
@@ -325,6 +336,7 @@ private:
     bool writing_ = false;
     bool direct_ = false;
     size_t wbuf_counted_ = 0;
+    uint64_t data_end_ = 0;
     static constexpr uint32_t kMagic = 0x4E415350;  // PSAN
     static constexpr uint32_t kVersion = 1;
     static constexpr uint64_t kHeaderSize = 4096;

@@ -146,9 +146,9 @@ constexpr uint64_t kSnapFlag = 1ull << 63;
 constexpr uint64_t kSnapOffMask = ~kSnapFlag;
 constexpr uint64_t kRotateAfter = 64ull << 20;
 
-void append_packed_row(PackedScan& packed, const TableSchema& s, const Row& row,
-                       const std::vector<ValType>& mid_types,
-                       const std::vector<int>& mid_cols) {
+uint64_t append_packed_row(PackedScan& packed, const TableSchema& s, const Row& row,
+                           const std::vector<ValType>& mid_types,
+                           const std::vector<int>& mid_cols) {
     int64_t pk = row[static_cast<size_t>(s.pk_index)].i;
     std::vector<int64_t> mid_i(mid_types.size());
     std::vector<std::string_view> mid_s(mid_types.size());
@@ -163,7 +163,7 @@ void append_packed_row(PackedScan& packed, const TableSchema& s, const Row& row,
         const Vector& vv = row[static_cast<size_t>(s.vector_index)].v;
         if (!vv.empty()) vec = vv.data();
     }
-    packed.append_row(pk, mid_types, mid_i.data(), mid_s.data(), vec);
+    return packed.append_row(pk, mid_types, mid_i.data(), mid_s.data(), vec);
 }
 
 void trim_heap() {
@@ -257,7 +257,8 @@ void Engine::open(const std::string& data_dir) {
             }
             case REC_INSERT:
             case REC_UPDATE:
-            case REC_DELETE: {
+            case REC_DELETE:
+            case REC_SNAP_ROW: {
                 uint32_t tid = b.get_u32();
                 int64_t pk = b.get_i64();
                 auto it = tables_.find(tid);
@@ -313,7 +314,8 @@ void Engine::open(const std::string& data_dir) {
     }
     if (!packed_bases.empty()) {
         log_.scan([&](const RecordView& rv) {
-            if (rv.type != REC_INSERT && rv.type != REC_UPDATE && rv.type != REC_DELETE) return;
+            if (rv.type != REC_INSERT && rv.type != REC_UPDATE &&
+                rv.type != REC_DELETE && rv.type != REC_SNAP_ROW) return;
             ByteBuf b;
             b.wrap(rv.payload, rv.payload_len);
             if (rv.payload_len < 4) return;
@@ -322,9 +324,15 @@ void Engine::open(const std::string& data_dir) {
             if (pit == packed_bases.end()) return;
             if (aborted_.count(pit->second.txn) || pit->second.txn > committed_max_) return;
             if (rv.offset <= pit->second.offset) return;
+            if (aborted_.count(rv.txn) || rv.txn > committed_max_) return;
             int64_t pk = b.get_i64();
             auto it = tables_.find(tid);
-            if (it != tables_.end()) it->second.latest.set(pk, rv.offset);
+            if (it == tables_.end()) return;
+            it->second.latest.set(pk, rv.offset);
+            if (rv.type == REC_SNAP_ROW && it->second.packed) {
+                b.get_u64();
+                it->second.packed->cover_row(b.get_u64());
+            }
         }, false);
     }
     for (auto& [id, t] : tables_)
@@ -365,6 +373,8 @@ bool Engine::load_row(Table& t, int64_t pk, Row& out) {
             continue;
         }
         if (visible(rv.txn, rv.stmt)) {
+            if (rv.type == REC_SNAP_ROW)
+                return row_from_packed(t, b.get_u64(), out);
             b.read_row_into(out, t.schema.cols.size());
             return true;
         }
@@ -398,6 +408,11 @@ const Row* Engine::resolve_row(Table& t, int64_t pk) {
             continue;
         }
         if (visible(rv.txn, rv.stmt)) {
+            if (rv.type == REC_SNAP_ROW) {
+                Row parsed;
+                if (!row_from_packed(t, b.get_u64(), parsed)) return nullptr;
+                return cache_put(t.schema.table_id, pk, head, std::move(parsed));
+            }
             Row parsed = b.get_row(t.schema.cols.size());
             return cache_put(t.schema.table_id, pk, head, std::move(parsed));
         }
@@ -463,9 +478,15 @@ uint64_t Engine::statement_txn(bool& is_autocommit) {
 }
 
 void Engine::append_commit(uint64_t txn) {
+    for (auto& [id, t] : tables_) {
+        if (t.packed && t.packed->writing()) t.packed->sync_data();
+    }
     log_.append(REC_COMMIT, txn, 0, "");
     log_.sync();
     committed_max_ = std::max(committed_max_, txn);
+    for (auto& [id, t] : tables_) {
+        if (t.packed && t.packed->writing()) t.packed->persist_header();
+    }
 }
 
 void Engine::rebuild_ann(Table& t) {
@@ -567,6 +588,12 @@ ExecResult Engine::exec_insert(const Statement& st) {
     bool is_auto = false;
     uint64_t txn = statement_txn(is_auto);
     uint32_t stmt = ++cur_stmt_;
+    const bool snap_wal = t.packed && (t.packed->ready() || t.packed->writing());
+    if (snap_wal && t.packed->ready() && !t.packed->writing())
+        t.packed->resume_append();
+    std::vector<ValType> mid_types;
+    std::vector<int> mid_cols;
+    if (snap_wal) mid_layout(s, mid_types, mid_cols);
     ByteBuf ins;
     for (auto& row : staged) {
         int64_t pk = row[s.pk_index].i;
@@ -576,8 +603,15 @@ ExecResult Engine::exec_insert(const Statement& st) {
         ins.put_u32(s.table_id);
         ins.put_i64(pk);
         ins.put_u64(prev);
-        ins.put_row(row);
-        uint64_t off = log_.append(REC_INSERT, txn, stmt, ins.data);
+        uint64_t off;
+        if (snap_wal) {
+            uint64_t snap_off = append_packed_row(*t.packed, s, row, mid_types, mid_cols);
+            ins.put_u64(snap_off);
+            off = log_.append(REC_SNAP_ROW, txn, stmt, ins.data);
+        } else {
+            ins.put_row(row);
+            off = log_.append(REC_INSERT, txn, stmt, ins.data);
+        }
         t.latest.set(pk, off);
         if (t.ann && s.vector_index >= 0) t.ann->insert(pk, row[s.vector_index].v);
         // Over-memory tables are served by packed scan, not row_cache_.
@@ -591,7 +625,8 @@ ExecResult Engine::exec_insert(const Statement& st) {
     }
     if (is_auto) {
         append_commit(txn);
-        maybe_incremental_packed(t, &staged);
+        // Rows already in the snapshot must not be appended again.
+        maybe_incremental_packed(t, snap_wal ? nullptr : &staged);
     }
     ExecResult r;
     r.affected = static_cast<int64_t>(staged.size());
@@ -619,8 +654,14 @@ ExecResult Engine::exec_update(const Statement& st) {
     bool is_auto = false;
     uint64_t txn = statement_txn(is_auto);
     uint32_t stmt = ++cur_stmt_;
-    for (auto& [pk, old] : matches) {
-        Row row = old;
+    const bool snap_wal = t.packed && (t.packed->ready() || t.packed->writing());
+    if (snap_wal && t.packed->ready() && !t.packed->writing())
+        t.packed->resume_append();
+    std::vector<ValType> mid_types;
+    std::vector<int> mid_cols;
+    if (snap_wal) mid_layout(s, mid_types, mid_cols);
+    for (auto& [pk, oldrow] : matches) {
+        Row row = oldrow;
         for (auto& [idx, val] : sets) row[idx] = val;
         uint64_t prev = 0;
         t.latest.get(pk, prev);
@@ -628,8 +669,15 @@ ExecResult Engine::exec_update(const Statement& st) {
         b.put_u32(s.table_id);
         b.put_i64(pk);
         b.put_u64(prev);
-        b.put_row(row);
-        uint64_t off = log_.append(REC_UPDATE, txn, stmt, b.data);
+        uint64_t off;
+        if (snap_wal) {
+            uint64_t snap_off = append_packed_row(*t.packed, s, row, mid_types, mid_cols);
+            b.put_u64(snap_off);
+            off = log_.append(REC_SNAP_ROW, txn, stmt, b.data);
+        } else {
+            b.put_row(row);
+            off = log_.append(REC_UPDATE, txn, stmt, b.data);
+        }
         t.latest.set(pk, off);
         if (t.ann && s.vector_index >= 0) {
             t.ann->erase(pk);
@@ -642,7 +690,8 @@ ExecResult Engine::exec_update(const Statement& st) {
         if (!is_auto) txn_writes_.emplace_back(s.table_id, pk);
     }
     if (is_auto) append_commit(txn);
-    if (t.packed && t.packed->writing()) abort_incremental_packed(t);
+    if (snap_wal) maybe_rotate_wal(false);
+    else if (t.packed && t.packed->writing()) abort_incremental_packed(t);
     ExecResult r;
     r.affected = static_cast<int64_t>(matches.size());
     return r;
@@ -677,7 +726,8 @@ ExecResult Engine::exec_delete(const Statement& st) {
         if (!is_auto) txn_writes_.emplace_back(s.table_id, pk);
     }
     if (is_auto) append_commit(txn);
-    if (t.packed && t.packed->writing()) abort_incremental_packed(t);
+    if (t.packed && t.packed->ready()) maybe_rotate_wal(false);
+    else if (t.packed && t.packed->writing()) abort_incremental_packed(t);
     ExecResult r;
     r.affected = static_cast<int64_t>(matches.size());
     return r;
@@ -783,6 +833,29 @@ bool Engine::decode_visible_scan(Table& t, int64_t pk,
             continue;
         }
         if (visible(rv.txn, rv.stmt)) {
+            if (rv.type == REC_SNAP_ROW) {
+                uint64_t snap_off = b.get_u64();
+                PackedScan::RowView prv;
+                int vdim = table_dim(t.schema);
+                if (!t.packed || !t.packed->read_view_at(snap_off, mid_types, vdim, prv))
+                    return false;
+                size_t ii = 0, ss = 0, pos = 0;
+                for (ValType typ : mid_types) {
+                    if (typ == ValType::BIGINT) {
+                        std::memcpy(&mid_i[ii++], prv.mid + pos, 8);
+                        pos += 8;
+                    } else {
+                        uint32_t n = 0;
+                        std::memcpy(&n, prv.mid + pos, 4);
+                        pos += 4;
+                        mid_s[ss++] = std::string_view(prv.mid + pos, n);
+                        pos += n;
+                    }
+                }
+                vec = prv.vec;
+                dim = vdim;
+                return true;
+            }
             vec = nullptr;
             dim = 0;
             size_t ii = 0, ss = 0;
@@ -923,6 +996,11 @@ void Engine::maybe_incremental_after_txn() {
                 mid_layout(t.schema, mid_types, mid_cols);
                 for (auto& [id, pk] : txn_writes_) {
                     if (id != tid) continue;
+                    uint64_t off = 0;
+                    if (t.latest.get(pk, off) && !(off & kSnapFlag)) {
+                        RecordView rv = log_.read_at(off);
+                        if (rv.type == REC_SNAP_ROW) continue;
+                    }
                     const Row* row = resolve_row(t, pk);
                     if (row) append_packed_row(*t.packed, t.schema, *row, mid_types, mid_cols);
                 }
@@ -994,16 +1072,20 @@ void Engine::maybe_rotate_wal(bool force) {
     for (auto& [id, t] : tables_) {
         if (!table_too_big_for_fastscan(static_cast<int64_t>(t.latest.size()), table_dim(t.schema)))
             continue;
+        if (t.packed && t.packed->ready()) any_ready = true;
+    }
+    if (!any_ready) return;
+    if (!force && log_.size() < kRotateAfter) return;
+    for (auto& [id, t] : tables_) {
+        if (!table_too_big_for_fastscan(static_cast<int64_t>(t.latest.size()), table_dim(t.schema)))
+            continue;
         if (t.packed && t.packed->writing()) {
             t.packed->set_reuse_key(log_.size(), committed_max_);
             t.packed->finish_build();
             sync_dir(data_dir_);
             t.packed_epoch = cache_epoch_;
         }
-        if (t.packed && t.packed->ready()) any_ready = true;
     }
-    if (!any_ready) return;
-    if (!force && log_.size() < kRotateAfter) return;
 
     release_insert_cache();
     log_.drop_cache();
