@@ -82,6 +82,23 @@ public:
         else it->second = off;
     }
 
+
+    void erase(int64_t pk) {
+        if (has_base_) {
+            const int64_t idx = pk - base_;
+            if (idx >= 0 && idx < static_cast<int64_t>(slots_.size()) &&
+                slots_[static_cast<size_t>(idx)] != 0) {
+                slots_[static_cast<size_t>(idx)] = 0;
+                --n_;
+            }
+        }
+        auto it = overflow_.find(pk);
+        if (it != overflow_.end()) {
+            overflow_.erase(it);
+            --n_;
+        }
+    }
+
     size_t size() const { return n_; }
     bool empty() const { return n_ == 0; }
     void clear() {
@@ -203,7 +220,9 @@ private:
                              int64_t* mid_i, std::string_view* mid_s,
                              const float*& vec, int& dim);
     void ensure_packed_scan(Table& t);
-    void populate_packed_from_latest(Table& t);
+    void populate_packed_from_latest(Table& t, std::vector<std::pair<int64_t, uint64_t>>* snap_heads);
+    void apply_snap_heads(Table& t, const std::vector<std::pair<int64_t, uint64_t>>& snap_heads);
+    void promote_latest_to_snap(Table& t);
     void maybe_incremental_packed(Table& t, const std::vector<Row>* new_rows);
     void abort_incremental_packed(Table& t);
     void maybe_incremental_after_txn();

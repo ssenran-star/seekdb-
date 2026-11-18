@@ -604,6 +604,8 @@ ExecResult Engine::exec_insert(const Statement& st) {
     std::vector<int> mid_cols;
     if (snap_wal) mid_layout(s, mid_types, mid_cols);
     ByteBuf ins;
+    std::vector<std::pair<int64_t, uint64_t>> snap_heads;
+    if (snap_wal) snap_heads.reserve(staged.size());
     for (auto& row : staged) {
         int64_t pk = row[s.pk_index].i;
         uint64_t prev = 0;
@@ -617,6 +619,7 @@ ExecResult Engine::exec_insert(const Statement& st) {
             uint64_t snap_off = append_packed_row(*t.packed, s, row, mid_types, mid_cols);
             ins.put_u64(snap_off);
             off = log_.append(REC_SNAP_ROW, txn, stmt, ins.data);
+            snap_heads.emplace_back(pk, snap_off);
         } else {
             ins.put_row(row);
             off = log_.append(REC_INSERT, txn, stmt, ins.data);
@@ -634,6 +637,7 @@ ExecResult Engine::exec_insert(const Statement& st) {
     }
     if (is_auto) {
         append_commit(txn);
+        if (!snap_heads.empty()) apply_snap_heads(t, snap_heads);
         // Rows already in the snapshot must not be appended again.
         maybe_incremental_packed(t, snap_wal ? nullptr : &staged);
     }
@@ -669,6 +673,8 @@ ExecResult Engine::exec_update(const Statement& st) {
     std::vector<ValType> mid_types;
     std::vector<int> mid_cols;
     if (snap_wal) mid_layout(s, mid_types, mid_cols);
+    std::vector<std::pair<int64_t, uint64_t>> snap_heads;
+    if (snap_wal) snap_heads.reserve(matches.size());
     for (auto& [pk, oldrow] : matches) {
         Row row = oldrow;
         for (auto& [idx, val] : sets) row[idx] = val;
@@ -683,6 +689,7 @@ ExecResult Engine::exec_update(const Statement& st) {
             uint64_t snap_off = append_packed_row(*t.packed, s, row, mid_types, mid_cols);
             b.put_u64(snap_off);
             off = log_.append(REC_SNAP_ROW, txn, stmt, b.data);
+            snap_heads.emplace_back(pk, snap_off);
         } else {
             b.put_row(row);
             off = log_.append(REC_UPDATE, txn, stmt, b.data);
@@ -698,7 +705,10 @@ ExecResult Engine::exec_update(const Statement& st) {
             cache_put(s.table_id, pk, off, std::move(row));
         if (!is_auto) txn_writes_.emplace_back(s.table_id, pk);
     }
-    if (is_auto) append_commit(txn);
+    if (is_auto) {
+        append_commit(txn);
+        if (!snap_heads.empty()) apply_snap_heads(t, snap_heads);
+    }
     if (snap_wal) maybe_rotate_wal(false);
     else if (t.packed && t.packed->writing()) abort_incremental_packed(t);
     ExecResult r;
@@ -905,7 +915,33 @@ bool Engine::decode_visible_scan(Table& t, int64_t pk,
     return false;
 }
 
-void Engine::populate_packed_from_latest(Table& t) {
+void Engine::apply_snap_heads(Table& t, const std::vector<std::pair<int64_t, uint64_t>>& snap_heads) {
+    for (const auto& [pk, snap_off] : snap_heads)
+        t.latest.set(pk, kSnapFlag | snap_off);
+}
+
+void Engine::promote_latest_to_snap(Table& t) {
+    // Remap compact WAL SNAP_ROW / DELETE heads without rereading the
+    // packed snapshot. Must run before the old WAL is unlinked.
+    std::vector<int64_t> drop;
+    t.latest.for_each([&](int64_t pk, uint64_t off) {
+        if (off & kSnapFlag) return;
+        RecordView rv = log_.read_at(off);
+        if (rv.type == REC_SNAP_ROW) {
+            ByteBuf b;
+            b.wrap(rv.payload, rv.payload_len);
+            b.get_u32();
+            b.get_i64();
+            b.get_u64();
+            t.latest.set(pk, kSnapFlag | b.get_u64());
+        } else if (rv.type == REC_DELETE) {
+            drop.push_back(pk);
+        }
+    });
+    for (int64_t pk : drop) t.latest.erase(pk);
+}
+
+void Engine::populate_packed_from_latest(Table& t, std::vector<std::pair<int64_t, uint64_t>>* snap_heads) {
     std::vector<ValType> mid_types;
     std::vector<int> mid_cols;
     mid_layout(t.schema, mid_types, mid_cols);
@@ -931,7 +967,8 @@ void Engine::populate_packed_from_latest(Table& t) {
         int vdim = 0;
         if (!decode_visible_scan(t, pk, mid_types, mid_cols, mid_i.data(), mid_s.data(), vec, vdim))
             return;
-        t.packed->append_row(pk, mid_types, mid_i.data(), mid_s.data(), vec);
+        uint64_t snap_off = t.packed->append_row(pk, mid_types, mid_i.data(), mid_s.data(), vec);
+        if (snap_heads) snap_heads->emplace_back(pk, snap_off);
         if (rv.offset - last_drop >= kDropEvery) {
             log_.drop_upto(rv.offset);
             last_drop = rv.offset;
@@ -970,9 +1007,12 @@ void Engine::maybe_incremental_packed(Table& t, const std::vector<Row>* new_rows
         log_.drop_cache();
         log_.advise_noreadahead();
         t.packed->start_build(path, t.schema.table_id, dim, log_.size(), committed_max_);
-        populate_packed_from_latest(t);
+        std::vector<std::pair<int64_t, uint64_t>> heads;
+        heads.reserve(t.latest.size());
+        populate_packed_from_latest(t, &heads);
         t.packed->set_reuse_key(log_.size(), committed_max_);
         t.packed->finish_build();
+        apply_snap_heads(t, heads);
         sync_dir(data_dir_);
         log_.drop_cache();
         if (t.packed) t.packed->drop_cache();
@@ -1010,7 +1050,10 @@ void Engine::maybe_incremental_after_txn() {
                         if (rv.type == REC_SNAP_ROW) continue;
                     }
                     const Row* row = resolve_row(t, pk);
-                    if (row) append_packed_row(*t.packed, t.schema, *row, mid_types, mid_cols);
+                    if (row) {
+                        uint64_t snap_off = append_packed_row(*t.packed, t.schema, *row, mid_types, mid_cols);
+                        t.latest.set(pk, kSnapFlag | snap_off);
+                    }
                 }
             } else {
                 maybe_incremental_packed(t, nullptr);
@@ -1089,6 +1132,7 @@ void Engine::maybe_rotate_wal(bool force) {
             sync_dir(data_dir_);
             t.packed_epoch = cache_epoch_;
         }
+        if (t.packed && t.packed->ready()) promote_latest_to_snap(t);
     }
 
     release_insert_cache();
@@ -1136,7 +1180,10 @@ void Engine::maybe_rotate_wal(bool force) {
         for (auto& [id, t] : tables_) {
             t.create_txn = txn;
             if (!t.schema.ann_index_name.empty()) t.index_txn = txn;
-            if (t.packed && t.packed->ready()) load_packed_as_latest(t);
+            // LatestMap already points at packed offsets (or dropped
+            // DELETE keys). Skipping load_packed_as_latest avoids a
+            // full snapshot reread on every rotate, including shutdown.
+            if (t.packed && t.packed->ready()) t.packed_epoch = cache_epoch_;
         }
         log_.drop_cache();
         trim_heap();
@@ -1183,8 +1230,11 @@ void Engine::ensure_packed_scan(Table& t) {
     log_.drop_cache();
     log_.advise_noreadahead();
     t.packed->start_build(path, t.schema.table_id, dim, log_.size(), committed_max_);
-    populate_packed_from_latest(t);
+    std::vector<std::pair<int64_t, uint64_t>> heads;
+    heads.reserve(t.latest.size());
+    populate_packed_from_latest(t, &heads);
     t.packed->finish_build();
+    apply_snap_heads(t, heads);
     sync_dir(data_dir_);
     log_.drop_cache();
     if (t.packed) t.packed->drop_cache();

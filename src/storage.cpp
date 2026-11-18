@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
@@ -705,6 +706,8 @@ void PackedScan::start_build(const std::string& path, uint32_t table_id, int dim
     fd_ = open_maybe_direct(path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644, &direct);
     if (fd_ < 0) throw DbError("internal_error", "cannot open packed scan file");
     direct_ = direct;
+    if (std::getenv("MVDB_LOG_IO"))
+        std::fprintf(stderr, "packed_open path=%s direct=%d\n", path.c_str(), (int)direct_);
     table_id_ = table_id;
     dim_ = dim;
     n_ = 0;
