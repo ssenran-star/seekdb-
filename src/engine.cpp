@@ -140,6 +140,12 @@ int table_dim(const TableSchema& s) {
     return s.vector_index >= 0 ? static_cast<int>(s.cols[static_cast<size_t>(s.vector_index)].len) : 0;
 }
 
+// Packed-snapshot offsets in LatestMap. WAL offsets start at 8 and never
+// have the high bit set, so this is a disjoint address space.
+constexpr uint64_t kSnapFlag = 1ull << 63;
+constexpr uint64_t kSnapOffMask = ~kSnapFlag;
+constexpr uint64_t kRotateAfter = 64ull << 20;
+
 void append_packed_row(PackedScan& packed, const TableSchema& s, const Row& row,
                        const std::vector<ValType>& mid_types,
                        const std::vector<int>& mid_cols) {
@@ -208,6 +214,8 @@ void Engine::open(const std::string& data_dir) {
         bool commit = false;
     };
     std::unordered_map<uint64_t, TxnInfo> txns;
+    struct PackedBase { uint32_t tid = 0; uint64_t offset = 0; uint64_t txn = 0; };
+    std::unordered_map<uint32_t, PackedBase> packed_bases;
     log_.scan([&](const RecordView& rv) {
         next_txn_ = std::max(next_txn_, rv.txn + 1);
         ByteBuf b;
@@ -264,6 +272,12 @@ void Engine::open(const std::string& data_dir) {
             case REC_ABORT:
                 aborted_.insert(rv.txn);
                 break;
+            case REC_PACKED_BASE: {
+                uint32_t tid = b.get_u32();
+                packed_bases[tid] = PackedBase{tid, rv.offset, rv.txn};
+                txns[rv.txn].data = true;
+                break;
+            }
             default:
                 break;
         }
@@ -281,6 +295,37 @@ void Engine::open(const std::string& data_dir) {
             (aborted_.count(t.index_txn) || t.index_txn > committed_max_))
             t.schema.ann_index_name.clear();
         ++it;
+    }
+    // A committed packed-base record means the WAL was rotated. Rebuild
+    // LatestMap from the snapshot, then apply WAL records written after it.
+    for (auto& [tid, pb] : packed_bases) {
+        auto it = tables_.find(tid);
+        if (it == tables_.end()) continue;
+        if (aborted_.count(pb.txn) || pb.txn > committed_max_) continue;
+        Table& t = it->second;
+        t.latest.clear();
+        int dim = table_dim(t.schema);
+        if (!t.packed) t.packed = std::make_unique<PackedScan>();
+        const std::string path = data_dir_ + "/mvdb.scan." + std::to_string(tid);
+        if (!t.packed->try_open_checkpoint(path, tid, dim))
+            throw DbError("internal_error", "packed snapshot missing after checkpoint");
+        load_packed_as_latest(t);
+    }
+    if (!packed_bases.empty()) {
+        log_.scan([&](const RecordView& rv) {
+            if (rv.type != REC_INSERT && rv.type != REC_UPDATE && rv.type != REC_DELETE) return;
+            ByteBuf b;
+            b.wrap(rv.payload, rv.payload_len);
+            if (rv.payload_len < 4) return;
+            uint32_t tid = b.get_u32();
+            auto pit = packed_bases.find(tid);
+            if (pit == packed_bases.end()) return;
+            if (aborted_.count(pit->second.txn) || pit->second.txn > committed_max_) return;
+            if (rv.offset <= pit->second.offset) return;
+            int64_t pk = b.get_i64();
+            auto it = tables_.find(tid);
+            if (it != tables_.end()) it->second.latest.set(pk, rv.offset);
+        }, false);
     }
     for (auto& [id, t] : tables_)
         if (!t.schema.ann_index_name.empty()) rebuild_ann(t);
@@ -306,6 +351,7 @@ bool Engine::visible(uint64_t txn, uint32_t stmt) const {
 bool Engine::load_row(Table& t, int64_t pk, Row& out) {
     uint64_t off = 0;
     if (!t.latest.get(pk, off)) return false;
+    if (off & kSnapFlag) return row_from_packed(t, off & kSnapOffMask, out);
     while (off != 0) {
         RecordView rv = log_.read_at(off);
         ByteBuf b;
@@ -333,6 +379,11 @@ const Row* Engine::resolve_row(Table& t, int64_t pk) {
     auto& tc = row_cache_[t.schema.table_id];
     auto cit = tc.find(pk);
     if (cit != tc.end() && cit->second.offset == head) return &cit->second.row;
+    if (head & kSnapFlag) {
+        Row parsed;
+        if (!row_from_packed(t, head & kSnapOffMask, parsed)) return nullptr;
+        return cache_put(t.schema.table_id, pk, head, std::move(parsed));
+    }
     uint64_t off = head;
     while (off != 0) {
         RecordView rv = log_.read_at(off);
@@ -697,6 +748,28 @@ bool Engine::decode_visible_scan(Table& t, int64_t pk,
     (void)mid_cols;
     uint64_t off = 0;
     if (!t.latest.get(pk, off)) return false;
+    if (off & kSnapFlag) {
+        PackedScan::RowView rv;
+        int vdim = table_dim(t.schema);
+        if (!t.packed || !t.packed->read_view_at(off & kSnapOffMask, mid_types, vdim, rv))
+            return false;
+        size_t ii = 0, ss = 0, pos = 0;
+        for (ValType typ : mid_types) {
+            if (typ == ValType::BIGINT) {
+                std::memcpy(&mid_i[ii++], rv.mid + pos, 8);
+                pos += 8;
+            } else {
+                uint32_t n = 0;
+                std::memcpy(&n, rv.mid + pos, 4);
+                pos += 4;
+                mid_s[ss++] = std::string_view(rv.mid + pos, n);
+                pos += n;
+            }
+        }
+        vec = rv.vec;
+        dim = vdim;
+        return true;
+    }
     while (off != 0) {
         RecordView rv = log_.read_at(off);
         ByteBuf b;
@@ -796,6 +869,8 @@ void Engine::maybe_incremental_packed(Table& t, const std::vector<Row>* new_rows
     if (!table_too_big_for_fastscan(static_cast<int64_t>(t.latest.size()), table_dim(t.schema)))
         return;
     try {
+        if (t.packed && t.packed->ready() && !t.packed->writing())
+            t.packed->resume_append();
         if (t.packed && t.packed->writing()) {
             if (new_rows && !new_rows->empty()) {
                 std::vector<ValType> mid_types;
@@ -804,6 +879,7 @@ void Engine::maybe_incremental_packed(Table& t, const std::vector<Row>* new_rows
                 for (const Row& row : *new_rows)
                     append_packed_row(*t.packed, t.schema, row, mid_types, mid_cols);
             }
+            maybe_rotate_wal(false);
             return;
         }
         int dim = table_dim(t.schema);
@@ -814,9 +890,14 @@ void Engine::maybe_incremental_packed(Table& t, const std::vector<Row>* new_rows
         log_.advise_noreadahead();
         t.packed->start_build(path, t.schema.table_id, dim, log_.size(), committed_max_);
         populate_packed_from_latest(t);
+        t.packed->set_reuse_key(log_.size(), committed_max_);
+        t.packed->finish_build();
+        sync_dir(data_dir_);
         log_.drop_cache();
         if (t.packed) t.packed->drop_cache();
         trim_heap();
+        t.packed_epoch = cache_epoch_;
+        maybe_rotate_wal(false);
     } catch (...) {
         // Snapshot is a cache; a failed incremental build must not fail INSERT.
         abort_incremental_packed(t);
@@ -852,6 +933,132 @@ void Engine::maybe_incremental_after_txn() {
             abort_incremental_packed(t);
         }
     }
+    maybe_rotate_wal(false);
+}
+
+bool Engine::row_from_packed(Table& t, uint64_t snap_off, Row& out) {
+    if (!t.packed) return false;
+    std::vector<ValType> mid_types;
+    std::vector<int> mid_cols;
+    mid_layout(t.schema, mid_types, mid_cols);
+    PackedScan::RowView rv;
+    int dim = table_dim(t.schema);
+    if (!t.packed->read_view_at(snap_off, mid_types, dim, rv)) return false;
+    out.assign(t.schema.cols.size(), {});
+    if (t.schema.pk_index >= 0) {
+        out[static_cast<size_t>(t.schema.pk_index)].type = ValType::BIGINT;
+        out[static_cast<size_t>(t.schema.pk_index)].i = rv.pk;
+    }
+    size_t pos = 0;
+    for (size_t k = 0; k < mid_cols.size(); ++k) {
+        const size_t idx = static_cast<size_t>(mid_cols[k]);
+        if (mid_types[k] == ValType::BIGINT) {
+            int64_t v = 0;
+            std::memcpy(&v, rv.mid + pos, 8);
+            pos += 8;
+            out[idx].type = ValType::BIGINT;
+            out[idx].i = v;
+        } else {
+            uint32_t n = 0;
+            std::memcpy(&n, rv.mid + pos, 4);
+            pos += 4;
+            out[idx].type = ValType::VARCHAR;
+            out[idx].s.assign(rv.mid + pos, n);
+            pos += n;
+        }
+    }
+    if (t.schema.vector_index >= 0 && rv.vec) {
+        const size_t vidx = static_cast<size_t>(t.schema.vector_index);
+        out[vidx].type = ValType::VECTOR;
+        out[vidx].v.assign(rv.vec, rv.vec + dim);
+    }
+    return true;
+}
+
+void Engine::load_packed_as_latest(Table& t) {
+    t.latest.clear();
+    if (!t.packed || !t.packed->ready()) return;
+    std::vector<ValType> mid_types;
+    std::vector<int> mid_cols;
+    mid_layout(t.schema, mid_types, mid_cols);
+    int dim = table_dim(t.schema);
+    auto cur = t.packed->cursor(mid_types, dim);
+    while (cur.next())
+        t.latest.set(cur.row().pk, kSnapFlag | cur.row_offset());
+    t.packed_epoch = cache_epoch_;
+}
+
+void Engine::maybe_rotate_wal(bool force) {
+    if (cur_txn_ != 0) return;
+    bool any_ready = false;
+    for (auto& [id, t] : tables_) {
+        if (!table_too_big_for_fastscan(static_cast<int64_t>(t.latest.size()), table_dim(t.schema)))
+            continue;
+        if (t.packed && t.packed->writing()) {
+            t.packed->set_reuse_key(log_.size(), committed_max_);
+            t.packed->finish_build();
+            sync_dir(data_dir_);
+            t.packed_epoch = cache_epoch_;
+        }
+        if (t.packed && t.packed->ready()) any_ready = true;
+    }
+    if (!any_ready) return;
+    if (!force && log_.size() < kRotateAfter) return;
+
+    release_insert_cache();
+    log_.drop_cache();
+    try {
+        log_.park_as_old();
+        uint64_t txn = next_txn_++;
+        uint32_t stmt = 1;
+        for (auto& [id, t] : tables_) {
+            ByteBuf b;
+            b.put_u32(t.schema.table_id);
+            b.put_str(t.schema.name);
+            b.put_u32(static_cast<uint32_t>(t.schema.cols.size()));
+            for (auto& c : t.schema.cols) {
+                b.put_str(c.name);
+                b.put_u8(static_cast<uint8_t>(c.type));
+                b.put_u32(c.len);
+            }
+            b.put_u32(static_cast<uint32_t>(t.schema.pk_index));
+            b.put_u32(static_cast<uint32_t>(t.schema.vector_index));
+            log_.append(REC_CREATE_TABLE, txn, stmt++, b.data);
+            if (!t.schema.ann_index_name.empty()) {
+                ByteBuf ib;
+                ib.put_u32(t.schema.table_id);
+                ib.put_str(t.schema.ann_index_name);
+                const std::string& vcol = t.schema.cols[static_cast<size_t>(t.schema.vector_index)].name;
+                ib.put_str(vcol);
+                log_.append(REC_CREATE_INDEX, txn, stmt++, ib.data);
+            }
+        }
+        for (auto& [id, t] : tables_) {
+            if (!(t.packed && t.packed->ready())) continue;
+            ByteBuf p;
+            p.put_u32(t.schema.table_id);
+            log_.append(REC_PACKED_BASE, txn, stmt++, p.data);
+        }
+        append_commit(txn);
+        sync_dir(data_dir_);
+        for (auto& [id, t] : tables_) {
+            if (!(t.packed && t.packed->ready())) continue;
+            t.packed->update_reuse_key(log_.size(), committed_max_);
+        }
+        sync_dir(data_dir_);
+        log_.drop_parked_old();
+        for (auto& [id, t] : tables_) {
+            t.create_txn = txn;
+            if (!t.schema.ann_index_name.empty()) t.index_txn = txn;
+            if (t.packed && t.packed->ready()) load_packed_as_latest(t);
+        }
+        log_.drop_cache();
+        trim_heap();
+    } catch (...) {
+        // Mid-rotate failure: put the complete old WAL back so this process
+        // (and the next open) still has every row.
+        try { log_.rollback_parked(); } catch (...) {}
+    }
 }
 
 void Engine::ensure_packed_scan(Table& t) {
@@ -868,6 +1075,12 @@ void Engine::ensure_packed_scan(Table& t) {
         log_.drop_cache();
         if (t.packed) t.packed->drop_cache();
         trim_heap();
+        t.packed_epoch = cache_epoch_;
+        return;
+    }
+    // A durable checkpoint (including one left by WAL rotate) must not go
+    // through start_build, which unlinks the snapshot.
+    if (t.packed && t.packed->ready()) {
         t.packed_epoch = cache_epoch_;
         return;
     }
@@ -1860,6 +2073,12 @@ void Engine::shutdown() {
                 if (t.packed) t.packed->close();
             }
         }
+    }
+    try {
+        maybe_rotate_wal(true);
+    } catch (...) {
+    }
+    for (auto& [id, t] : tables_) {
         if (t.packed) t.packed->close();
     }
     log_.drop_cache();

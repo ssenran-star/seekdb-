@@ -75,6 +75,15 @@ Log::~Log() { close(); }
 
 void Log::open(const std::string& dir) {
     path_ = dir + "/mvdb.log";
+    // An unfinished rotate leaves mvdb.log.old. Roll back to the complete
+    // previous WAL before opening, so a crash mid-checkpoint cannot lose data.
+    const std::string oldp = path_ + ".old";
+    if (::access(oldp.c_str(), F_OK) == 0) {
+        ::unlink(path_.c_str());
+        if (::rename(oldp.c_str(), path_.c_str()) != 0)
+            throw DbError("internal_error", "cannot restore parked log");
+        sync_dir(dir);
+    }
     bool fresh = ::access(path_.c_str(), F_OK) != 0;
     fd_ = ::open(path_.c_str(), O_RDWR | O_CREAT, 0644);
     if (fd_ < 0) throw DbError("internal_error", "cannot open log file");
@@ -291,6 +300,71 @@ void Log::close() {
     }
 }
 
+static std::string log_dir_of(const std::string& path) {
+    auto sl = path.find_last_of('/');
+    if (sl == std::string::npos) return ".";
+    return path.substr(0, sl);
+}
+
+void Log::park_as_old() {
+    if (fd_ < 0) throw DbError("internal_error", "log not open");
+    flush_buf();
+    if (::fdatasync(fd_) != 0) throw DbError("internal_error", "fsync failed");
+    ::posix_fadvise(fd_, 0, 0, POSIX_FADV_DONTNEED);
+    rbuf_len_ = 0;
+    rbuf_off_ = 0;
+    rbuf_.clear();
+    wbuf_.clear();
+    unsynced_ = 0;
+    ::close(fd_);
+    fd_ = -1;
+    const std::string oldp = path_ + ".old";
+    ::unlink(oldp.c_str());
+    if (::rename(path_.c_str(), oldp.c_str()) != 0)
+        throw DbError("internal_error", "cannot park log");
+    const std::string dir = log_dir_of(path_);
+    sync_dir(dir);
+    fd_ = ::open(path_.c_str(), O_RDWR | O_CREAT | O_EXCL, 0644);
+    if (fd_ < 0) throw DbError("internal_error", "cannot open new log");
+    char header[kHeaderSize];
+    std::memcpy(header, &kFileMagic, 4);
+    std::memcpy(header + 4, &kVersion, 4);
+    write_full(fd_, header, kHeaderSize);
+    if (::fdatasync(fd_) != 0) throw DbError("internal_error", "fsync failed");
+    sync_dir(dir);
+    size_ = kHeaderSize;
+    drop_pos_ = 0;
+}
+
+void Log::drop_parked_old() {
+    if (path_.empty()) return;
+    ::unlink((path_ + ".old").c_str());
+    sync_dir(log_dir_of(path_));
+}
+
+void Log::rollback_parked() {
+    if (path_.empty()) return;
+    const std::string oldp = path_ + ".old";
+    if (::access(oldp.c_str(), F_OK) != 0) return;
+    if (fd_ >= 0) {
+        ::close(fd_);
+        fd_ = -1;
+    }
+    ::unlink(path_.c_str());
+    if (::rename(oldp.c_str(), path_.c_str()) != 0)
+        throw DbError("internal_error", "cannot restore parked log");
+    sync_dir(log_dir_of(path_));
+    fd_ = ::open(path_.c_str(), O_RDWR, 0644);
+    if (fd_ < 0) throw DbError("internal_error", "cannot reopen log");
+    off_t end = ::lseek(fd_, 0, SEEK_END);
+    size_ = end < 0 ? 0 : static_cast<uint64_t>(end);
+    drop_pos_ = 0;
+    unsynced_ = 0;
+    wbuf_.clear();
+    rbuf_len_ = 0;
+    rbuf_off_ = 0;
+}
+
 AlignedBuf::~AlignedBuf() { reset(); }
 
 void AlignedBuf::reset() {
@@ -360,6 +434,7 @@ void PackedScan::close() {
     ready_ = false;
     writing_ = false;
     direct_ = false;
+    wbuf_counted_ = 0;
 }
 
 void PackedScan::write_header(bool complete) {
@@ -482,13 +557,17 @@ void PackedScan::flush_wbuf(bool pad_tail) {
                 std::memset(wbuf_.p + logical, 0, padded - logical);
             }
             write_full(fd_, wbuf_.p, padded);
-            size_ += logical;
+            size_t already = wbuf_counted_ < logical ? wbuf_counted_ : logical;
+            size_ += logical - already;
+            wbuf_counted_ = 0;
             wbuf_.clear();
         } else {
             size_t aligned = wbuf_.len & ~(page - 1);
             if (aligned == 0) return;
             write_full(fd_, wbuf_.p, aligned);
-            size_ += aligned;
+            size_t already = wbuf_counted_ < aligned ? wbuf_counted_ : aligned;
+            size_ += aligned - already;
+            wbuf_counted_ = wbuf_counted_ > already ? wbuf_counted_ - already : 0;
             size_t tail = wbuf_.len - aligned;
             if (tail) std::memmove(wbuf_.p, wbuf_.p + aligned, tail);
             wbuf_.len = tail;
@@ -497,8 +576,10 @@ void PackedScan::flush_wbuf(bool pad_tail) {
         if (evict_pos_ > drop_pos_) drop_pos_ = evict_pos_;
         return;
     }
+    size_t already = wbuf_counted_ < wbuf_.len ? wbuf_counted_ : wbuf_.len;
     write_full(fd_, wbuf_.p, wbuf_.len);
-    size_ += wbuf_.len;
+    size_ += wbuf_.len - already;
+    wbuf_counted_ = 0;
     wbuf_.clear();
     evict_written();
 }
@@ -553,6 +634,58 @@ bool PackedScan::try_open_existing(const std::string& path, uint32_t table_id, i
     return true;
 }
 
+bool PackedScan::try_open_checkpoint(const std::string& path, uint32_t table_id, int dim) {
+    // After a durable WAL rotate the reuse key is the new tiny log, not the
+    // current size at query restart. Trust a complete snapshot whose table
+    // and dim match; recovery applies later WAL records on top.
+    close();
+    path_ = path;
+    bool direct = false;
+    int fd = open_maybe_direct(path.c_str(), O_RDWR, 0644, &direct);
+    if (fd < 0) return false;
+    fd_ = fd;
+    direct_ = direct;
+    alignas(4096) char hdr[kHeaderSize];
+    try {
+        read_full(fd_, 0, hdr, kHeaderSize);
+    } catch (...) {
+        close();
+        return false;
+    }
+    uint32_t magic = 0, ver = 0, tid = 0, dim_u = 0, complete = 0;
+    uint64_t n = 0, lsz = 0, cmax = 0, logical = 0;
+    std::memcpy(&magic, hdr + 0, 4);
+    std::memcpy(&ver, hdr + 4, 4);
+    std::memcpy(&tid, hdr + 8, 4);
+    std::memcpy(&dim_u, hdr + 12, 4);
+    std::memcpy(&n, hdr + 16, 8);
+    std::memcpy(&lsz, hdr + 24, 8);
+    std::memcpy(&cmax, hdr + 32, 8);
+    std::memcpy(&complete, hdr + 40, 4);
+    std::memcpy(&logical, hdr + 48, 8);
+    off_t end = ::lseek(fd_, 0, SEEK_END);
+    if (end < static_cast<off_t>(kHeaderSize) ||
+        magic != kMagic || ver != kVersion || complete != 1 ||
+        tid != table_id || static_cast<int>(dim_u) != dim) {
+        close();
+        return false;
+    }
+    table_id_ = tid;
+    dim_ = dim;
+    n_ = n;
+    log_size_ = lsz;
+    committed_max_ = cmax;
+    uint64_t file_end = static_cast<uint64_t>(end);
+    if (logical >= kHeaderSize && logical <= file_end) size_ = logical;
+    else size_ = file_end;
+    drop_pos_ = 0;
+    evict_pos_ = 0;
+    ready_ = true;
+    writing_ = false;
+    wbuf_counted_ = 0;
+    return true;
+}
+
 void PackedScan::start_build(const std::string& path, uint32_t table_id, int dim,
                              uint64_t log_size, uint64_t committed_max) {
     close();
@@ -572,6 +705,7 @@ void PackedScan::start_build(const std::string& path, uint32_t table_id, int dim
     evict_pos_ = 0;
     ready_ = false;
     writing_ = true;
+    wbuf_counted_ = 0;
     wbuf_.clear();
     wbuf_.ensure(kWriteWindow);
     write_header(false);
@@ -620,6 +754,14 @@ void PackedScan::set_reuse_key(uint64_t log_size, uint64_t committed_max) {
     committed_max_ = committed_max;
 }
 
+void PackedScan::update_reuse_key(uint64_t log_size, uint64_t committed_max) {
+    log_size_ = log_size;
+    committed_max_ = committed_max;
+    if (fd_ < 0) return;
+    write_header(true);
+    if (::fdatasync(fd_) != 0) throw DbError("internal_error", "packed scan fsync failed");
+}
+
 void PackedScan::abort_build() {
     std::string p = path_;
     writing_ = false;
@@ -637,8 +779,37 @@ void PackedScan::finish_build() {
     drop_pos_ = 0;
     drop_cache();
     wbuf_.reset();
+    wbuf_counted_ = 0;
     writing_ = false;
     ready_ = true;
+}
+
+void PackedScan::resume_append() {
+    if (writing_) return;
+    if (fd_ < 0 || !ready_) throw DbError("internal_error", "packed scan not resumable");
+    writing_ = true;
+    // Keep ready_ so queries can still use the durable prefix. finish_build
+    // rewrites the header after the next rotate or shutdown.
+    invalidate_read_buf();
+    wbuf_.clear();
+    wbuf_counted_ = 0;
+    wbuf_.ensure(kWriteWindow);
+    constexpr size_t page = 4096;
+    if (direct_) {
+        uint64_t aligned = size_ & ~(uint64_t(page) - 1);
+        size_t lead = static_cast<size_t>(size_ - aligned);
+        if (lead) {
+            wbuf_.ensure(page);
+            read_full(fd_, aligned, wbuf_.p, page);
+            wbuf_.len = lead;
+            wbuf_counted_ = lead;
+        }
+        if (::lseek(fd_, static_cast<off_t>(aligned), SEEK_SET) < 0)
+            throw DbError("internal_error", "cannot seek packed scan file");
+    } else {
+        if (::lseek(fd_, static_cast<off_t>(size_), SEEK_SET) < 0)
+            throw DbError("internal_error", "cannot seek packed scan file");
+    }
 }
 
 PackedScan::Cursor PackedScan::cursor(const std::vector<ValType>& mid_types, int dim) {
@@ -653,21 +824,21 @@ PackedScan::Cursor PackedScan::cursor(const std::vector<ValType>& mid_types, int
     return c;
 }
 
-bool PackedScan::Cursor::next() {
-    if (!s_ || off_ >= end_) return false;
-    if (end_ - off_ < 4) return false;
-    if (!s_->ensure_in_buf(off_, 4)) return false;
+bool PackedScan::read_view_at(uint64_t off, const std::vector<ValType>& mid_types, int dim, RowView& row) {
+    if (off < kHeaderSize || off >= size_) return false;
+    if (size_ - off < 4) return false;
+    if (!ensure_in_buf(off, 4)) return false;
     uint32_t body = 0;
-    std::memcpy(&body, s_->ptr_at(off_), 4);
+    std::memcpy(&body, ptr_at(off), 4);
     uint64_t rec = 4ull + body;
-    if (body < 8 || off_ + rec > end_) return false;
-    if (!s_->ensure_in_buf(off_, static_cast<size_t>(rec))) return false;
-    const char* p = s_->ptr_at(off_);
-    std::memcpy(&row_.pk, p + 4, 8);
+    if (body < 8 || off + rec > size_) return false;
+    if (!ensure_in_buf(off, static_cast<size_t>(rec))) return false;
+    const char* p = ptr_at(off);
+    std::memcpy(&row.pk, p + 4, 8);
     const char* mid = p + 12;
     size_t mid_need = 0;
-    for (ValType t : mid_types_) {
-        if (t == ValType::BIGINT) mid_need += 8;
+    for (ValType typ : mid_types) {
+        if (typ == ValType::BIGINT) mid_need += 8;
         else {
             if (12 + mid_need + 4 > rec) return false;
             uint32_t n = 0;
@@ -675,12 +846,19 @@ bool PackedScan::Cursor::next() {
             mid_need += 4 + n;
         }
     }
-    size_t vec_bytes = dim_ > 0 ? static_cast<size_t>(dim_) * 4 : 0;
+    size_t vec_bytes = dim > 0 ? static_cast<size_t>(dim) * 4 : 0;
     if (12 + mid_need + vec_bytes > rec) return false;
-    row_.mid = mid;
-    row_.mid_len = mid_need;
-    row_.vec = vec_bytes ? reinterpret_cast<const float*>(mid + mid_need) : nullptr;
-    off_ += rec;
+    row.mid = mid;
+    row.mid_len = mid_need;
+    row.vec = vec_bytes ? reinterpret_cast<const float*>(mid + mid_need) : nullptr;
+    return true;
+}
+
+bool PackedScan::Cursor::next() {
+    if (!s_ || off_ >= end_) return false;
+    if (!s_->read_view_at(off_, mid_types_, dim_, row_)) return false;
+    row_off_ = off_;
+    off_ += 4ull + 8ull + row_.mid_len + (dim_ > 0 ? static_cast<size_t>(dim_) * 4 : 0);
     return true;
 }
 

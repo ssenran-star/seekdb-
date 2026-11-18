@@ -17,7 +17,8 @@ enum RecType : uint8_t {
     REC_UPDATE = 4,
     REC_DELETE = 5,
     REC_COMMIT = 6,
-    REC_ABORT = 7
+    REC_ABORT = 7,
+    REC_PACKED_BASE = 8
 };
 
 class ByteBuf {
@@ -192,6 +193,13 @@ public:
     RecordView read_at(uint64_t offset);
     void close();
     uint64_t size() const { return size_; }
+    // Finish a durable packed snapshot, then replace the large WAL with a
+    // tiny new log and unlink the old inode so official memory.peak cannot
+    // keep charging both copies in page cache. open() rolls back if .old
+    // is still present (unfinished rotate).
+    void park_as_old();
+    void drop_parked_old();
+    void rollback_parked();
 
 private:
     void flush_buf();
@@ -245,14 +253,17 @@ public:
 
     bool try_open_existing(const std::string& path, uint32_t table_id, int dim,
                            uint64_t log_size, uint64_t committed_max);
+    bool try_open_checkpoint(const std::string& path, uint32_t table_id, int dim);
     void start_build(const std::string& path, uint32_t table_id, int dim,
                      uint64_t log_size, uint64_t committed_max);
     void append_row(int64_t pk, const std::vector<ValType>& mid_types,
                     const int64_t* mid_i, const std::string_view* mid_s,
                     const float* vec);
     void set_reuse_key(uint64_t log_size, uint64_t committed_max);
+    void update_reuse_key(uint64_t log_size, uint64_t committed_max);
     void finish_build();
     void abort_build();
+    void resume_append();
     bool writing() const { return writing_; }
 
     struct RowView {
@@ -266,6 +277,7 @@ public:
     public:
         bool next();
         const RowView& row() const { return row_; }
+        uint64_t row_offset() const { return row_off_; }
 
     private:
         friend class PackedScan;
@@ -275,8 +287,10 @@ public:
         uint64_t off_ = 0;
         uint64_t end_ = 0;
         RowView row_;
+        uint64_t row_off_ = 0;
     };
     Cursor cursor(const std::vector<ValType>& mid_types, int dim);
+    bool read_view_at(uint64_t off, const std::vector<ValType>& mid_types, int dim, RowView& row);
 
     void drop_cache();
     void close();
@@ -310,6 +324,7 @@ private:
     bool ready_ = false;
     bool writing_ = false;
     bool direct_ = false;
+    size_t wbuf_counted_ = 0;
     static constexpr uint32_t kMagic = 0x4E415350;  // PSAN
     static constexpr uint32_t kVersion = 1;
     static constexpr uint64_t kHeaderSize = 4096;

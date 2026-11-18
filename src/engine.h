@@ -84,6 +84,13 @@ public:
 
     size_t size() const { return n_; }
     bool empty() const { return n_ == 0; }
+    void clear() {
+        slots_.clear();
+        overflow_.clear();
+        n_ = 0;
+        has_base_ = false;
+        base_ = 0;
+    }
 
     template <typename Fn>
     void for_each(Fn&& fn) const {
@@ -200,6 +207,9 @@ private:
     void maybe_incremental_packed(Table& t, const std::vector<Row>* new_rows);
     void abort_incremental_packed(Table& t);
     void maybe_incremental_after_txn();
+    void maybe_rotate_wal(bool force = false);
+    void load_packed_as_latest(Table& t);
+    bool row_from_packed(Table& t, uint64_t snap_off, Row& out);
     struct Cand { float dsq; int64_t pk; int32_t idx; };
     std::vector<Cand> cands_;
 
